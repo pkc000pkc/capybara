@@ -1,0 +1,255 @@
+{
+  "version": 1,
+  "package": "project-files",
+  "runner": {
+    "type": "stdio",
+    "entry": "runner.mjs"
+  },
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file from the project workspace with an optional line range.",
+      "permissions": ["filesystem:read"],
+      "sideEffects": "none",
+      "replay": "safe",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_name": { "type": "string", "minLength": 1 },
+          "start_line": { "type": "integer", "minimum": 1 },
+          "end_line": { "type": "integer", "minimum": 1 },
+          "include_line_numbers": { "type": "boolean" }
+        },
+        "required": ["file_name"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["path", "start_line", "end_line", "lines", "content"],
+        "properties": {
+          "path": { "type": "string" },
+          "start_line": { "type": "integer" },
+          "end_line": { "type": "integer" },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["line", "text"],
+              "properties": { "line": { "type": "integer" }, "text": { "type": "string" } },
+              "additionalProperties": false
+            }
+          },
+          "content": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "examples": [{ "file_name": ".capybara/config.json", "include_line_numbers": false }]
+    },
+    {
+      "name": "list_files",
+      "description": "List files and directories inside the project workspace.",
+      "permissions": ["filesystem:read"],
+      "sideEffects": "none",
+      "replay": "safe",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "recursive": { "type": "boolean" },
+          "max_entries": { "type": "integer", "minimum": 1, "maximum": 5000 }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["path", "entries", "truncated"],
+        "properties": {
+          "path": { "type": "string" },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["path", "type"],
+              "properties": {
+                "path": { "type": "string" },
+                "type": { "type": "string", "enum": ["file", "directory"] }
+              },
+              "additionalProperties": false
+            }
+          },
+          "truncated": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "examples": [{ "path": ".", "recursive": false }]
+    },
+    {
+      "name": "search_file",
+      "description": "Search project file names or text content and return matching paths and lines.",
+      "permissions": ["filesystem:read"],
+      "sideEffects": "none",
+      "replay": "safe",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "minLength": 1 },
+          "dir": { "type": "string" },
+          "mode": { "type": "string", "enum": ["filename", "content"] },
+          "max_matches": { "type": "integer", "minimum": 1, "maximum": 1000 },
+          "case_sensitive": { "type": "boolean" }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["query", "mode", "matches", "truncated"],
+        "properties": {
+          "query": { "type": "string" },
+          "mode": { "type": "string", "enum": ["filename", "content"] },
+          "matches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["path"],
+              "properties": {
+                "path": { "type": "string" },
+                "line": { "type": "integer" },
+                "text": { "type": "string" },
+                "before": { "$ref": "#/$defs/lines" },
+                "after": { "$ref": "#/$defs/lines" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "truncated": { "type": "boolean" }
+        },
+        "$defs": {
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["line", "text"],
+              "properties": { "line": { "type": "integer" }, "text": { "type": "string" } },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "examples": [{ "query": "main_template", "mode": "content" }]
+    },
+    {
+      "name": "search_in_file",
+      "description": "Search one project text file and return matching lines with surrounding context.",
+      "permissions": ["filesystem:read"],
+      "sideEffects": "none",
+      "replay": "safe",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_name": { "type": "string", "minLength": 1 },
+          "query": { "type": "string", "minLength": 1 },
+          "context_lines": { "type": "integer", "minimum": 0, "maximum": 20 },
+          "max_matches": { "type": "integer", "minimum": 1, "maximum": 1000 },
+          "case_sensitive": { "type": "boolean" }
+        },
+        "required": ["file_name", "query"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["path", "query", "matches"],
+        "properties": {
+          "path": { "type": "string" },
+          "query": { "type": "string" },
+          "matches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["line", "text", "before", "after"],
+              "properties": {
+                "line": { "type": "integer" },
+                "text": { "type": "string" },
+                "before": { "$ref": "#/$defs/lines" },
+                "after": { "$ref": "#/$defs/lines" }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "$defs": {
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["line", "text"],
+              "properties": { "line": { "type": "integer" }, "text": { "type": "string" } },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "examples": [{ "file_name": ".capybara/config.json", "query": "max_tool_rounds" }]
+    },
+    {
+      "name": "write_file",
+      "description": "Create or update one project text file using content, append, or a unified diff patch.",
+      "permissions": ["filesystem:write"],
+      "sideEffects": "workspace-write",
+      "replay": "confirm",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_name": { "type": "string", "minLength": 1 },
+          "content": { "type": "string" },
+          "mode": { "type": "string", "enum": ["overwrite", "append"] },
+          "patch": { "type": "string", "minLength": 1 }
+        },
+        "required": ["file_name"],
+        "oneOf": [
+          { "required": ["content"], "not": { "required": ["patch"] } },
+          { "required": ["patch"], "not": { "required": ["content"] } }
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["path", "mode", "bytes"],
+        "properties": {
+          "path": { "type": "string" },
+          "mode": { "type": "string", "enum": ["overwrite", "append", "patch"] },
+          "bytes": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      },
+      "examples": [{ "file_name": "notes/example.txt", "content": "Example\n", "mode": "overwrite" }]
+    },
+    {
+      "name": "delete_file",
+      "description": "Delete one file inside the project workspace.",
+      "permissions": ["filesystem:delete"],
+      "sideEffects": "workspace-write",
+      "replay": "confirm",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_name": { "type": "string", "minLength": 1 }
+        },
+        "required": ["file_name"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["path", "deleted"],
+        "properties": {
+          "path": { "type": "string" },
+          "deleted": { "const": true }
+        },
+        "additionalProperties": false
+      },
+      "examples": [{ "file_name": "notes/example.txt" }]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "example-qta",
+      "name": "Example QTA",
+      "storage": "huggingface",
+      "path": "datasets/test-data",
+      "version": 1,
+      "tags": [
+        "example",
+        "filesystem"
+      ],
+      "scoringPrompt": "Compare the actual response with the expected answer. Score factual coverage from 0 to 1, explain missing or incorrect claims, and verify that expected tools were called when tool evidence is available.",
+      "createdAt": "2026-08-01T00:00:00.000Z",
+      "updatedAt": "2026-08-01T00:00:00.000Z"
+    }
+  ]
+}

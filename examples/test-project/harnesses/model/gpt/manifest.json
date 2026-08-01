@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "package": "model-guidance",
+  "harnesses": [
+    {
+      "name": "gpt-runtime",
+      "description": "Runtime guidance for GPT 5 family models.",
+      "type": "model",
+      "entry": "runtime.j2",
+      "priority": 100,
+      "activation": {
+        "modelFamilies": ["gpt-5"]
+      },
+      "inputs": ["builtin.workspace_path"],
+      "requiredTools": [],
+      "examples": [
+        { "model": "gpt-5", "provider": "custom" }
+      ]
+    }
+  ]
+}

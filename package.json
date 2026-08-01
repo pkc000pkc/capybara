@@ -1,0 +1,27 @@
+{
+  "name": "capybara-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/backend",
+    "apps/frontend"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "concurrently --names backend,frontend --prefix-colors green,cyan \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "cross-env CAPYBARA_PROJECT_DIR=../../examples/test-project npm run dev --workspace=apps/backend",
+    "dev:frontend": "npm run dev --workspace=apps/frontend",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test:backend",
+    "test:backend": "cross-env CAPYBARA_TEST_PROJECT_DIR=../../examples/test-project CAPYBARA_PROJECT_DIR=../../examples/test-project npm run test --workspace=apps/backend",
+    "test:e2e": "npm run test:e2e --workspace=apps/frontend",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.0.0"
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.log
+**/.capybara/sessions.sqlite*
+**/.capybara/secrets.json
+**/.capybara/experiments.sqlite*
+**/.capybara/worktrees/

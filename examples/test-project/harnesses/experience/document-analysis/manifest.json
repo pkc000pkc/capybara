@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "package": "document-analysis",
+  "harnesses": [
+    {
+      "name": "version-summary",
+      "description": "Experience for deriving version features from project documents.",
+      "type": "experience",
+      "entry": "version-summary.j2",
+      "priority": 80,
+      "activation": {
+        "keywords": ["版本", "文档", "version"],
+        "tags": ["analysis", "release"]
+      },
+      "inputs": ["user_message"],
+      "requiredTools": [],
+      "examples": [
+        { "request": "查看文档并总结该版本开发的功能" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "package": "filesystem-guidance",
+  "harnesses": [
+    {
+      "name": "file-inspection",
+      "description": "Efficient and bounded file discovery and reading guidance.",
+      "type": "tool",
+      "entry": "inspection.j2",
+      "priority": 100,
+      "activation": {
+        "tools": ["read_file", "list_files", "search_file", "search_in_file"]
+      },
+      "inputs": ["builtin.workspace_path", "user_message"],
+      "requiredTools": [],
+      "examples": [
+        { "tools": ["read_file"], "request": "Read the selected document" }
+      ]
+    }
+  ]
+}

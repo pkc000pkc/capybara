@@ -1,0 +1,80 @@
+
+{{ builtin.prompts.agent_identity }}
+{{ builtin.prompts.execution_policy }}
+{{ builtin.prompts.resource_loading }}
+{{ builtin.prompts.completion_status }}
+{{ builtin.prompts.workspace_boundary }}
+
+Selected workspace root: {{ builtin.workspace_path }}
+
+{% set _resource_search_tool_description = builtin.prompts.resource_search_tool_description %}
+{% set _resource_load_tool_description = builtin.prompts.resource_load_tool_description %}
+{% set _workflow_execution_tool_description = builtin.prompts.workflow_execution_tool_description %}
+{% set _skill_reference_tool_description = builtin.prompts.skill_reference_tool_description %}
+{% set _skill_script_tool_description = builtin.prompts.skill_script_tool_description %}
+
+Agent: {{ agent.name }}
+Task: {{ task.title }}
+User: {{ user_message }}
+Optional: {% if optionalNote == null %}null{% else %}{{ optionalNote }}{% endif %}
+
+{% if context.compressed_history | length > 0 %}
+Earlier conversation summaries:
+{% for item in context.compressed_history %}
+--- compressed context {{ item.id }} ---
+{% for value in item.summary.user_requirements %}- Requirement: {{ value }}
+{% endfor %}
+{% for value in item.summary.decisions %}- Decision: {{ value }}
+{% endfor %}
+{% for value in item.summary.facts %}- Fact: {{ value }}
+{% endfor %}
+{% for value in item.summary.completed_work %}- Completed: {{ value }}
+{% endfor %}
+{% for value in item.summary.open_items %}- Open: {{ value }}
+{% endfor %}
+{% for value in item.summary.important_evidence %}- Evidence: {{ value }}
+{% endfor %}
+{% endfor %}
+{% endif %}
+
+{% if tools | length > 0 %}
+Loaded project tools:
+{% for tool in tools %}- {{ tool.name }}: {{ tool.description }}
+{% endfor %}
+{% else %}
+Loaded project tools: none
+{% endif %}
+
+{% if harnesses | length > 0 %}
+Loaded harnesses:
+{% for harness in harnesses %}
+--- harness: {{ harness.name }} ---
+{{ harness.content }}
+{% endfor %}
+{% else %}
+Loaded harnesses: none
+{% endif %}
+
+{% if skills.catalog | length > 0 %}
+Available skills:
+{% for skill in skills.catalog %}- {{ skill.id }}: {{ skill.description }}
+{% endfor %}
+{% else %}
+Available skills: none
+{% endif %}
+
+{% if skills.active | length > 0 %}
+Active skills:
+{% for skill in skills.active %}
+--- skill: {{ skill.name }} ---
+{{ skill.instructions }}
+Required tools: {% if skill.requiredTools | length > 0 %}{{ skill.requiredTools | join(', ') }}{% else %}none{% endif %}
+Registered scripts: {% if skill.scripts | length > 0 %}{{ skill.scripts | join(', ') }}{% else %}none{% endif %}
+{% for reference in skill.references %}
+--- skill reference: {{ reference.path }} ---
+{{ reference.content }}
+{% endfor %}
+{% endfor %}
+{% else %}
+Active skills: none
+{% endif %}

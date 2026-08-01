@@ -1,0 +1,40 @@
+{
+  "main_template": "main.j2",
+  "max_messages": 20,
+  "max_tool_rounds": 8,
+  "tool_timeout_ms": 15000,
+  "llm": {
+    "model": "gpt-5",
+    "base_url": "https://api.example.com/v1",
+    "protocol": "responses"
+  },
+  "context": {
+    "max_input_tokens": 16000,
+    "reserved_output_tokens": 2000,
+    "compression": {
+      "enabled": true,
+      "resource": "context/compression/manifest.json"
+    }
+  },
+  "tools": [
+    "tools/files/manifest.json"
+  ],
+  "skills": [
+    "skills/project-files"
+  ],
+  "harnesses": [
+    "harnesses/model/gpt/manifest.json",
+    "harnesses/tool/filesystem/manifest.json",
+    "harnesses/experience/document-analysis/manifest.json"
+  ],
+  "harness_policy": {
+    "experience_top_k": 3,
+    "experience_threshold": 0.35,
+    "experience_auto_attach": true
+  },
+  "tool_permissions": [
+    "filesystem:read",
+    "filesystem:write",
+    "filesystem:delete"
+  ]
+}

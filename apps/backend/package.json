@@ -1,0 +1,58 @@
+{
+  "name": "capybara",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#app": {
+      "development": "./src/app.ts",
+      "default": "./dist/app.js"
+    },
+    "#core/*": {
+      "development": "./src/core/*.ts",
+      "default": "./dist/core/*.js"
+    },
+    "#protocol/*": {
+      "development": "./src/protocol/*.ts",
+      "default": "./dist/protocol/*.js"
+    },
+    "#transport/*": {
+      "development": "./src/transport/*.ts",
+      "default": "./dist/transport/*.js"
+    },
+    "#util/*": {
+      "development": "./src/util/*.ts",
+      "default": "./dist/util/*.js"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch --conditions=development src/server.ts",
+    "demo:context": "tsx --conditions=development demo/context-builder-demo.ts",
+    "demo:llm": "tsx --conditions=development demo/llm.ts",
+    "demo:tool-loop": "tsx --conditions=development demo/tool-loop.ts",
+    "demo:document-summary": "tsx --conditions=development demo/document-summary-loop.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "test": "tsx --conditions=development --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^11.3.0",
+    "ajv": "^8.20.0",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.10.0",
+    "jsonata": "^2.2.2",
+    "nunjucks": "^3.2.4",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/nunjucks": "^3.2.6",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,35 @@
+# Dependencies and build output
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.next/
+**/.next/
+coverage/
+**/coverage/
+*.tsbuildinfo
+
+# Local environment and logs
+.env
+.env.*
+!.env.example
+*.log
+
+# Test output
+test-results/
+**/test-results/
+playwright-report/
+**/playwright-report/
+
+# Capybara runtime state and credentials
+**/.capybara/secrets.json
+**/.capybara/sessions.sqlite*
+**/.capybara/experiments.sqlite*
+**/.capybara/worktrees/
+**/.capybara/*.log
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
