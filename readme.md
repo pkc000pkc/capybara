@@ -85,4 +85,4 @@ Do not commit `.env`, `.capybara/secrets.json`, session databases, experiment da
 
 ## License
 
-The open-source license has not been selected yet. A license must be added before the first public release.
+Capybara is licensed under the [Apache License 2.0](LICENSE).

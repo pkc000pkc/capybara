@@ -55,7 +55,7 @@ WebSocket 协议承载 Loop 状态、上下文快照、工具调用、模型调�
 - `RuntimeLoop` 职责已经偏多，需要继续拆分平台控制面与 Agent 执行实现。
 - 前后端协议类型存在手工同步风险，公开协议和 SDK 尚未稳定。
 - Experiments、Memory 和 Context Compression 尚未形成完整闭环。
-- License、CI、版本发布和开源贡献流程仍需建设。
+- 版本发布和开源贡献流程仍需建设。
 
 ## 后续取舍原则
 
