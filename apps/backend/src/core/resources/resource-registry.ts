@@ -10,10 +10,15 @@ import {
   matchesToolHarness,
 } from '#core/harnesses/harness-registry'
 import type { RegisteredHarness } from '#core/harnesses/types'
+import { HookRegistry } from '#core/hooks/hook-registry'
+import { HookRunner } from '#core/hooks/hook-runner'
+import type { HookFixture, RegisteredHook } from '#core/hooks/types'
 import { ProjectResources } from '#core/project-resources'
 import type {
   HarnessResourceDefinition,
   HarnessResourceModule,
+  HookResourceDefinition,
+  HookResourceModule,
   ProjectResourceModule,
   ResourceCatalog,
   ResourceDiagnostic,
@@ -29,6 +34,7 @@ import type { RegisteredSkill } from '#core/skills/types'
 import { ToolDispatcher } from '#core/tools/tool-dispatcher'
 import { ToolRegistry } from '#core/tools/tool-registry'
 import type { RegisteredTool, ToolCallResult } from '#core/tools/types'
+import { createLlmService } from '#util/llm'
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -95,6 +101,7 @@ export class ProjectResourceRegistry {
     const tools = new ToolRegistry(this.projectDir)
     const skills = new SkillRegistry(this.projectDir)
     const harnesses = new HarnessRegistry(this.projectDir)
+    const hooks = new HookRegistry(this.projectDir)
     tools.load(settings.tools)
     skills.load(settings.skills)
     harnesses.load(settings.harnesses)
@@ -104,6 +111,7 @@ export class ProjectResourceRegistry {
       ...skills.list().map((skill) => this.skillModule(skill)),
       ...groupBy(harnesses.list(), (harness) => harness.manifestFile)
         .map((group) => this.harnessModule(group, toolNames)),
+      ...hooks.list().map((hook) => this.hookModule(hook)),
     ]
     return {
       revision: hash(...items.map((item) => `${item.id}:${item.revision}`)),
@@ -202,6 +210,22 @@ export class ProjectResourceRegistry {
     }
   }
 
+  async testHook(id: string, fixtureValue: unknown) {
+    const registry = new HookRegistry(this.projectDir)
+    const hook = registry.get(id)
+    if (!hook) throw new Error('Hook resource was not found')
+    if (!hook.loadable) throw new Error(hook.diagnostics[0]?.message ?? 'Hook is invalid')
+    const settings = this.resources.readSettings()
+    const fixture = this.hookFixture(fixtureValue)
+    const llm = createLlmService({
+      model: settings.llm.model,
+      baseUrl: settings.llm.base_url,
+      protocol: settings.llm.protocol,
+      apiKey: settings.llm.api_key,
+    })
+    return new HookRunner(llm).run(hook, fixture)
+  }
+
   saveSkill(id: string, value: unknown): SkillResourceModule {
     if (!isObject(value) || typeof value.content !== 'string' || typeof value.revision !== 'string') {
       throw new Error('skill update requires string content and revision')
@@ -243,6 +267,45 @@ export class ProjectResourceRegistry {
     )
     if (!saved) throw new Error('saved harness module was not found')
     return saved
+  }
+
+  createHook(value: unknown): HookResourceModule {
+    if (!isObject(value) || typeof value.name !== 'string' || typeof value.content !== 'string') {
+      throw new Error('Hook creation requires name and content')
+    }
+    const registry = new HookRegistry(this.projectDir)
+    const hook = registry.create(value.name, value.content)
+    return this.hookModule(hook)
+  }
+
+  saveHook(id: string, value: unknown): HookResourceModule {
+    if (!isObject(value) || typeof value.content !== 'string' || typeof value.revision !== 'string') {
+      throw new Error('Hook update requires string content and revision')
+    }
+    try {
+      const hook = new HookRegistry(this.projectDir).save(id, value.content, value.revision)
+      return this.hookModule(hook)
+    } catch (error) {
+      if (error instanceof Error && error.message === 'HOOK_REVISION_CONFLICT') {
+        throw new ResourceRevisionConflict('Hook changed on disk; reload before saving')
+      }
+      throw error
+    }
+  }
+
+  deleteHook(id: string, value: unknown): { deleted: true; id: string } {
+    if (!isObject(value) || typeof value.revision !== 'string') {
+      throw new Error('Hook deletion requires revision')
+    }
+    try {
+      new HookRegistry(this.projectDir).remove(id, value.revision)
+      return { deleted: true, id }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'HOOK_REVISION_CONFLICT') {
+        throw new ResourceRevisionConflict('Hook changed on disk; reload before deleting')
+      }
+      throw error
+    }
   }
 
   private toolModule(tools: RegisteredTool[]): ToolResourceModule {
@@ -383,6 +446,83 @@ export class ProjectResourceRegistry {
       content: fs.readFileSync(harness.entryFile, 'utf8'),
       entryRevision: fileHash(harness.entryFile),
       diagnostics,
+    }
+  }
+
+  private hookModule(hook: RegisteredHook): HookResourceModule {
+    const definition = this.hookDefinition(hook)
+    return {
+      id: `hook-module:${hook.id}`,
+      kind: 'hook',
+      package: 'project-hooks',
+      name: hook.name,
+      version: 1,
+      source: this.relative(hook.entryFile),
+      enabled: hook.enabled,
+      revision: hook.revision,
+      diagnostics: definition.diagnostics,
+      files: [this.file(hook.entryFile, 'entry', true)],
+      hooks: [definition],
+    }
+  }
+
+  private hookDefinition(hook: RegisteredHook): HookResourceDefinition {
+    return {
+      id: hook.id,
+      kind: 'hook',
+      name: hook.name,
+      description: hook.description,
+      entry: this.relative(hook.entryFile),
+      enabled: hook.enabled,
+      checkpoint: 'after_loop',
+      schedule: structuredClone(hook.schedule),
+      permissions: structuredClone(hook.permissions),
+      triggerSummary: hook.triggerSummary,
+      triggerInputs: [...hook.triggerInputs],
+      content: hook.source,
+      entryRevision: hook.revision,
+      diagnostics: hook.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+    }
+  }
+
+  private hookFixture(value: unknown): HookFixture {
+    if (!isObject(value)) throw new Error('Hook test fixture must be an object')
+    const statusValue = isObject(value.status) ? value.status : {}
+    const contextValue = isObject(statusValue.context) ? statusValue.context : {}
+    const runValue = isObject(statusValue.run) ? statusValue.run : {}
+    const variableTokensValue = isObject(statusValue.variableTokens)
+      ? statusValue.variableTokens
+      : {}
+    const changedVariables = Array.isArray(value.changedVariables)
+      ? value.changedVariables.filter((item): item is string => typeof item === 'string')
+      : []
+    const messages = Array.isArray(value.messages) ? value.messages : []
+    const variables = isObject(value.variables) ? value.variables : {}
+    return {
+      checkpoint: 'after_loop',
+      runId: typeof value.runId === 'string' ? value.runId : `test-${randomUUID()}`,
+      loopIteration: Number.isInteger(value.loopIteration) ? Number(value.loopIteration) : 1,
+      status: {
+        run: {
+          status: runValue.status === 'failed' || runValue.status === 'cancelled'
+            ? runValue.status
+            : 'completed',
+          ...(runValue.failure === undefined ? {} : { failure: runValue.failure as never }),
+        },
+        context: {
+          usedTokens: Number(contextValue.usedTokens ?? 0),
+          maxTokens: Number(contextValue.maxTokens ?? 16_000),
+          utilization: Number(contextValue.utilization ?? 0),
+        },
+        queueDepth: Number(statusValue.queueDepth ?? 0),
+        messageCount: Number(statusValue.messageCount ?? messages.length),
+        variableTokens: Object.fromEntries(
+          Object.entries(variableTokensValue).map(([key, tokens]) => [key, Number(tokens)]),
+        ),
+      },
+      changedVariables,
+      variables: variables as HookFixture['variables'],
+      messages: messages as HookFixture['messages'],
     }
   }
 

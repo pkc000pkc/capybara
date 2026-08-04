@@ -36,6 +36,9 @@ import {
 type EditorTab = "files" | "definitions";
 type EvaluationTab = "test" | "diagnostics";
 type TestStatus = "idle" | "running" | "success" | "error";
+type DefinitionResourceKind = Exclude<ResourceKind, "hook">;
+type DefinitionResourceModule = Exclude<ProjectResourceModule, { kind: "hook" }>;
+type DefinitionResource = Exclude<ResourceDefinition, { kind: "hook" }>;
 
 const DETAIL_DIVIDER_SIZE = 1;
 const EDITOR_MIN_HEIGHT = 180;
@@ -47,18 +50,18 @@ const TEST_PANE_DIVIDER_SIZE = 1;
 const TEST_PANE_MIN_WIDTH = 220;
 const TEST_INPUT_FALLBACK_WIDTH = 360;
 
-function definitions(resourceModule?: ProjectResourceModule): ResourceDefinition[] {
+function definitions(resourceModule?: DefinitionResourceModule): DefinitionResource[] {
   if (!resourceModule) return [];
   if (resourceModule.kind === "tool") return resourceModule.tools;
   return resourceModule.kind === "skill" ? resourceModule.skills : resourceModule.harnesses;
 }
 
-function initialTestInput(definition?: ResourceDefinition): string {
+function initialTestInput(definition?: DefinitionResource): string {
   if (definition?.kind === "skill") return "{}";
   return JSON.stringify(definition?.examples[0] ?? {}, null, 2);
 }
 
-function definitionText(definition: ResourceDefinition, draft: string): string {
+function definitionText(definition: DefinitionResource, draft: string): string {
   return definition.kind === "tool" ? JSON.stringify(definition, null, 2) : draft;
 }
 
@@ -71,12 +74,12 @@ export default function ResourceDefinitionWorkspace({
 }: {
   catalogWidth: number;
   divider: ReactNode;
-  kind: ResourceKind;
+  kind: DefinitionResourceKind;
   projectPath: string;
   runtimeTools?: RuntimeToolsState;
 }) {
   const { t } = useI18n();
-  const [modules, setModules] = useState<ProjectResourceModule[]>([]);
+  const [modules, setModules] = useState<DefinitionResourceModule[]>([]);
   const [selectedModuleId, setSelectedModuleId] = useState("");
   const [selectedDefinitionId, setSelectedDefinitionId] = useState("");
   const [query, setQuery] = useState("");
@@ -112,7 +115,9 @@ export default function ResourceDefinitionWorkspace({
     let active = true;
     void resourceApi.catalog(projectPath).then((catalog) => {
       if (!active) return;
-      const next = catalog.items.filter((item) => item.kind === kind);
+      const next = catalog.items.filter(
+        (item): item is DefinitionResourceModule => item.kind !== "hook" && item.kind === kind,
+      );
       const firstModule = next[0];
       const firstDefinition = definitions(firstModule)[0];
       const firstFile = firstModule?.files[0]?.path ?? "";
@@ -208,10 +213,12 @@ export default function ResourceDefinitionWorkspace({
     ? selectedModule.tools.filter((tool) => runtimeTools?.items.some((item) => item.id === tool.id)).length
     : 0;
   const mutatesProject = selectedDefinition?.kind === "tool" && selectedDefinition.permissions.some(
-    (permission) => permission === "filesystem:write" || permission === "filesystem:delete",
+    (permission) => permission === "filesystem:write"
+      || permission === "filesystem:delete"
+      || permission === "process:execute",
   );
 
-  const countLabel = (resourceModule: ProjectResourceModule) => resourceModule.kind === "tool"
+  const countLabel = (resourceModule: DefinitionResourceModule) => resourceModule.kind === "tool"
     ? t("resources.toolCount", { count: resourceModule.tools.length })
     : resourceModule.kind === "skill"
       ? t("resources.skillCount", { count: resourceModule.skills.length })
@@ -236,7 +243,7 @@ export default function ResourceDefinitionWorkspace({
     }
   };
 
-  const selectModule = (resourceModule: ProjectResourceModule) => {
+  const selectModule = (resourceModule: DefinitionResourceModule) => {
     const firstDefinition = definitions(resourceModule)[0];
     const firstFile = resourceModule.files[0]?.path ?? "";
     fileRequest.current += 1;
@@ -253,7 +260,7 @@ export default function ResourceDefinitionWorkspace({
     if (editorTab === "files" && firstFile) void openFile(firstFile);
   };
 
-  const selectDefinition = (definition: ResourceDefinition) => {
+  const selectDefinition = (definition: DefinitionResource) => {
     testRequest.current += 1;
     setSelectedDefinitionId(definition.id);
     setDraft(definition.kind === "tool" ? "" : definition.content);

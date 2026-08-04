@@ -32,6 +32,16 @@ type SessionRow = {
 // node:sqlite returns and parses state synchronously, so reject pathological
 // snapshots before they can block every runtime connection. Data stays intact.
 const MAX_RESTORABLE_STATE_BYTES = 16 * 1024 * 1024
+export const MAX_SESSION_NAME_LENGTH = 80
+
+function normalizedSessionName(name: string): string {
+  const normalized = name.trim()
+  if (!normalized) throw new Error('session name is required')
+  if (normalized.length > MAX_SESSION_NAME_LENGTH) {
+    throw new Error(`session name must not exceed ${MAX_SESSION_NAME_LENGTH} characters`)
+  }
+  return normalized
+}
 
 function summary(row: SessionRow): SessionSummary {
   return {
@@ -72,7 +82,9 @@ export class SessionStore {
   create(name?: string): SessionSummary {
     const createdAt = new Date().toISOString()
     const id = randomUUID()
-    const sessionName = name?.trim() || `Session ${this.count() + 1}`
+    const sessionName = name?.trim()
+      ? normalizedSessionName(name)
+      : `Session ${this.count() + 1}`
     this.database.prepare(`
       INSERT INTO sessions (id, name, created_at, updated_at)
       VALUES (?, ?, ?, ?)
@@ -123,6 +135,23 @@ export class SessionStore {
       WHERE id = ?
     `).run(JSON.stringify(state), requestCount, new Date().toISOString(), id)
     if (result.changes === 0) throw new Error(`session was not found: ${id}`)
+  }
+
+  rename(id: string, name: string): SessionSummary {
+    const updatedAt = new Date().toISOString()
+    const result = this.database.prepare(`
+      UPDATE sessions
+      SET name = ?, updated_at = ?
+      WHERE id = ?
+    `).run(normalizedSessionName(name), updatedAt, id)
+    if (result.changes === 0) throw new Error(`session was not found: ${id}`)
+
+    const row = this.database.prepare(`
+      SELECT id, name, state_json, created_at, updated_at, request_count,
+             COALESCE(LENGTH(state_json), 0) AS state_bytes
+      FROM sessions WHERE id = ?
+    `).get(id) as SessionRow
+    return summary(row)
   }
 
   clear(): void {

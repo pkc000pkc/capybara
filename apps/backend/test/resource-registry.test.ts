@@ -28,12 +28,14 @@ test('resource HTTP API exposes tools, skills, and harnesses and executes their 
     const harnessModule = catalog.items.find(
       (item: any) => item.kind === 'harness' && item.package === 'document-analysis',
     )
+    const hookModule = catalog.items.find((item: any) => item.kind === 'hook')
     const readFile = toolModule.tools.find((item: any) => item.id === 'project-files:read_file')
     const skill = skillModule.skills.find((item: any) => item.id === 'project-files')
     const versionHarness = harnessModule.harnesses.find(
       (item: any) => item.id === 'document-analysis:version-summary',
     )
-    assert.equal(catalog.items.length, 5)
+    assert.equal(catalog.items.length, 6)
+    assert.equal(hookModule.hooks[0].name, 'context-compression')
     assert.equal(toolModule.runner.entry, 'tools/files/runner.mjs')
     assert.deepEqual(toolModule.files.map((file: any) => file.role), ['manifest', 'runner'])
     assert.equal(readFile.diagnostics.length, 0)

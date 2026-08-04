@@ -12,7 +12,7 @@
   },
   "scripts": {
     "dev": "concurrently --names backend,frontend --prefix-colors green,cyan \"npm:dev:backend\" \"npm:dev:frontend\"",
-    "dev:backend": "cross-env CAPYBARA_PROJECT_DIR=../../examples/test-project npm run dev --workspace=apps/backend",
+    "dev:backend": "npm run dev --workspace=apps/backend",
     "dev:frontend": "npm run dev --workspace=apps/frontend",
     "build": "npm run build --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",

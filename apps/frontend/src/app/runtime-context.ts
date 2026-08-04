@@ -1,4 +1,4 @@
-import type { JsonValue } from "./runtime-protocol";
+import type { RuntimeVariables as ProtocolRuntimeVariables } from "./runtime-protocol";
 
-export type RuntimeVariables = Record<string, JsonValue>;
+export type RuntimeVariables = ProtocolRuntimeVariables;
 export type RuntimeVariablePath = string[];

@@ -4,15 +4,12 @@ import {
   AlertTriangle,
   ArrowUpRight,
   BookOpen,
-  Check,
   ChevronLeft,
   ChevronRight,
   ChevronsRight,
-  ListCollapse,
   LockKeyhole,
   Plus,
   Play,
-  Undo2,
   X,
 } from "lucide-react";
 import {
@@ -26,9 +23,7 @@ import type {
   JsonValue,
   RenderMessage,
   RenderResultState,
-  RunState,
   RuntimeContextsState,
-  RuntimeCompressionState,
   RuntimeEffectiveContextsState,
   RuntimeHarnessesState,
   RuntimeSkillsState,
@@ -38,13 +33,12 @@ import type {
 import CodeSurface from "./code-surface";
 import MarkdownContent from "./markdown-content";
 import {
-  PanelHeader,
   SearchField,
   WorkspaceTabs,
   type WorkspaceTab,
 } from "./workspace-ui";
 
-type ContextTab = "rendered" | "template" | "tools" | "harnesses" | "skills" | "memory" | "compression";
+type ContextTab = "rendered" | "template" | "tools" | "harnesses" | "skills" | "memory";
 type MarkdownMode = "edit" | "preview" | "split";
 
 const TABS: { id: ContextTab }[] = [
@@ -54,7 +48,6 @@ const TABS: { id: ContextTab }[] = [
   { id: "harnesses" },
   { id: "skills" },
   { id: "memory" },
-  { id: "compression" },
 ];
 
 function MarkdownPreview({
@@ -199,23 +192,15 @@ function RenderResultWorkspace({
   contexts,
   effectiveContexts,
   onGetArtifact,
-  onRunCompression,
-  onUndoCompression,
   requestId,
   renderResult,
-  run,
-  compression,
 }: {
   artifactContents: Record<string, JsonValue>;
-  compression: RuntimeCompressionState;
   contexts: RuntimeContextsState;
   effectiveContexts: RuntimeEffectiveContextsState;
   onGetArtifact: (artifactId: string) => void;
-  onRunCompression: () => void;
-  onUndoCompression: (recordId: string) => void;
   requestId: string | null;
   renderResult: RenderResultState | null;
-  run: RunState;
 }) {
   const { t } = useI18n();
   const [selection, setSelection] = useState<{
@@ -240,21 +225,6 @@ function RenderResultWorkspace({
     : -1;
   const totalPages = Math.max(requestContexts.length + (hasLivePage ? 1 : 0), 1);
   const currentPage = selected ? effectiveSelectedIndex + 1 : totalPages;
-  const compressionBusy = ["planning", "generating", "validating", "pending"]
-    .includes(compression.status);
-  const runtimeInactive = [
-    "idle",
-    "ready",
-    "paused",
-    "interrupted",
-    "completed",
-    "failed",
-    "cancelled",
-  ].includes(run.status);
-  const canCompress = !selected && compression.enabled && !compressionBusy && runtimeInactive;
-  const canUndo = !selected && !compressionBusy && runtimeInactive;
-  const revertibleRecordId = compression.revertibleRecordId;
-
   useEffect(() => {
     if (selected && !(selected.messagesArtifactId in artifactContents)) {
       onGetArtifact(selected.messagesArtifactId);
@@ -321,29 +291,6 @@ function RenderResultWorkspace({
           {requestId ? ` · ${requestId.slice(-8)}` : ""}
         </span>
         <div className="flex h-full shrink-0 items-center" role="group">
-          <button
-            aria-label={t("context.compress")}
-            className="flex h-7 w-7 items-center justify-center text-[#17675f] outline-none hover:bg-[#dce8e6] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-not-allowed disabled:text-[#aab7b8] disabled:hover:bg-transparent"
-            disabled={!canCompress}
-            onClick={onRunCompression}
-            title={t("context.compress")}
-            type="button"
-          >
-            <ListCollapse aria-hidden="true" size={13} strokeWidth={1.8} />
-          </button>
-          {revertibleRecordId && (
-            <button
-              aria-label={t("context.undoCompression")}
-              className="flex h-7 w-7 items-center justify-center text-[#82611f] outline-none hover:bg-[#e8e3d5] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#82611f] disabled:cursor-not-allowed disabled:text-[#aab7b8] disabled:hover:bg-transparent"
-              disabled={!canUndo}
-              onClick={() => onUndoCompression(revertibleRecordId)}
-              title={t("context.undoCompression")}
-              type="button"
-            >
-              <Undo2 aria-hidden="true" size={13} strokeWidth={1.8} />
-            </button>
-          )}
-          <span aria-hidden="true" className="mx-1 h-4 border-l border-[#b8c9c9]" />
           <button
             aria-label={t("context.replayPrevious")}
             className="flex h-7 w-7 items-center justify-center text-[#536d72] outline-none hover:bg-[#dce8e6] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-default disabled:text-[#aab7b8] disabled:hover:bg-transparent"
@@ -1138,100 +1085,9 @@ function SkillPicker({ onClose, onSelect, skills }: {
   );
 }
 
-function CompressionWorkspace({
-  artifactContents,
-  compression,
-  onApply,
-  onGetArtifact,
-  onReject,
-}: {
-  artifactContents: Record<string, JsonValue>;
-  compression: RuntimeCompressionState;
-  onApply: (candidateId: string) => void;
-  onGetArtifact: (artifactId: string) => void;
-  onReject: (candidateId: string) => void;
-}) {
-  const { t } = useI18n();
-  const [selectedId, setSelectedId] = useState(compression.activeCandidateId ?? compression.items.at(-1)?.id);
-  const [artifactKind, setArtifactKind] = useState<"patch" | "request" | "response" | "validation">("patch");
-  const effectiveSelectedId = compression.activeCandidateId ?? selectedId;
-  const selected = compression.items.find((item) => item.id === effectiveSelectedId) ?? compression.items.at(-1);
-  const artifactId = selected
-    ? artifactKind === "request"
-      ? selected.requestArtifactId
-      : artifactKind === "response"
-        ? selected.responseArtifactId
-        : artifactKind === "validation"
-          ? selected.validationArtifactId
-          : selected.patchArtifactId
-    : undefined;
-
-  useEffect(() => {
-    if (artifactId && !(artifactId in artifactContents)) onGetArtifact(artifactId);
-  }, [artifactContents, artifactId, onGetArtifact]);
-
-  const utilization = compression.maxTokens > 0
-    ? Math.min(100, Math.round(compression.currentTokens / compression.maxTokens * 100))
-    : 0;
-  const detail = artifactId ? artifactContents[artifactId] : selected?.failure ?? null;
-
-  return (
-    <div className="grid h-full min-h-0 grid-rows-[74px_1fr] bg-white">
-      <div className="border-b border-[#cbd8d9] bg-[#f8faf9] px-3 py-2">
-        <div className="flex items-center justify-between text-[10px] text-[#60777a]">
-          <span>{t("compression.tokenUsage", { used: compression.currentTokens, max: compression.maxTokens })}</span>
-          <span>{t("compression.savedTokens", { count: compression.savedTokens })}</span>
-        </div>
-        <div className="mt-2 h-1.5 overflow-hidden bg-[#dce5e5]">
-          <div className={`h-full ${utilization >= 90 ? "bg-[#b64a43]" : utilization >= 70 ? "bg-[#bc842c]" : "bg-[#168174]"}`} style={{ width: `${utilization}%` }} />
-        </div>
-        <div className="mt-1 flex items-center justify-between font-mono text-[9px] text-[#718488]">
-          <span>{compression.status}</span><span>{utilization}%</span>
-        </div>
-      </div>
-      <div className="grid min-h-0 grid-cols-[150px_1fr] divide-x divide-[#cbd8d9]">
-        <div className="minimal-scrollbar min-h-0 overflow-y-auto bg-[#f5f8f8]">
-          {compression.items.length === 0 ? (
-            <div className="p-3 text-[10px] text-[#718488]">{t("compression.noRecords")}</div>
-          ) : [...compression.items].reverse().map((record) => (
-            <button
-              className={`block w-full border-b border-[#dce5e5] px-2.5 py-2 text-left ${selected?.id === record.id ? "bg-[#dcebe8]" : "hover:bg-[#e8f0ef]"}`}
-              key={record.id}
-              onClick={() => setSelectedId(record.id)}
-              type="button"
-            >
-              <span className="flex items-center gap-1 text-[10px] font-semibold text-[#31545a]"><ListCollapse size={11} />{record.status}</span>
-              <span className="mt-1 block font-mono text-[9px] text-[#718488]">{record.beforeTokens} → {record.afterTokens ?? record.targetTokens}</span>
-            </button>
-          ))}
-        </div>
-        <div className="grid min-h-0 grid-rows-[34px_30px_1fr]">
-          <PanelHeader
-            actions={selected?.status === "candidate" ? (
-              <div className="flex items-center gap-1">
-                <button className="flex h-6 items-center gap-1 bg-[#0c766e] px-2 text-[9px] font-semibold text-white hover:bg-[#095f59]" onClick={() => onApply(selected.id)} type="button"><Check size={11} />{t("compression.apply")}</button>
-                <button className="flex h-6 items-center gap-1 px-2 text-[9px] font-semibold text-[#8d3d3d] hover:bg-[#f7e7e5]" onClick={() => onReject(selected.id)} type="button"><X size={11} />{t("compression.reject")}</button>
-              </div>
-            ) : undefined}
-            metadata={selected ? t("compression.aiGenerated") : undefined}
-            title={selected ? selected.id : t("resources.compression")}
-          />
-          <div className="flex border-b border-[#dce5e5] bg-white">
-            {(["patch", "request", "response", "validation"] as const).map((kind) => (
-              <button className={`px-2 text-[9px] font-medium ${artifactKind === kind ? "border-b-2 border-[#0c766e] text-[#0c665f]" : "text-[#718488] hover:bg-[#edf3f2]"}`} key={kind} onClick={() => setArtifactKind(kind)} type="button">{t(`compression.artifact.${kind}` as Parameters<typeof t>[0])}</button>
-            ))}
-          </div>
-          <CodeSurface ariaLabel={t("compression.artifactDetail")} language="JSON" lineWrapping readOnly value={detail === null || detail === undefined ? "" : JSON.stringify(detail, null, 2)} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function ContextWorkspace({
   artifactContents,
   contexts,
-  compression,
   effectiveContexts,
   error,
   harnesses,
@@ -1239,7 +1095,6 @@ export default function ContextWorkspace({
   onAttachHarness,
   onAttachSkill,
   onAttachTool,
-  onApplyCompression,
   onDetachHarness,
   onDetachSkill,
   onDetachTool,
@@ -1247,21 +1102,16 @@ export default function ContextWorkspace({
   onOpenHarnessResources,
   onOpenSkillResources,
   onOpenToolResources,
-  onRejectCompression,
-  onRunCompression,
   onLoadSkillReference,
   onRunSkillScript,
   onUpdateTemplate,
-  onUndoCompression,
   renderResult,
-  run,
   selectedRequestId,
   template,
   tools,
 }: {
   artifactContents: Record<string, JsonValue>;
   contexts: RuntimeContextsState;
-  compression: RuntimeCompressionState;
   effectiveContexts: RuntimeEffectiveContextsState;
   error: string | null;
   harnesses: RuntimeHarnessesState;
@@ -1269,7 +1119,6 @@ export default function ContextWorkspace({
   onAttachHarness: (harnessId: string) => void;
   onAttachSkill: (skillId: string) => void;
   onAttachTool: (toolId: string) => void;
-  onApplyCompression: (candidateId: string) => void;
   onDetachHarness: (harnessId: string) => void;
   onDetachSkill: (skillId: string) => void;
   onDetachTool: (toolId: string) => void;
@@ -1277,14 +1126,10 @@ export default function ContextWorkspace({
   onOpenHarnessResources: () => void;
   onOpenSkillResources: () => void;
   onOpenToolResources: () => void;
-  onRejectCompression: (candidateId: string) => void;
-  onRunCompression: () => void;
   onLoadSkillReference: (skillId: string, path: string) => void;
   onRunSkillScript: (skillId: string, path: string, argv: string[]) => void;
   onUpdateTemplate: (source: string) => void;
-  onUndoCompression: (recordId: string) => void;
   renderResult: RenderResultState | null;
-  run: RunState;
   selectedRequestId: string | null;
   template: TemplateState;
   tools: RuntimeToolsState;
@@ -1304,7 +1149,7 @@ export default function ContextWorkspace({
             ? t("context.harnesses")
              : id === "skills"
                ? t("context.skills")
-               : id === "memory" ? t("context.memory") : t("resources.compression"),
+               : t("context.memory"),
   }));
 
   return (
@@ -1333,15 +1178,11 @@ export default function ContextWorkspace({
         {activeTab === "rendered" && (
           <RenderResultWorkspace
             artifactContents={artifactContents}
-            compression={compression}
             contexts={contexts}
             effectiveContexts={effectiveContexts}
             onGetArtifact={onGetArtifact}
-            onRunCompression={onRunCompression}
-            onUndoCompression={onUndoCompression}
             requestId={selectedRequestId}
             renderResult={renderResult}
-            run={run}
           />
         )}
         {activeTab === "template" && (
@@ -1385,15 +1226,6 @@ export default function ContextWorkspace({
           <div className="flex h-full items-center justify-center text-xs text-[#718488]">
             {t("context.memoryEmpty")}
           </div>
-        )}
-        {activeTab === "compression" && (
-          <CompressionWorkspace
-            artifactContents={artifactContents}
-            compression={compression}
-            onApply={onApplyCompression}
-            onGetArtifact={onGetArtifact}
-            onReject={onRejectCompression}
-          />
         )}
       </div>
     </section>

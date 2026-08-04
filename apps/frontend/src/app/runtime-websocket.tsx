@@ -28,6 +28,10 @@ export type ConnectionState =
   | "disconnected";
 
 export type ProjectInfo = { path: string; name: string };
+export type ProjectSelectionResult = {
+  status: "selected" | "initialization-required";
+  project: ProjectInfo;
+};
 export type SessionSummary = {
   id: string;
   name: string;
@@ -57,17 +61,17 @@ type RuntimeContextValue = RuntimeStore & {
   sessions: SessionSummary[];
   activeSession: SessionSummary | null;
   sessionStorage: SessionStorageStats | null;
+  closeProject: () => Promise<void>;
   clearSessions: () => Promise<void>;
   createSession: () => Promise<void>;
+  renameSession: (name: string) => Promise<void>;
   refreshSessionStorage: () => Promise<void>;
-  selectProject: (path: string) => Promise<void>;
+  selectProject: (path: string, initialize?: boolean) => Promise<ProjectSelectionResult>;
   selectSession: (sessionId: string) => void;
   attachHarness: (harnessId: string) => void;
   attachSkill: (skillId: string) => void;
   applyVariables: (patch: JsonPatchOperation[]) => void;
   applyContext: (contextRevisionId: string) => void;
-  applyCompression: (candidateId: string) => void;
-  runCompression: () => void;
   attachTool: (toolId: string) => void;
   cancelResponse: (assistantMessageId?: string) => void;
   cancelRun: () => void;
@@ -76,8 +80,6 @@ type RuntimeContextValue = RuntimeStore & {
   interruptRun: () => void;
   getArtifact: (artifactId: string) => void;
   pauseRun: () => void;
-  rejectCompression: (candidateId: string) => void;
-  undoCompression: (recordId: string) => void;
   detachHarness: (harnessId: string) => void;
   detachSkill: (skillId: string) => void;
   loadSkillReference: (skillId: string, path: string) => void;
@@ -135,8 +137,23 @@ async function createProjectSession(projectPath: string) {
   });
 }
 
+async function renameProjectSession(projectPath: string, sessionId: string, name: string) {
+  return httpRequest<SessionSummary>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ projectPath, name }),
+  });
+}
+
 function clone<T>(value: T): T {
   return structuredClone(value);
+}
+
+function sameProjectPath(left: string, right: string): boolean {
+  const normalize = (value: string) => value
+    .replaceAll("\\", "/")
+    .replace(/\/+$/, "")
+    .toLocaleLowerCase();
+  return normalize(left) === normalize(right);
 }
 
 function decodePointer(path: string): string[] {
@@ -292,9 +309,6 @@ function applyEvent(store: RuntimeStore, event: ServerEvent): RuntimeStore {
           ),
         },
       };
-      break;
-    case "runtime.compression.updated":
-      next = { ...snapshot, compression: clone(event.payload) };
       break;
     case "runtime.effectiveContext.created":
       next = {
@@ -486,6 +500,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeSession, setActiveSession] = useState<SessionSummary | null>(null);
   const [sessionStorage, setSessionStorage] = useState<SessionStorageStats | null>(null);
+  const activeSessionId = activeSession?.id;
   const storeRef = useRef(store);
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectAttemptRef = useRef(0);
@@ -543,24 +558,64 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     setSessionStorage(stats);
   }, [project]);
 
-  const selectProject = useCallback(async (input: string) => {
+  const selectProject = useCallback(async (input: string, initialize = false): Promise<ProjectSelectionResult> => {
     const status = storeRef.current.snapshot?.run.status;
     if (status && ["running", "waiting", "pause_requested", "paused", "interrupting"].includes(status)) {
       throw new Error("Interrupt or finish the current run before switching projects");
     }
-    const selectedProject = await httpRequest<ProjectInfo>("/api/projects/inspect", {
+    const inspection = await httpRequest<ProjectInfo & { status: "ready" | "empty" }>("/api/projects/inspect", {
       method: "POST",
       body: JSON.stringify({ path: input }),
+    });
+    if (inspection.status === "empty" && !initialize) {
+      return { status: "initialization-required", project: inspection };
+    }
+    const selectedProject = inspection.status === "empty"
+      ? await httpRequest<ProjectInfo>("/api/projects/initialize", {
+          method: "POST",
+          body: JSON.stringify({ path: inspection.path }),
+        })
+      : inspection;
+    await httpRequest<ProjectInfo>("/api/projects/open", {
+      method: "POST",
+      body: JSON.stringify({ path: selectedProject.path }),
     });
     const loaded = await loadSessions(selectedProject.path);
     const session = loaded.items.find((item) => item.restorable)
       ?? await createProjectSession(selectedProject.path);
+    if (project && !sameProjectPath(project.path, selectedProject.path)) {
+      await httpRequest<{ released: true }>("/api/projects/release", {
+        method: "POST",
+        body: JSON.stringify({ path: project.path }),
+      });
+    }
     setProject(selectedProject);
     setSessions(loaded.items.length > 0 ? loaded.items : [session]);
     setSessionStorage(null);
     localStorage.setItem("capybara-project-path", selectedProject.path);
     activateSession(session);
-  }, [activateSession]);
+    return { status: "selected", project: selectedProject };
+  }, [activateSession, project]);
+
+  const closeProject = useCallback(async () => {
+    if (!project) return;
+    const status = storeRef.current.snapshot?.run.status;
+    if (status && ["running", "waiting", "pause_requested", "paused", "interrupting"].includes(status)) {
+      throw new Error("Interrupt or finish the current run before closing the project");
+    }
+    await httpRequest<{ released: true }>("/api/projects/release", {
+      method: "POST",
+      body: JSON.stringify({ path: project.path }),
+    });
+    reconnectAttemptRef.current = 0;
+    setProject(null);
+    setSessions([]);
+    setActiveSession(null);
+    setSessionStorage(null);
+    localStorage.removeItem("capybara-project-path");
+    localStorage.removeItem("capybara-session-id");
+    commit(() => ({ ...INITIAL_STORE, connection: "disconnected" }));
+  }, [commit, project]);
 
   const createSession = useCallback(async () => {
     if (!project) return;
@@ -572,6 +627,26 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     setSessions((current) => [session, ...current]);
     activateSession(session);
   }, [activateSession, project]);
+
+  const renameSession = useCallback(async (name: string) => {
+    if (!project || !activeSession) return;
+    const status = storeRef.current.snapshot?.run.status;
+    if (status && ["running", "waiting", "pause_requested", "paused", "interrupting"].includes(status)) {
+      throw new Error("Interrupt or finish the current run before renaming the session");
+    }
+    try {
+      const renamed = await renameProjectSession(project.path, activeSession.id, name);
+      setSessions((current) => [renamed, ...current.filter((session) => session.id !== renamed.id)]);
+      setActiveSession((current) => current?.id === renamed.id ? renamed : current);
+      commit((state) => ({ ...state, error: null }));
+    } catch (error) {
+      commit((state) => ({
+        ...state,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      throw error;
+    }
+  }, [activeSession, commit, project]);
 
   const selectSession = useCallback((sessionId: string) => {
     const status = storeRef.current.snapshot?.run.status;
@@ -615,6 +690,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             }).catch(() => httpRequest<ProjectInfo>("/api/projects/default"))
           : await httpRequest<ProjectInfo>("/api/projects/default");
         if (disposed) return;
+        await httpRequest<ProjectInfo>("/api/projects/open", {
+          method: "POST",
+          body: JSON.stringify({ path: selectedProject.path }),
+        });
+        if (disposed) return;
         const loaded = await loadSessions(selectedProject.path);
         if (disposed) return;
         const savedSessionId = localStorage.getItem("capybara-session-id");
@@ -638,7 +718,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   }, [commit]);
 
   useEffect(() => {
-    if (!project || !activeSession) return;
+    if (!project || !activeSessionId) return;
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     const socketProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -647,7 +727,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       `${socketProtocol}//${window.location.hostname}:3005/ws/runtime`;
     const endpointUrl = new URL(endpoint);
     endpointUrl.searchParams.set("projectPath", project.path);
-    endpointUrl.searchParams.set("sessionId", activeSession.id);
+    endpointUrl.searchParams.set("sessionId", activeSessionId);
 
     const connect = () => {
       if (disposed) return;
@@ -734,7 +814,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [activeSession, commit, project, sendCommand]);
+  }, [activeSessionId, commit, project, sendCommand]);
 
   const actions = useMemo(
     () => ({
@@ -756,21 +836,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       },
       applyContext: (contextRevisionId: string) =>
         sendCommand("runtime.context.apply", { contextRevisionId }),
-      applyCompression: (candidateId: string) => {
-        const snapshot = storeRef.current.snapshot;
-        if (!snapshot) return;
-        sendCommand("runtime.compression.apply", {
-          candidateId,
-          baseRevision: snapshot.compression.revision,
-        });
-      },
-      runCompression: () => {
-        const snapshot = storeRef.current.snapshot;
-        if (!snapshot) return;
-        sendCommand("runtime.compression.run", {
-          baseRevision: snapshot.compression.revision,
-        });
-      },
       applyVariables: (patch: JsonPatchOperation[]) => {
         const snapshot = storeRef.current.snapshot;
         if (!snapshot) return;
@@ -806,22 +871,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         sendCommand("runtime.artifact.get", { artifactId });
       },
       pauseRun: () => sendCommand("run.pause", {}),
-      rejectCompression: (candidateId: string) => {
-        const snapshot = storeRef.current.snapshot;
-        if (!snapshot) return;
-        sendCommand("runtime.compression.reject", {
-          candidateId,
-          baseRevision: snapshot.compression.revision,
-        });
-      },
-      undoCompression: (recordId: string) => {
-        const snapshot = storeRef.current.snapshot;
-        if (!snapshot) return;
-        sendCommand("runtime.compression.undo", {
-          recordId,
-          baseRevision: snapshot.compression.revision,
-        });
-      },
       detachHarness: (harnessId: string) => {
         const snapshot = storeRef.current.snapshot;
         if (!snapshot) return;
@@ -911,8 +960,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       sessions,
       activeSession,
       sessionStorage,
+      closeProject,
       clearSessions,
       createSession,
+      renameSession,
       refreshSessionStorage,
       selectProject,
       selectSession,
@@ -920,9 +971,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     [
       actions,
       activeSession,
+      closeProject,
       clearSessions,
       createSession,
       project,
+      renameSession,
       refreshSessionStorage,
       selectProject,
       selectSession,

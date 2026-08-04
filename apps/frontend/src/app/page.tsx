@@ -1,14 +1,19 @@
 "use client";
 
 import {
+  Check,
   ChevronDown,
   Database,
   Eye,
   EyeOff,
+  FolderPlus,
   FolderOpen,
+  FolderX,
+  PencilLine,
   Plus,
   Square,
   Trash2,
+  X,
 } from "lucide-react";
 import CodeSurface from "./components/code-surface";
 import ContextWorkspace from "./components/context-workspace";
@@ -213,6 +218,9 @@ function ProjectSelector() {
   const runtime = useRuntime();
   const [open, setOpen] = useState(false);
   const [path, setPath] = useState(runtime.project?.path ?? "");
+  const [pendingProject, setPendingProject] = useState<{ path: string; name: string } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busy = Boolean(runtime.snapshot && ![
     "idle", "ready", "completed", "failed", "cancelled", "interrupted",
@@ -220,13 +228,67 @@ function ProjectSelector() {
 
   const select = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setSubmitting(true);
     try {
-      await runtime.selectProject(path);
-      setOpen(false);
-      setError(null);
+      const result = await runtime.selectProject(path);
+      if (result.status === "initialization-required") {
+        setPendingProject(result.project);
+        setError(null);
+        return;
+      }
+      close();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSubmitting(false);
     }
+  };
+
+  const close = () => {
+    setOpen(false);
+    setPendingProject(null);
+    setError(null);
+  };
+
+  const initialize = async () => {
+    if (!pendingProject) return;
+    setSubmitting(true);
+    try {
+      await runtime.selectProject(pendingProject.path, true);
+      close();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const editPath = () => {
+    setPendingProject(null);
+    setError(null);
+  };
+
+  const closeProject = async () => {
+    setClosing(true);
+    setError(null);
+    try {
+      await runtime.closeProject();
+      setPath("");
+      close();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setClosing(false);
+    }
+  };
+
+  const openSelector = () => {
+    if (!open) {
+      setPath(runtime.project?.path ?? "");
+      setPendingProject(null);
+      setError(null);
+    }
+    setOpen((current) => !current);
   };
 
   return (
@@ -235,10 +297,7 @@ function ProjectSelector() {
         aria-expanded={open}
         className="flex h-7 max-w-[240px] items-center gap-1.5 px-1.5 text-left text-[11px] font-semibold text-[#29484c] outline-none hover:bg-[#e8f0ef] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-not-allowed disabled:text-[#9aa9ab]"
         disabled={busy}
-        onClick={() => {
-          if (!open) setPath(runtime.project?.path ?? "");
-          setOpen((current) => !current);
-        }}
+        onClick={openSelector}
         title={runtime.project?.path ?? t("project.select")}
         type="button"
       >
@@ -251,24 +310,53 @@ function ProjectSelector() {
           className="absolute left-0 top-8 z-50 grid w-[min(480px,calc(100vw-24px))] gap-2 border border-[#91aaa9] bg-white p-3 shadow-[0_10px_24px_rgba(24,39,44,0.18)]"
           onSubmit={select}
         >
-          <label className="grid gap-1 text-[10px] font-semibold text-[#536d72]">
-            {t("project.path")}
-            <input
-              autoFocus
-              className="h-8 border border-[#c6d4d4] bg-white px-2 font-mono text-[11px] font-normal text-[#294247] outline-none focus:border-[#0c766e] focus:ring-1 focus:ring-[#0c766e]"
-              onChange={(event) => setPath(event.target.value)}
-              value={path}
-            />
-          </label>
-          {error && <p className="text-[10px] text-[#843d3d]">{error}</p>}
-          <div className="flex justify-end gap-2">
-            <button className="h-7 px-2 text-[10px] text-[#536d72] hover:bg-[#edf3f2]" onClick={() => setOpen(false)} type="button">
-              {t("project.cancel")}
-            </button>
-            <button className="h-7 bg-[#0c766e] px-3 text-[10px] font-semibold text-white hover:bg-[#095f59] disabled:bg-[#a9b9b9]" disabled={!path.trim()} type="submit">
-              {t("project.open")}
-            </button>
-          </div>
+          {pendingProject ? (
+            <>
+              <div className="flex items-start gap-2 border-b border-[#dce5e5] pb-2">
+                <FolderPlus aria-hidden="true" className="mt-0.5 shrink-0 text-[#0c766e]" size={16} />
+                <div className="min-w-0">
+                  <p className="text-[11px] font-semibold text-[#29484c]">{t("project.emptyTitle")}</p>
+                  <p className="mt-1 text-[10px] leading-4 text-[#60777a]">{t("project.emptyDescription", { name: pendingProject.name })}</p>
+                </div>
+              </div>
+              <code className="block truncate border border-[#d7e1e0] bg-[#f6f9f8] px-2 py-1.5 font-mono text-[9px] text-[#49656a]" title={pendingProject.path}>{pendingProject.path}</code>
+              {error && <p className="text-[10px] text-[#843d3d]">{error}</p>}
+              <div className="flex justify-end gap-2">
+                <button className="h-7 px-2 text-[10px] text-[#536d72] hover:bg-[#edf3f2]" disabled={submitting} onClick={editPath} type="button">{t("project.back")}</button>
+                <button className="h-7 bg-[#0c766e] px-3 text-[10px] font-semibold text-white hover:bg-[#095f59] disabled:bg-[#a9b9b9]" disabled={submitting} onClick={() => void initialize()} type="button">{submitting ? t("project.initializing") : t("project.initialize")}</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <label className="grid gap-1 text-[10px] font-semibold text-[#536d72]">
+                {t("project.path")}
+                <input
+                  autoFocus
+                  className="h-8 border border-[#c6d4d4] bg-white px-2 font-mono text-[11px] font-normal text-[#294247] outline-none focus:border-[#0c766e] focus:ring-1 focus:ring-[#0c766e]"
+                  disabled={submitting}
+                  onChange={(event) => { setPath(event.target.value); setError(null); }}
+                  value={path}
+                />
+              </label>
+              {error && <p className="text-[10px] text-[#843d3d]">{error}</p>}
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  className="flex h-7 items-center gap-1 px-2 text-[10px] font-semibold text-[#843d3d] hover:bg-[#f8ecec] disabled:cursor-not-allowed disabled:text-[#b9a3a3]"
+                  disabled={!runtime.project || submitting || closing}
+                  onClick={() => void closeProject()}
+                  title={t("project.closeDescription")}
+                  type="button"
+                >
+                  <FolderX aria-hidden="true" size={13} />
+                  {closing ? t("project.closing") : t("project.close")}
+                </button>
+                <div className="flex gap-2">
+                  <button className="h-7 px-2 text-[10px] text-[#536d72] hover:bg-[#edf3f2]" disabled={submitting || closing} onClick={close} type="button">{t("project.cancel")}</button>
+                  <button className="h-7 bg-[#0c766e] px-3 text-[10px] font-semibold text-white hover:bg-[#095f59] disabled:bg-[#a9b9b9]" disabled={!path.trim() || submitting || closing} type="submit">{t("project.open")}</button>
+                </div>
+              </div>
+            </>
+          )}
         </form>
       )}
     </div>
@@ -286,6 +374,9 @@ function ConversationPanel({
   const runtime = useRuntime();
   const { cancelResponse, connection, sendChatMessage, snapshot } = runtime;
   const [draft, setDraft] = useState("");
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [sessionName, setSessionName] = useState("");
+  const [savingSessionName, setSavingSessionName] = useState(false);
   const messageEndRef = useRef<HTMLDivElement>(null);
   const messages = snapshot?.conversation.messages;
   const requestSelectionLocked = Boolean(snapshot && ![
@@ -310,6 +401,33 @@ function ConversationPanel({
     submitDraft();
   };
 
+  const startRenamingSession = () => {
+    if (!runtime.activeSession) return;
+    setSessionName(runtime.activeSession.name);
+    setRenamingSessionId(runtime.activeSession.id);
+  };
+
+  const cancelRenamingSession = () => {
+    setRenamingSessionId(null);
+    setSessionName("");
+  };
+
+  const saveSessionName = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!sessionName.trim() || savingSessionName) return;
+    setSavingSessionName(true);
+    try {
+      await runtime.renameSession(sessionName);
+      cancelRenamingSession();
+    } catch {
+      // The runtime error indicator exposes the backend validation message.
+    } finally {
+      setSavingSessionName(false);
+    }
+  };
+
+  const isRenamingSession = renamingSessionId === runtime.activeSession?.id;
+
   return (
     <section
       aria-labelledby="conversation-heading"
@@ -319,17 +437,66 @@ function ConversationPanel({
       <PanelHeader
         actions={(
           <div className="flex items-center gap-1">
-            <select
-              aria-label={t("sessions.select")}
-              className="h-6 max-w-44 border border-[#c5d4d3] bg-white px-1.5 text-[10px] text-[#35555a] outline-none focus:border-[#0c766e] disabled:text-[#9aa9ab]"
-              disabled={requestSelectionLocked || !runtime.activeSession}
-              onChange={(event) => runtime.selectSession(event.target.value)}
-              value={runtime.activeSession?.id ?? ""}
-            >
-              {runtime.sessions.map((session) => (
-                <option key={session.id} value={session.id}>{session.name}</option>
-              ))}
-            </select>
+            {isRenamingSession ? (
+              <form className="flex h-6 items-center" onSubmit={(event) => void saveSessionName(event)}>
+                <input
+                  aria-label={t("sessions.name")}
+                  autoFocus
+                  className="h-6 w-32 border border-[#0c766e] bg-white px-1.5 text-[10px] text-[#29484c] outline-none focus:ring-1 focus:ring-inset focus:ring-[#0c766e]"
+                  disabled={savingSessionName}
+                  maxLength={80}
+                  onChange={(event) => setSessionName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") cancelRenamingSession();
+                  }}
+                  placeholder={t("sessions.namePlaceholder")}
+                  value={sessionName}
+                />
+                <button
+                  aria-label={t("sessions.saveName")}
+                  className="flex h-6 w-6 items-center justify-center text-[#0c766e] outline-none hover:bg-[#dce8e6] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:text-[#a9b9b9]"
+                  disabled={!sessionName.trim() || savingSessionName}
+                  title={t("sessions.saveName")}
+                  type="submit"
+                >
+                  <Check aria-hidden="true" size={13} />
+                </button>
+                <button
+                  aria-label={t("sessions.cancelRename")}
+                  className="flex h-6 w-6 items-center justify-center text-[#60777a] outline-none hover:bg-[#e9efef] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:text-[#a9b9b9]"
+                  disabled={savingSessionName}
+                  onClick={cancelRenamingSession}
+                  title={t("sessions.cancelRename")}
+                  type="button"
+                >
+                  <X aria-hidden="true" size={13} />
+                </button>
+              </form>
+            ) : (
+              <>
+                <select
+                  aria-label={t("sessions.select")}
+                  className="h-6 max-w-44 border border-[#c5d4d3] bg-white px-1.5 text-[10px] text-[#35555a] outline-none focus:border-[#0c766e] disabled:text-[#9aa9ab]"
+                  disabled={requestSelectionLocked || !runtime.activeSession}
+                  onChange={(event) => runtime.selectSession(event.target.value)}
+                  value={runtime.activeSession?.id ?? ""}
+                >
+                  {runtime.sessions.map((session) => (
+                    <option key={session.id} value={session.id}>{session.name}</option>
+                  ))}
+                </select>
+                <button
+                  aria-label={t("sessions.rename")}
+                  className="flex h-6 w-6 items-center justify-center text-[#45666a] outline-none hover:bg-[#dce8e6] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-not-allowed disabled:text-[#a9b9b9]"
+                  disabled={requestSelectionLocked || !runtime.activeSession}
+                  onClick={startRenamingSession}
+                  title={t("sessions.rename")}
+                  type="button"
+                >
+                  <PencilLine aria-hidden="true" size={12} />
+                </button>
+              </>
+            )}
             <button
               aria-label={t("sessions.new")}
               className="flex h-6 w-6 items-center justify-center text-[#45666a] outline-none hover:bg-[#dce8e6] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-not-allowed disabled:text-[#a9b9b9]"
@@ -646,11 +813,15 @@ function VariableStatusPanel({
   };
 
   const applyDetail = () => {
+    const sharedVariable = detail !== null && detail.path[0] === "builtin" &&
+      detail.path[1] === "prompts" &&
+      typeof detail.path[2] === "string" &&
+      (runtimeVariables.builtin.shared_prompts ?? []).includes(detail.path[2]);
     if (
       !detail ||
-      !canEditVariables ||
       detail.path[0] === "tools" ||
-      detail.path[0] === "builtin"
+      (detail.path[0] === "builtin" && !sharedVariable) ||
+      (!canEditVariables && !sharedVariable)
     ) {
       return;
     }
@@ -667,9 +838,18 @@ function VariableStatusPanel({
   };
 
   const canEditDetail =
-    canEditVariables &&
     detail?.path[0] !== "tools" &&
-    detail?.path[0] !== "builtin";
+    (canEditVariables || (
+      detail?.path[0] === "builtin" &&
+      detail.path[1] === "prompts" &&
+      typeof detail.path[2] === "string" &&
+      (runtimeVariables.builtin.shared_prompts ?? []).includes(detail.path[2])
+    )) &&
+    (detail?.path[0] !== "builtin" || (
+      detail.path[1] === "prompts" &&
+      typeof detail.path[2] === "string" &&
+      (runtimeVariables.builtin.shared_prompts ?? []).includes(detail.path[2])
+    ));
   const statusRows = [
     [
       t("status.runtime"),
@@ -698,6 +878,12 @@ function VariableStatusPanel({
       "bg-[#c58a27]",
     ],
     [
+      t("status.messages"),
+      String(runtimeStatus.messageCount ?? 0),
+      t("status.now"),
+      "bg-[#25806f]",
+    ],
+    [
       t("status.queue"),
       runtimeStatus.queueDepth === 0
         ? t("status.idle")
@@ -705,6 +891,14 @@ function VariableStatusPanel({
       t("status.now"),
       "bg-[#6b858b]",
     ],
+    ...(runtimeStatus.variableTokens ?? []).map((variable) => [
+      variable.label === variable.key
+        ? variable.key
+        : `${variable.label} · ${variable.key}`,
+      t("status.tokens", { count: variable.tokens }),
+      t("status.now"),
+      "bg-[#0c766e]",
+    ]),
   ];
 
   const inspectorTabs: WorkspaceTab<"variables" | "observations" | "status">[] = [
@@ -839,9 +1033,12 @@ function VariableStatusPanel({
               </tr>
             </thead>
             <tbody className="text-[#2e494e]">
-              {statusRows.map(([name, status, updated, color]) => (
-                <tr className="hover:bg-[#e3efed]" key={name}>
-                  <td className="truncate border-b border-[#dfe7e7] px-3 py-2.5">
+              {statusRows.map(([name, status, updated, color], index) => (
+                <tr className="hover:bg-[#e3efed]" key={`${name}-${index}`}>
+                  <td
+                    className="break-words border-b border-[#dfe7e7] px-3 py-2.5 leading-5"
+                    title={name}
+                  >
                     {name}
                   </td>
                   <td className="border-b border-[#dfe7e7] px-2 py-2.5">
@@ -1164,7 +1361,6 @@ function HomeContent() {
           >
           <ContextWorkspace
             artifactContents={runtime.artifactContents}
-            compression={snapshot.compression}
             contexts={snapshot.contexts}
             effectiveContexts={snapshot.effectiveContexts}
             error={runtime.error}
@@ -1173,7 +1369,6 @@ function HomeContent() {
             onAttachHarness={runtime.attachHarness}
             onAttachSkill={runtime.attachSkill}
             onAttachTool={runtime.attachTool}
-            onApplyCompression={runtime.applyCompression}
             onDetachHarness={runtime.detachHarness}
             onDetachSkill={runtime.detachSkill}
             onDetachTool={runtime.detachTool}
@@ -1181,14 +1376,10 @@ function HomeContent() {
             onOpenHarnessResources={openHarnessResources}
             onOpenSkillResources={openSkillResources}
             onOpenToolResources={openToolResources}
-            onRejectCompression={runtime.rejectCompression}
-            onRunCompression={runtime.runCompression}
             onLoadSkillReference={runtime.loadSkillReference}
             onRunSkillScript={runtime.runSkillScript}
             onUpdateTemplate={runtime.updateTemplate}
-            onUndoCompression={runtime.undoCompression}
             renderResult={snapshot.renderResult}
-            run={snapshot.run}
             selectedRequestId={visibleRequestId}
             template={snapshot.template}
             tools={snapshot.tools}
@@ -1297,14 +1488,21 @@ function HomeContent() {
         role="tabpanel"
         tabIndex={0}
       >
-        <ResourcesWorkspace
-          activeSection={resourceSection}
-          onSectionChange={setResourceSection}
-          projectControls={<ProjectSessionSettings />}
-          preferences={<ApplicationPreferences onThemeModeChange={selectThemeMode} themeMode={themeMode} />}
-          projectPath={runtime.project?.path ?? ""}
-          runtimeTools={snapshot?.tools}
-        />
+        {runtime.project ? (
+          <ResourcesWorkspace
+            activeSection={resourceSection}
+            onSectionChange={setResourceSection}
+            projectControls={<ProjectSessionSettings />}
+            preferences={<ApplicationPreferences onThemeModeChange={selectThemeMode} themeMode={themeMode} />}
+            projectPath={runtime.project.path}
+            runtimeTools={snapshot?.tools}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-xs text-[#60777a]">
+            <FolderOpen aria-hidden="true" className="mr-2" size={16} />
+            {t("project.select")}
+          </div>
+        )}
       </main>
 
       <main
@@ -1315,7 +1513,14 @@ function HomeContent() {
         role="tabpanel"
         tabIndex={0}
       >
-        <ExperimentsWorkspace projectPath={runtime.project?.path ?? ""} />
+        {runtime.project ? (
+          <ExperimentsWorkspace projectPath={runtime.project.path} />
+        ) : (
+          <div className="flex h-full items-center justify-center text-xs text-[#60777a]">
+            <FolderOpen aria-hidden="true" className="mr-2" size={16} />
+            {t("project.select")}
+          </div>
+        )}
       </main>
 
       <main

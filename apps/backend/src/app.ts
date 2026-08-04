@@ -5,17 +5,19 @@ import websocket from '@fastify/websocket'
 import type WebSocket from 'ws'
 
 import { AgentSession } from '#core/agent-session'
-import {
-  applyCompressionPatch,
-  createCompressionPlan,
-  estimateTokens,
-  runCompression,
-} from '#core/compression/compression-engine'
-import { CompressionResourceStore } from '#core/compression/compression-resource'
 import { DatasetStore } from '#core/datasets/dataset-store'
 import { ExperimentManager, type CreateExperimentInput } from '#core/experiments/experiment-manager'
 import type { ExperimentCaseStatus, ExperimentStatus } from '#core/experiments/types'
 import { ProjectGitService } from '#core/project-git'
+import {
+  MAX_PROJECT_TEXT_FILE_BYTES,
+  ProjectFileRevisionConflict,
+  ProjectFileService,
+} from '#core/project-files'
+import {
+  initializeProjectDirectory,
+  isInitializableProjectDirectory,
+} from '#core/project-initializer'
 import { ProjectResources } from '#core/project-resources'
 import {
   ProjectResourceRegistry,
@@ -30,7 +32,7 @@ import { SessionStore } from '#core/session-store'
 import { UserPreferencesStore } from '#core/user-preferences'
 import { WebSocketChannel } from '#transport/websocket-channel'
 import { loadLlmConfig } from '#util/llm/config'
-import { createLlmService, type LlmMessage } from '#util/llm'
+import { createLlmService } from '#util/llm'
 
 export interface BuildAppOptions {
   runtimeLoop?: RuntimeLoopOptions
@@ -40,37 +42,57 @@ export interface BuildAppOptions {
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({ logger: options.logger ?? false })
+  const exampleProjectDir = path.resolve(import.meta.dirname, '../../../examples/test-project')
   const defaultProjectDir = path.resolve(
-    options.runtimeLoop?.projectDir ?? process.env.CAPYBARA_PROJECT_DIR ?? 'test-project',
+    options.runtimeLoop?.projectDir ?? process.env.CAPYBARA_PROJECT_DIR ?? exampleProjectDir,
   )
   const stores = new Map<string, SessionStore>()
   const experimentManagers = new Map<string, ExperimentManager>()
   const activeSessions = new Map<string, AgentSession>()
+  const releasedProjects = new Set<string>()
   const userPreferences = new UserPreferencesStore(options.userConfigDir)
 
-  const projectInfo = (input: unknown) => {
+  const projectDirectory = (input: unknown) => {
     const projectDir = path.resolve(typeof input === 'string' && input.trim()
       ? input
       : defaultProjectDir)
     if (!fs.existsSync(projectDir) || !fs.statSync(projectDir).isDirectory()) {
       throw new Error(`project directory was not found: ${projectDir}`)
     }
+    return projectDir
+  }
+  const inspectProject = (input: unknown) => {
+    const projectDir = projectDirectory(input)
+    const project = { path: projectDir, name: path.basename(projectDir) }
+    if (isInitializableProjectDirectory(projectDir)) return { ...project, status: 'empty' as const }
     const settings = new ProjectResources(projectDir).readSettings()
     const template = path.join(projectDir, settings.main_template)
     if (!fs.existsSync(template) || !fs.statSync(template).isFile()) {
       throw new Error(`project main template was not found: ${template}`)
     }
-    return { path: projectDir, name: path.basename(projectDir) }
+    return { ...project, status: 'ready' as const }
+  }
+  const projectInfo = (input: unknown) => {
+    const inspection = inspectProject(input)
+    if (inspection.status === 'empty') {
+      throw new Error(`project directory is empty and must be initialized: ${inspection.path}`)
+    }
+    return { path: inspection.path, name: inspection.name }
   }
   const requestProject = (request: { query: unknown }) => {
     const query = request.query as { projectPath?: unknown }
-    return projectInfo(query.projectPath)
+    const project = projectInfo(query.projectPath)
+    if (releasedProjects.has(projectKey(project.path))) {
+      throw new Error(`project is closed: ${project.path}`)
+    }
+    return project
   }
   const projectKey = (projectDir: string) => path.normalize(projectDir).toLowerCase()
   const sessionKey = (projectDir: string, sessionId: string) =>
     `${projectKey(projectDir)}:${sessionId}`
   const getStore = (projectDir: string) => {
     const key = projectKey(projectDir)
+    if (releasedProjects.has(key)) throw new Error(`project is closed: ${projectDir}`)
     let store = stores.get(key)
     if (!store) {
       store = new SessionStore(projectDir)
@@ -80,6 +102,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   }
   const getExperimentManager = (projectDir: string) => {
     const key = projectKey(projectDir)
+    if (releasedProjects.has(key)) throw new Error(`project is closed: ${projectDir}`)
     let manager = experimentManagers.get(key)
     if (!manager) {
       manager = new ExperimentManager(projectDir, {
@@ -115,7 +138,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.addHook('onSend', async (request, reply, payload) => {
     if (request.url.startsWith('/api/')) {
       reply.header('access-control-allow-origin', '*')
-      reply.header('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS')
+      reply.header('access-control-allow-methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
       reply.header('access-control-allow-headers', 'content-type')
     }
     return payload
@@ -134,24 +157,46 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.get('/api/projects/default', async () => projectInfo(defaultProjectDir))
   app.post('/api/projects/inspect', async (request, reply) => {
     try {
-      return projectInfo((request.body as { path?: unknown } | undefined)?.path)
+      return inspectProject((request.body as { path?: unknown } | undefined)?.path)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/projects/initialize', async (request, reply) => {
+    try {
+      const input = (request.body as { path?: unknown } | undefined)?.path
+      if (typeof input !== 'string' || !input.trim()) throw new Error('project path is required')
+      const initialized = initializeProjectDirectory(input.trim())
+      return { ...initialized, status: 'ready' as const }
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/projects/open', async (request, reply) => {
+    try {
+      const project = projectInfo((request.body as { path?: unknown } | undefined)?.path)
+      releasedProjects.delete(projectKey(project.path))
+      return project
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
   })
   app.post('/api/projects/release', async (request, reply) => {
     try {
-      const project = projectInfo((request.body as { path?: unknown } | undefined)?.path)
-      const prefix = `${projectKey(project.path)}:`
+      const input = (request.body as { path?: unknown } | undefined)?.path
+      if (typeof input !== 'string' || !input.trim()) throw new Error('project path is required')
+      const projectDir = path.resolve(input.trim())
+      const key = projectKey(projectDir)
+      releasedProjects.add(key)
+      const prefix = `${key}:`
       for (const [key, session] of [...activeSessions]) {
-        if (key.startsWith(prefix)) session.shutdown(true)
+        if (key.startsWith(prefix)) session.shutdown(true, 1000, 'project closed')
       }
-      const key = projectKey(project.path)
       stores.get(key)?.close()
       stores.delete(key)
       await experimentManagers.get(key)?.close()
       experimentManagers.delete(key)
-      return { released: true }
+      return { released: true, path: projectDir }
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
@@ -211,6 +256,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       const name = body?.name
       if (name !== undefined && typeof name !== 'string') throw new Error('session name must be a string')
       return getStore(project.path).create(name)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.patch('/api/sessions/:id', async (request, reply) => {
+    try {
+      const body = request.body as { projectPath?: unknown; name?: unknown } | undefined
+      const project = projectInfo(body?.projectPath)
+      if (typeof body?.name !== 'string') throw new Error('session name must be a string')
+      return getStore(project.path).rename((request.params as { id: string }).id, body.name)
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
@@ -459,7 +514,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     new ProjectResources(requestProject(request).path).readSystemVariables())
   app.put('/api/resources/system-variables', async (request, reply) => {
     try {
-      return new ProjectResources(requestProject(request).path).saveSystemVariables(request.body)
+      return await new ProjectResources(requestProject(request).path)
+        .saveSystemVariablesQueued(request.body)
     } catch (error) {
       return reply.code(400).send({
         error: error instanceof Error ? error.message : String(error),
@@ -479,74 +535,115 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       })
     }
   })
-  app.get('/api/resources/compression', async (request, reply) => {
+  app.post('/api/resources/project-settings/llm/test', async (request, reply) => {
+    let settings: ReturnType<ProjectResources['readSettings']>
+    let promptVariable: ReturnType<ProjectResources['readSystemVariables']>['variables'][number] | undefined
     try {
-      const project = requestProject(request)
-      const settings = new ProjectResources(project.path).readSettings()
-      return new CompressionResourceStore(
-        project.path,
-        settings.context.compression.resource,
-      ).read()
-    } catch (error) {
-      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
-    }
-  })
-  app.put('/api/resources/compression', async (request, reply) => {
-    try {
-      const project = requestProject(request)
-      const settings = new ProjectResources(project.path).readSettings()
-      return new CompressionResourceStore(
-        project.path,
-        settings.context.compression.resource,
-      ).save(request.body)
-    } catch (error) {
-      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
-    }
-  })
-  app.post('/api/resources/compression/test', async (request, reply) => {
-    try {
-      const project = requestProject(request)
-      const settings = new ProjectResources(project.path).readSettings()
-      const body = request.body as { messages?: unknown } | undefined
-      if (!Array.isArray(body?.messages) || body.messages.length === 0) {
-        throw new Error('compression test requires a non-empty messages array')
+      const resources = new ProjectResources(requestProject(request).path)
+      settings = resources.resolveSettings({ llm: request.body })
+      const variables = resources.readSystemVariables().variables
+      promptVariable = variables.find((variable) => (
+        variable.key === 'llm_test_prompt' && variable.value.trim()
+      )) ?? variables.find((variable) => (
+        variable.key === 'agent_identity' && variable.value.trim()
+      ))
+      if (!promptVariable) {
+        throw new Error('project system variables must define llm_test_prompt or agent_identity')
       }
-      const messages = body.messages as LlmMessage[]
-      const store = new CompressionResourceStore(
-        project.path,
-        settings.context.compression.resource,
-      )
-      const resource = store.read()
-      const availableTokens = settings.context.max_input_tokens - settings.context.reserved_output_tokens
-      const plan = createCompressionPlan(
-        messages,
-        resource,
-        1,
-        availableTokens,
-        [],
-        true,
-      )
-      if (!plan) throw new Error('test messages do not contain a completed compressible turn')
-      const llm = options.runtimeLoop?.llm ?? createLlmService({
+    } catch (error) {
+      return reply.code(400).send({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+
+    const startedAt = Date.now()
+    try {
+      const llm = createLlmService({
         model: settings.llm.model,
         baseUrl: settings.llm.base_url,
         protocol: settings.llm.protocol,
         apiKey: settings.llm.api_key,
+        timeoutMs: 15_000,
+        maxRetries: 0,
       })
-      const result = await runCompression(llm, store, resource, plan)
-      const afterMessages = applyCompressionPatch(messages, result.plan, result.patch)
+      const result = await llm.stream({
+        messages: [{ role: 'user', content: promptVariable.value }],
+        maxTokens: 16,
+      }, () => {})
       return {
-        resourceRevision: resource.revision,
-        beforeTokens: result.plan.beforeTokens,
-        targetTokens: result.plan.targetTokens,
-        afterTokens: estimateTokens(afterMessages),
-        sourceUnits: result.plan.units,
-        renderedPrompt: result.renderedPrompt,
-        responseText: result.responseText,
-        patch: result.patch,
-        afterMessages,
-        usage: result.usage ?? null,
+        ok: true,
+        model: result.model,
+        protocol: settings.llm.protocol,
+        duration_ms: Date.now() - startedAt,
+        finish_reason: result.finishReason,
+        usage: result.usage,
+        prompt_variable: promptVariable.key,
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return reply.code(502).send({
+        ok: false,
+        error: settings.llm.api_key
+          ? message.replaceAll(settings.llm.api_key, '[redacted]')
+          : message,
+        duration_ms: Date.now() - startedAt,
+      })
+    }
+  })
+  app.get('/api/resources/files', async (request, reply) => {
+    try {
+      const directory = (request.query as { path?: unknown }).path ?? ''
+      return new ProjectFileService(requestProject(request).path).list(directory)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.get('/api/resources/files/content', async (request, reply) => {
+    try {
+      const file = (request.query as { path?: unknown }).path
+      return new ProjectFileService(requestProject(request).path).read(file)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.put('/api/resources/files/content', {
+    bodyLimit: MAX_PROJECT_TEXT_FILE_BYTES * 2 + 65_536,
+  }, async (request, reply) => {
+    try {
+      return new ProjectFileService(requestProject(request).path).write(
+        (request.body ?? {}) as { path?: unknown; content?: unknown; revision?: unknown },
+      )
+    } catch (error) {
+      return reply.code(error instanceof ProjectFileRevisionConflict ? 409 : 400).send({
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })
+  app.post('/api/resources/files', async (request, reply) => {
+    try {
+      const created = new ProjectFileService(requestProject(request).path).create(
+        (request.body ?? {}) as { parent?: unknown; name?: unknown; type?: unknown },
+      )
+      return reply.code(201).send(created)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.patch('/api/resources/files', async (request, reply) => {
+    try {
+      return new ProjectFileService(requestProject(request).path).rename(
+        (request.body ?? {}) as { path?: unknown; name?: unknown },
+      )
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.delete('/api/resources/files', async (request, reply) => {
+    try {
+      return new ProjectFileService(requestProject(request).path).remove(
+        (request.body ?? {}) as { path?: unknown; recursive?: unknown },
+      )
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
@@ -609,6 +706,46 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     try {
       return new ProjectResourceRegistry(requestProject(request).path)
         .saveHarness((request.params as { id: string }).id, request.body)
+    } catch (error) {
+      return reply.code(error instanceof ResourceRevisionConflict ? 409 : 400).send({
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })
+  app.post('/api/resources/hooks', async (request, reply) => {
+    try {
+      const created = new ProjectResourceRegistry(requestProject(request).path)
+        .createHook(request.body)
+      return reply.code(201).send(created)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/resources/hooks/:id/test', async (request, reply) => {
+    try {
+      const body = request.body as { fixture?: unknown } | undefined
+      return await new ProjectResourceRegistry(requestProject(request).path).testHook(
+        (request.params as { id: string }).id,
+        body?.fixture ?? {},
+      )
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.put('/api/resources/hooks/:id', async (request, reply) => {
+    try {
+      return new ProjectResourceRegistry(requestProject(request).path)
+        .saveHook((request.params as { id: string }).id, request.body)
+    } catch (error) {
+      return reply.code(error instanceof ResourceRevisionConflict ? 409 : 400).send({
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })
+  app.delete('/api/resources/hooks/:id', async (request, reply) => {
+    try {
+      return new ProjectResourceRegistry(requestProject(request).path)
+        .deleteHook((request.params as { id: string }).id, request.body)
     } catch (error) {
       return reply.code(error instanceof ResourceRevisionConflict ? 409 : 400).send({
         error: error instanceof Error ? error.message : String(error),

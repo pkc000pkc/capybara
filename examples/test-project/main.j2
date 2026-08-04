@@ -18,23 +18,14 @@ Task: {{ task.title }}
 User: {{ user_message }}
 Optional: {% if optionalNote == null %}null{% else %}{{ optionalNote }}{% endif %}
 
-{% if context.compressed_history | length > 0 %}
-Earlier conversation summaries:
-{% for item in context.compressed_history %}
---- compressed context {{ item.id }} ---
-{% for value in item.summary.user_requirements %}- Requirement: {{ value }}
-{% endfor %}
-{% for value in item.summary.decisions %}- Decision: {{ value }}
-{% endfor %}
-{% for value in item.summary.facts %}- Fact: {{ value }}
-{% endfor %}
-{% for value in item.summary.completed_work %}- Completed: {{ value }}
-{% endfor %}
-{% for value in item.summary.open_items %}- Open: {{ value }}
-{% endfor %}
-{% for value in item.summary.important_evidence %}- Evidence: {{ value }}
-{% endfor %}
-{% endfor %}
+{% if context.history_summary %}
+Earlier context summary:
+{{ context.history_summary }}
+{% endif %}
+
+{% if context.evidence_digest %}
+Evidence digest:
+{{ context.evidence_digest }}
 {% endif %}
 
 {% if tools | length > 0 %}

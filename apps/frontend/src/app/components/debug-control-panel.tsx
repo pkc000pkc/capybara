@@ -103,7 +103,7 @@ function stepColor(step: TimelineStep) {
       ? "bg-[#c58a27]"
       : step.type === "workflow"
         ? "bg-[#416f9a]"
-      : step.type === "compression" ? "bg-[#7a62a8]" : "bg-[#347f91]";
+        : "bg-[#347f91]";
 }
 
 function formatTime(timestamp?: string) {
@@ -167,18 +167,16 @@ export default function DebugControlPanel(props: Props) {
       )
     : undefined;
   const artifactId = selectedStep
-    ? detailTab === "input" && (selectedStep.type === "model" || selectedStep.type === "compression" || selectedStep.type === "workflow")
+    ? detailTab === "input" && (selectedStep.type === "model" || selectedStep.type === "workflow")
       ? detailString(selectedStep, selectedStep.type === "workflow" ? "definitionArtifactId" : "requestArtifactId")
       : detailTab === "output"
         ? detailString(selectedStep, selectedStep.type === "tool" || selectedStep.type === "workflow" ? "resultArtifactId" : "responseArtifactId")
         : detailTab === "context"
           ? effectiveContext?.messagesArtifactId ?? context?.messagesArtifactId
         : detailTab === "diff"
-            ? selectedStep.type === "compression"
-              ? detailString(selectedStep, "patchArtifactId")
-              : effectiveContext?.diffArtifactId ?? context?.diffArtifactId
-            : detailTab === "raw" && (selectedStep.type === "compression" || selectedStep.type === "workflow")
-              ? detailString(selectedStep, selectedStep.type === "workflow" ? "definitionArtifactId" : "validationArtifactId")
+            ? effectiveContext?.diffArtifactId ?? context?.diffArtifactId
+            : detailTab === "raw" && selectedStep.type === "workflow"
+              ? detailString(selectedStep, "definitionArtifactId")
               : undefined
     : undefined;
 

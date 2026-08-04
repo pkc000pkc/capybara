@@ -14,7 +14,16 @@ test('registry loads project manifests and dispatcher enforces schemas and permi
   registry.load(['tools/files/manifest.json'])
   assert.deepEqual(
     registry.list().map((tool) => tool.name),
-    ['read_file', 'list_files', 'search_file', 'search_in_file', 'write_file', 'delete_file'],
+    [
+      'read_file',
+      'list_files',
+      'search_file',
+      'search_in_file',
+      'write_file',
+      'delete_file',
+      'run_code',
+      'run_command',
+    ],
   )
 
   const denied = await new ToolDispatcher(registry, projectDir).dispatch({
@@ -41,6 +50,23 @@ test('registry loads project manifests and dispatcher enforces schemas and permi
   })
   assert.equal(result.ok, true)
   assert.match(JSON.stringify(result.output), /max_tool_rounds/)
+
+  const commandDenied = await dispatcher.dispatch({
+    id: 'command-denied',
+    name: 'run_command',
+    arguments: { command: 'echo denied' },
+  })
+  assert.equal(commandDenied.error?.code, 'PERMISSION_DENIED')
+
+  const command = await new ToolDispatcher(registry, projectDir, {
+    permissions: ['process:execute'],
+  }).dispatch({
+    id: 'command',
+    name: 'run_command',
+    arguments: { command: 'echo command-ok' },
+  })
+  assert.equal(command.ok, true)
+  assert.match(JSON.stringify(command.output), /command-ok/)
 })
 
 test('registry rejects manifests and runners that escape the project', () => {

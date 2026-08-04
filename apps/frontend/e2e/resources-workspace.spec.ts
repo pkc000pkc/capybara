@@ -65,7 +65,7 @@ test("resource workspace uses real tool and skill HTTP APIs", async ({ page }) =
   await page.locator("#app-resources-tab").click();
   await page.locator("#resource-tools-tab").click();
 
-  await expect(page.getByRole("button", { name: /project-files.*6 个工具/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /project-files.*8 个工具/ })).toBeVisible();
   const detailTabs = page.getByRole("tablist", { name: "资源详情视图" });
   const evaluationTabs = page.getByRole("tablist", { name: "资源验证视图" });
   await expect(detailTabs.getByRole("tab", { name: "文件" })).toHaveAttribute("aria-selected", "true");
@@ -167,41 +167,62 @@ test("resource workspace uses real tool and skill HTTP APIs", async ({ page }) =
   await expect(page.getByLabel("预设提示词")).toHaveAttribute("contenteditable", "false");
   await expect(page.getByRole("button", { name: "删除系统变量" })).toHaveCount(0);
 
+  const systemVariablesPanel = page.locator("#resource-system-variables-panel");
+  await page.getByRole("button", { name: "添加系统变量" }).click();
+  await expect(systemVariablesPanel.getByLabel("作用域")).toHaveValue("session");
+  await systemVariablesPanel.getByLabel("变量名").fill("e2e_shared_prompt");
+  await systemVariablesPanel.getByLabel("作用域").selectOption("project");
+  await systemVariablesPanel.getByLabel("预设提示词").fill("shared value");
+  const saveSharedVariable = page.waitForResponse((response) =>
+    response.request().method() === "PUT"
+      && response.url().includes("/api/resources/system-variables")
+      && response.status() === 200,
+  );
+  await systemVariablesPanel.getByRole("button", { name: "保存", exact: true }).click();
+  await saveSharedVariable;
+  await expect(page.getByRole("button", { name: /e2e_shared_prompt.*项目共享/ })).toBeVisible();
+  await systemVariablesPanel.getByRole("button", { name: "删除系统变量" }).click();
+  const deleteSharedVariable = page.waitForResponse((response) =>
+    response.request().method() === "PUT"
+      && response.url().includes("/api/resources/system-variables")
+      && response.status() === 200,
+  );
+  await systemVariablesPanel.getByRole("button", { name: "保存", exact: true }).click();
+  await deleteSharedVariable;
+
   expect(pageErrors).toEqual([]);
 });
 
-test("compression tests always render a success or error payload", async ({ page }) => {
-  await page.route("**/api/resources/compression/test?**", async (route) => {
-    const body = route.request().postDataJSON() as { messages: unknown[] };
-    expect(body.messages).toHaveLength(7);
-    await route.fulfill({
-      json: {
-        resourceRevision: "test-revision",
-        beforeTokens: 120,
-        targetTokens: 80,
-        afterTokens: 72,
-        sourceUnits: [],
-        renderedPrompt: "Rendered compression prompt",
-        responseText: "{}",
-        patch: { version: 1, patch_status: "complete", operations: [] },
-        afterMessages: [],
-        usage: null,
-      },
-    });
-  });
-
+test("hook resources support editing, testing, creating, and deleting", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator('[title="已连接"]')).toBeVisible();
   await page.locator("#app-resources-tab").click();
-  await page.locator("#resource-compression-tab").click();
-  const panel = page.locator("#resource-compression-panel");
-  await panel.getByRole("button", { name: "运行测试" }).click();
-  await expect(panel.getByLabel("测试输出")).toContainText('"afterTokens": 72');
+  await page.locator("#resource-hooks-tab").click();
+  const panel = page.locator("#resource-hooks-panel");
+  await expect(page.getByRole("button", { name: /context-compression/ })).toBeVisible();
 
-  await panel.getByLabel("测试输入").fill("{}");
-  await panel.getByRole("button", { name: "运行测试" }).click();
-  await expect(panel.getByLabel("测试输出")).toContainText('"error"');
-  await expect(panel.getByLabel("测试输出")).toContainText("数组");
+  const editor = panel.getByLabel("Hook 函数编辑器");
+  const source = fs.readFileSync(
+    path.resolve(process.cwd(), "../../examples/test-project/.capybara/hooks/context-compression.ts"),
+    "utf8",
+  );
+  await editor.fill(source.replace("Summarize older LLM messages", "Summarize prior LLM messages"));
+  await panel.getByRole("button", { name: "保存草稿" }).click();
+  await expect(panel.getByRole("button", { name: "保存草稿" })).toBeDisabled();
+
+  await panel.getByRole("tab", { name: "测试" }).click();
+  await panel.getByRole("button", { name: "运行 Hook" }).click();
+  await expect(panel.getByLabel("执行结果")).toContainText('"matched": true');
+  await expect(panel.getByLabel("执行结果")).toContainText("no older messages");
+
+  await page.getByRole("button", { name: "新建 Hook" }).click();
+  await page.getByLabel("Hook 名称").fill("e2e-hook");
+  await page.getByRole("button", { name: "创建 Hook" }).click();
+  await panel.getByRole("tab", { name: "函数" }).click();
+  await expect(panel.getByLabel("Hook 函数编辑器")).toContainText('name: "e2e-hook"');
+  page.once("dialog", (dialog) => dialog.accept());
+  await panel.getByRole("button", { name: "删除 Hook" }).click();
+  await expect(page.getByRole("button", { name: /e2e-hook/ })).toHaveCount(0);
 });
 
 test("resource workspace panes support pointer and keyboard resizing", async ({ page }) => {
@@ -303,20 +324,20 @@ test("project configuration is a resource and system settings stays at the botto
 
   await page.locator("#app-resources-tab").click();
   const navigation = page.locator("#resource-navigation");
-  const compressionTab = page.locator("#resource-compression-tab");
+  const memoryTab = page.locator("#resource-memory-tab");
   const projectSettingsTab = page.locator("#resource-project-settings-tab");
   const settingsTab = page.locator("#resource-system-settings-tab");
   const navigationBox = await navigation.boundingBox();
-  const compressionBox = await compressionTab.boundingBox();
+  const memoryBox = await memoryTab.boundingBox();
   const settingsBox = await settingsTab.boundingBox();
   expect(navigationBox).not.toBeNull();
-  expect(compressionBox).not.toBeNull();
+  expect(memoryBox).not.toBeNull();
   expect(settingsBox).not.toBeNull();
   expect(settingsBox!.y + settingsBox!.height).toBeCloseTo(
     navigationBox!.y + navigationBox!.height,
     0,
   );
-  expect(settingsBox!.y - compressionBox!.y - compressionBox!.height).toBeGreaterThan(100);
+  expect(settingsBox!.y - memoryBox!.y - memoryBox!.height).toBeGreaterThan(100);
 
   await projectSettingsTab.click();
   const projectSettingsPanel = page.locator("#resource-project-settings-panel");
@@ -365,8 +386,8 @@ test("project configuration is a resource and system settings stays at the botto
   await expect(projectSettingsPanel.getByLabel("经验匹配阈值")).toHaveValue("0.35");
   await expect(projectSettingsPanel.getByText("会话存储", { exact: true })).toBeVisible();
 
-  await compressionTab.focus();
-  await compressionTab.press("End");
+  await memoryTab.focus();
+  await memoryTab.press("End");
   await expect(settingsTab).toBeFocused();
   await settingsTab.click();
 

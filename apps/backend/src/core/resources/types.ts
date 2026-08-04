@@ -1,6 +1,7 @@
 import type { HarnessActivation, HarnessType } from '#core/harnesses/types'
+import type { HookPermissions, HookSchedule } from '#core/hooks/types'
 
-export type ResourceKind = 'tool' | 'skill' | 'harness'
+export type ResourceKind = 'tool' | 'skill' | 'harness' | 'hook'
 
 export interface ResourceDiagnostic {
   severity: 'info' | 'warning' | 'error'
@@ -77,6 +78,23 @@ export interface HarnessResourceDefinition {
   diagnostics: ResourceDiagnostic[]
 }
 
+export interface HookResourceDefinition {
+  id: string
+  kind: 'hook'
+  name: string
+  description: string
+  entry: string
+  enabled: boolean
+  checkpoint: 'after_loop'
+  schedule: HookSchedule
+  permissions: HookPermissions
+  triggerSummary: string
+  triggerInputs: string[]
+  content: string
+  entryRevision: string
+  diagnostics: ResourceDiagnostic[]
+}
+
 export interface ToolResourceModule extends ResourceModule<'tool'> {
   runner: { type: 'stdio'; entry: string }
   tools: ToolResourceDefinition[]
@@ -90,10 +108,15 @@ export interface HarnessResourceModule extends ResourceModule<'harness'> {
   harnesses: HarnessResourceDefinition[]
 }
 
+export interface HookResourceModule extends ResourceModule<'hook'> {
+  hooks: HookResourceDefinition[]
+}
+
 export type ProjectResourceModule =
   | ToolResourceModule
   | SkillResourceModule
   | HarnessResourceModule
+  | HookResourceModule
 
 export interface ResourceCatalog {
   revision: string

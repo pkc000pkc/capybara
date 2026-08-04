@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import type { FastifyInstance } from 'fastify'
 
 import { buildApp } from '#app'
-import type { RuntimeLlm, RuntimeLoopOptions } from '#core/runtime-loop'
+import { RuntimeLoop, type RuntimeLlm, type RuntimeLoopOptions } from '#core/runtime-loop'
 import type { LlmChatRequest, LlmChatResponse } from '#util/llm'
 import type {
   CommandPayloadMap,
@@ -149,6 +150,7 @@ class RuntimeClient {
 async function withRuntime(
   run: (client: RuntimeClient, projectDir: string, app: FastifyInstance) => Promise<void>,
   options: RuntimeLoopOptions = {},
+  useProjectLlm = false,
 ): Promise<void> {
   const projectDir =
     options.projectDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-runtime-'))
@@ -172,7 +174,7 @@ async function withRuntime(
       stepDelayMs: 1,
       ...options,
       projectDir,
-      llm: options.llm ?? fakeLlm(),
+      ...(useProjectLlm ? {} : { llm: options.llm ?? fakeLlm() }),
     },
   })
   try {
@@ -208,6 +210,205 @@ test('GET /hello returns hello', async () => {
     assert.deepEqual(response.json(), { message: 'hello' })
   } finally {
     await app.close()
+  }
+})
+
+test('empty project directories require confirmation and initialize a runnable project without overwriting files', async () => {
+  const emptyProject = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-empty-project-'))
+  const gitProject = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-empty-git-project-'))
+  const nonemptyProject = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-nonempty-project-'))
+  fs.mkdirSync(path.join(gitProject, '.git'))
+  fs.writeFileSync(path.join(nonemptyProject, 'keep.txt'), 'keep me')
+  const app = await buildApp({ runtimeLoop: { llm: fakeLlm() } })
+  try {
+    for (const projectDir of [emptyProject, gitProject]) {
+      const inspection = await app.inject({
+        method: 'POST',
+        url: '/api/projects/inspect',
+        payload: { path: projectDir },
+      })
+      assert.equal(inspection.statusCode, 200)
+      assert.equal(inspection.json().status, 'empty')
+      assert.deepEqual(
+        fs.readdirSync(projectDir).filter((entry) => entry !== '.git'),
+        [],
+      )
+
+      const initialized = await app.inject({
+        method: 'POST',
+        url: '/api/projects/initialize',
+        payload: { path: projectDir },
+      })
+      assert.equal(initialized.statusCode, 200)
+      assert.equal(initialized.json().status, 'ready')
+      assert.deepEqual(initialized.json().files, [
+        '.capybara/config.json',
+        '.capybara/system-variables.json',
+        'main.j2',
+        '.capybara/hooks/context-compression.ts',
+        'tools/files/manifest.json',
+        'tools/files/runner.mjs',
+        '.gitignore',
+        '.gitattributes',
+      ])
+      assert.equal(fs.existsSync(path.join(projectDir, '.capybara', 'secrets.json')), false)
+      const initializedConfig = JSON.parse(
+        fs.readFileSync(path.join(projectDir, '.capybara', 'config.json'), 'utf8'),
+      )
+      assert.deepEqual(initializedConfig.tools, ['tools/files/manifest.json'])
+      assert.deepEqual(initializedConfig.tool_permissions, [
+        'filesystem:read',
+        'filesystem:write',
+        'filesystem:delete',
+        'process:execute',
+      ])
+
+      const catalog = await app.inject({
+        method: 'GET',
+        url: `/api/resources/catalog?projectPath=${encodeURIComponent(projectDir)}`,
+      })
+      assert.equal(catalog.statusCode, 200)
+      const fileTools = catalog.json().items.find((item: any) => item.package === 'project-files')
+      assert.deepEqual(fileTools.tools.map((tool: any) => tool.name), [
+        'read_file',
+        'list_files',
+        'search_file',
+        'search_in_file',
+        'write_file',
+        'delete_file',
+        'run_code',
+        'run_command',
+      ])
+
+      const hookSource = `import { defineHook } from "@capybara/sdk";
+
+export default defineHook({
+  name: "audit-snapshot",
+  description: "Record one runtime snapshot after a Loop.",
+  enabled: true,
+  trigger({ status }) { return status.messageCount >= 1; },
+  schedule: { priority: 5, timeoutMs: 2000, onError: "continue" },
+  permissions: { artifacts: "write" },
+  run({ status }) {
+    return { artifacts: [{ title: "snapshot", value: { messageCount: status.messageCount } }] };
+  },
+});
+`
+      const hookUrl = `/api/resources/hooks?projectPath=${encodeURIComponent(projectDir)}`
+      const auditHookUrl = `/api/resources/hooks/audit-snapshot?projectPath=${encodeURIComponent(projectDir)}`
+      const createdHook = await app.inject({
+        method: 'POST',
+        url: hookUrl,
+        payload: { name: 'audit-snapshot', content: hookSource },
+      })
+      assert.equal(createdHook.statusCode, 201)
+      const createdHookModule = createdHook.json<any>()
+      assert.equal(createdHookModule.hooks[0].checkpoint, 'after_loop')
+      assert.equal(createdHookModule.hooks[0].triggerSummary, 'status')
+
+      const savedHook = await app.inject({
+        method: 'PUT',
+        url: auditHookUrl,
+        payload: {
+          content: hookSource.replace('Record one runtime snapshot', 'Record the runtime snapshot'),
+          revision: createdHookModule.revision,
+        },
+      })
+      assert.equal(savedHook.statusCode, 200)
+      const savedHookModule = savedHook.json<any>()
+      assert.notEqual(savedHookModule.revision, createdHookModule.revision)
+
+      const staleHookSave = await app.inject({
+        method: 'PUT',
+        url: auditHookUrl,
+        payload: { content: hookSource, revision: createdHookModule.revision },
+      })
+      assert.equal(staleHookSave.statusCode, 409)
+
+      const testedHook = await app.inject({
+        method: 'POST',
+        url: `/api/resources/hooks/audit-snapshot/test?projectPath=${encodeURIComponent(projectDir)}`,
+        payload: {
+          fixture: {
+            status: { messageCount: 1 },
+            changedVariables: ['user_message'],
+            variables: {},
+            messages: [{ role: 'user', content: 'test' }],
+          },
+        },
+      })
+      assert.equal(testedHook.statusCode, 200)
+      assert.equal(testedHook.json().matched, true)
+      assert.equal(testedHook.json().result.artifacts[0].title, 'snapshot')
+
+      const deletedHook = await app.inject({
+        method: 'DELETE',
+        url: auditHookUrl,
+        payload: { revision: savedHookModule.revision },
+      })
+      assert.equal(deletedHook.statusCode, 200)
+      assert.equal(
+        fs.existsSync(path.join(projectDir, '.capybara', 'hooks', 'audit-snapshot.ts')),
+        false,
+      )
+
+      const toolInvocation = await app.inject({
+        method: 'POST',
+        url: `/api/resources/tools/${encodeURIComponent('project-files:list_files')}/test?projectPath=${encodeURIComponent(projectDir)}`,
+        payload: { arguments: { path: '.', recursive: false } },
+      })
+      assert.equal(toolInvocation.statusCode, 200)
+      assert.equal(toolInvocation.json().ok, true)
+      assert.ok(toolInvocation.json().output.entries.some(
+        (entry: { path: string }) => entry.path === 'tools',
+      ))
+
+      const commandInvocation = await app.inject({
+        method: 'POST',
+        url: `/api/resources/tools/${encodeURIComponent('project-files:run_command')}/test?projectPath=${encodeURIComponent(projectDir)}`,
+        payload: { arguments: { command: 'echo initialized-command' } },
+      })
+      assert.equal(commandInvocation.statusCode, 200)
+      assert.equal(commandInvocation.json().ok, true)
+      assert.match(commandInvocation.json().output.stdout, /initialized-command/)
+
+      const ready = await app.inject({
+        method: 'POST',
+        url: '/api/projects/inspect',
+        payload: { path: projectDir },
+      })
+      assert.equal(ready.statusCode, 200)
+      assert.equal(ready.json().status, 'ready')
+
+      const loop = new RuntimeLoop({ projectDir, llm: fakeLlm(), stepDelayMs: 0, streamDelayMs: 0 })
+      try {
+        const snapshot = loop.getSnapshot(0)
+        assert.equal(snapshot.renderResult?.diagnostics.length, 0)
+        assert.match(snapshot.renderResult?.messages[0]?.content ?? '', /project agent running in Capybara/)
+      } finally {
+        loop.close()
+      }
+    }
+
+    const invalidInspection = await app.inject({
+      method: 'POST',
+      url: '/api/projects/inspect',
+      payload: { path: nonemptyProject },
+    })
+    assert.equal(invalidInspection.statusCode, 400)
+    const rejectedInitialization = await app.inject({
+      method: 'POST',
+      url: '/api/projects/initialize',
+      payload: { path: nonemptyProject },
+    })
+    assert.equal(rejectedInitialization.statusCode, 400)
+    assert.equal(fs.readFileSync(path.join(nonemptyProject, 'keep.txt'), 'utf8'), 'keep me')
+    assert.deepEqual(fs.readdirSync(nonemptyProject), ['keep.txt'])
+  } finally {
+    await app.close()
+    for (const projectDir of [emptyProject, gitProject, nonemptyProject]) {
+      fs.rmSync(projectDir, { recursive: true, force: true })
+    }
   }
 })
 
@@ -259,12 +460,21 @@ test('runtime connection publishes a complete snapshot and rejects malformed com
     )
     assert.deepEqual(
       snapshot.payload.tools.catalog.map((tool) => tool.name),
-      ['read_file', 'list_files', 'search_file', 'search_in_file', 'write_file', 'delete_file'],
+      [
+        'read_file',
+        'list_files',
+        'search_file',
+        'search_in_file',
+        'write_file',
+        'delete_file',
+        'run_code',
+        'run_command',
+      ],
     )
     assert.equal(snapshot.payload.harnesses.items.length, 0)
     assert.match(snapshot.payload.template.source, /for harness in harnesses/)
     assert.deepEqual(snapshot.payload.variables.value.harnesses, [])
-    assert.equal(snapshot.payload.timeline.steps.length, 5)
+    assert.equal(snapshot.payload.timeline.steps.length, 4)
     assert.equal(snapshot.payload.renderResult?.messages[0]?.role, 'system')
     assert.match(
       snapshot.payload.renderResult?.messages[0]?.content ?? '',
@@ -314,6 +524,48 @@ test('runtime connection publishes a complete snapshot and rejects malformed com
   })
 })
 
+test('releasing a project closes its active runtime and releases directory handles', async () => {
+  await withRuntime(async (client, projectDir, app) => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/projects/release',
+      payload: { path: projectDir },
+    })
+    assert.equal(response.statusCode, 200)
+    assert.deepEqual(response.json(), { released: true, path: projectDir })
+
+    const closed = await client.closed
+    assert.equal(closed.code, 1000)
+    assert.equal(closed.reason, 'project closed')
+
+    const movedProjectDir = `${projectDir}-released`
+    fs.renameSync(projectDir, movedProjectDir)
+    fs.renameSync(movedProjectDir, projectDir)
+
+    const staleRequest = await app.inject({
+      method: 'GET',
+      url: `/api/sessions?projectPath=${encodeURIComponent(projectDir)}`,
+    })
+    assert.equal(staleRequest.statusCode, 400)
+    assert.match(staleRequest.json().error, /project is closed/)
+    fs.renameSync(projectDir, movedProjectDir)
+    fs.renameSync(movedProjectDir, projectDir)
+
+    const reopenedProject = await app.inject({
+      method: 'POST',
+      url: '/api/projects/open',
+      payload: { path: projectDir },
+    })
+    assert.equal(reopenedProject.statusCode, 200)
+
+    const reopened = await app.inject({
+      method: 'GET',
+      url: `/api/sessions?projectPath=${encodeURIComponent(projectDir)}`,
+    })
+    assert.equal(reopened.statusCode, 200)
+  })
+})
+
 test('a newer client supersedes the same active session without a reconnect loop', async () => {
   await withRuntime(async (client, projectDir, app) => {
     const attached = client.events.find((event) => event.type === 'session.attached')
@@ -347,7 +599,13 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
       url: '/api/resources/system-variables',
     })
     const systemVariables = systemVariablesResponse.json<{
-      variables: Array<{ key: string; readonly: boolean; source: string; value: string }>
+      variables: Array<{
+        key: string
+        readonly: boolean
+        source: string
+        value: string
+        show_in_status: boolean
+      }>
     }>()
     assert.deepEqual(
       systemVariables.variables.slice(0, 2).map(({ key, readonly, source }) => ({
@@ -360,6 +618,21 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
         { key: 'completion_status', readonly: true, source: 'builtin' },
       ],
     )
+    const sysMessageDefinition = systemVariables.variables.find(
+      (variable) => variable.key === 'sys_message',
+    )
+    assert.deepEqual(sysMessageDefinition, {
+      key: 'sys_message',
+      label: 'LLM messages',
+      description: 'Runtime-managed complete LLM message list exposed as builtin.sys_message.',
+      value: '',
+      required: false,
+      readonly: true,
+      show_in_status: true,
+      source: 'builtin',
+    })
+    assert.deepEqual(snapshot.payload.variables.value.builtin.sys_message, [])
+    assert.equal(snapshot.payload.status.messageCount, 0)
 
     const variablesStart = client.events.length
     const variablesResponse = await app.inject({
@@ -374,6 +647,7 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
             description: 'Required prompt',
             value: '',
             required: true,
+            show_in_status: false,
           },
           {
             key: 'execution_policy',
@@ -381,6 +655,7 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
             description: 'Runtime policy',
             value: 'Updated through HTTP.',
             required: true,
+            show_in_status: true,
           },
         ],
       },
@@ -396,6 +671,7 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
       storedVariables.find((variable) => variable.key === 'execution_policy')?.value,
       'Updated through HTTP.',
     )
+    assert.equal(storedVariables.some((variable) => variable.key === 'sys_message'), false)
     await client.waitFor(
       'variables.updated',
       (event) => event.payload.patch.some((operation) => operation.path === '/builtin/prompts'),
@@ -416,6 +692,16 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
       ),
       false,
     )
+    const statusUpdate = await client.waitFor(
+      'runtime.status.updated',
+      (event) => event.payload.variableTokens.some(
+        (variable) => variable.key === 'execution_policy' && variable.tokens > 0,
+      ),
+      variablesStart,
+    )
+    assert.ok(statusUpdate.payload.variableTokens.some(
+      (variable) => variable.key === 'sys_message' && variable.tokens >= 0,
+    ))
 
     const immutableResponse = await app.inject({
       method: 'PUT',
@@ -488,7 +774,159 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
     assert.equal(latestRender?.payload.messages[0]?.role, 'system')
     assert.ok(latestRender?.payload.messages.some((message) => message.role === 'user'))
     assert.ok(latestRender?.payload.messages.some((message) => message.role === 'assistant'))
+    const snapshotStart = client.events.length
+    client.send('runtime.snapshot.get', {})
+    const completedSnapshot = await client.waitFor('runtime.snapshot', () => true, snapshotStart)
+    assert.equal(completedSnapshot.payload.status.messageCount, 3)
+    assert.deepEqual(
+      completedSnapshot.payload.variables.value.builtin.sys_message.map((message) => (
+        typeof message === 'object' && message && !Array.isArray(message) ? message.role : undefined
+      )),
+      ['system', 'user', 'assistant'],
+    )
+    assert.ok(completedSnapshot.payload.status.variableTokens.some(
+      (variable) => variable.key === 'sys_message' && variable.tokens > 0,
+    ))
   })
+})
+
+test('the next model step uses project LLM settings saved immediately beforehand', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-llm-reload-'))
+  const sourceProject = path.resolve(process.env.CAPYBARA_TEST_PROJECT_DIR ?? 'test-project')
+  fs.cpSync(sourceProject, projectDir, {
+    filter: (source) => {
+      const relative = path.relative(sourceProject, source).replaceAll('\\', '/')
+      return relative !== '.capybara/secrets.json' && !relative.startsWith('.capybara/sessions.sqlite')
+    },
+    recursive: true,
+  })
+
+  const requests: Array<{ model: string; authorization: string }> = []
+  const modelServer = http.createServer((request, response) => {
+    request.setEncoding('utf8')
+    let body = ''
+    request.on('data', (chunk: string) => { body += chunk })
+    request.on('end', () => {
+      const payload = JSON.parse(body) as { model: string }
+      requests.push({
+        model: payload.model,
+        authorization: String(request.headers.authorization ?? ''),
+      })
+      const content = JSON.stringify({
+        status: 'completed',
+        content: `Served by ${payload.model}.`,
+      })
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.write(`data: ${JSON.stringify({
+        id: `response-${requests.length}`,
+        model: payload.model,
+        choices: [{ index: 0, delta: { content }, finish_reason: 'stop' }],
+      })}\n\n`)
+      response.end('data: [DONE]\n\n')
+    })
+  })
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => reject(error)
+      modelServer.once('error', onError)
+      modelServer.listen(0, '127.0.0.1', () => {
+        modelServer.off('error', onError)
+        resolve()
+      })
+    })
+    const address = modelServer.address()
+    assert.ok(address && typeof address === 'object')
+    const baseUrl = `http://127.0.0.1:${address.port}/v1`
+    const configFile = path.join(projectDir, '.capybara', 'config.json')
+    const config = JSON.parse(fs.readFileSync(configFile, 'utf8'))
+    config.llm = {
+      model: 'model-a',
+      base_url: baseUrl,
+      protocol: 'chat-completions',
+    }
+    fs.writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`, 'utf8')
+    fs.writeFileSync(
+      path.join(projectDir, '.capybara', 'secrets.json'),
+      `${JSON.stringify({ version: 1, llm: { api_key: 'key-a' } }, null, 2)}\n`,
+      'utf8',
+    )
+
+    await withRuntime(async (client, _runtimeProjectDir, app) => {
+      let start = client.events.length
+      client.send('chat.message.send', {
+        clientMessageId: 'llm-reload-first',
+        content: [{ type: 'text', text: 'Use the initial model.' }],
+        autoStart: true,
+      })
+      await client.waitFor(
+        'run.state.changed',
+        (event) => event.payload.status === 'completed',
+        start,
+      )
+
+      const settingsResponse = await app.inject({
+        method: 'PUT',
+        url: '/api/resources/project-settings',
+        payload: {
+          llm: {
+            model: 'model-b',
+            base_url: baseUrl,
+            protocol: 'chat-completions',
+            api_key: 'key-b',
+          },
+        },
+      })
+      assert.equal(settingsResponse.statusCode, 200)
+
+      start = client.events.length
+      client.send('chat.message.send', {
+        clientMessageId: 'llm-reload-second',
+        content: [{ type: 'text', text: 'Use the updated model immediately.' }],
+        autoStart: true,
+      })
+      await client.waitFor(
+        'run.state.changed',
+        (event) => event.payload.status === 'completed',
+        start,
+      )
+
+      const testResponse = await app.inject({
+        method: 'POST',
+        url: '/api/resources/project-settings/llm/test',
+        payload: {
+          model: 'model-b',
+          base_url: baseUrl,
+          protocol: 'chat-completions',
+        },
+      })
+      assert.equal(testResponse.statusCode, 200)
+      const testResult = testResponse.json<{
+        ok: boolean
+        model: string
+        protocol: string
+        prompt_variable: string
+        duration_ms: number
+        finish_reason: string
+      }>()
+      assert.equal(testResult.ok, true)
+      assert.equal(testResult.model, 'model-b')
+      assert.equal(testResult.protocol, 'chat-completions')
+      assert.equal(testResult.prompt_variable, 'agent_identity')
+      assert.equal(testResult.finish_reason, 'stop')
+      assert.ok(testResult.duration_ms >= 0)
+      assert.equal(testResponse.body.includes('key-b'), false)
+
+      assert.deepEqual(requests, [
+        { model: 'model-a', authorization: 'Bearer key-a' },
+        { model: 'model-b', authorization: 'Bearer key-b' },
+        { model: 'model-b', authorization: 'Bearer key-b' },
+      ])
+    }, { projectDir }, true)
+  } finally {
+    await new Promise<void>((resolve) => modelServer.close(() => resolve()))
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  }
 })
 
 test('tool manifest changes are watched and published to the runtime', async () => {
@@ -575,7 +1013,6 @@ test('chat input drives the runtime loop, model reply, timeline, tools, and serv
     assert.deepEqual(succeededTypes, [
       'context',
       'render',
-      'compression',
       'model',
       'output',
     ])
@@ -821,7 +1258,6 @@ test('runtime dispatches native model tool calls and returns results to the next
       .map((event) => event.payload.step.type)
     assert.deepEqual(succeededTypes, [
       'context', 'render',
-      'compression',
       'model', 'tool', 'model', 'tool', 'model', 'tool', 'model',
       'output',
     ])
@@ -1069,7 +1505,7 @@ test('starting another run replaces current trace data', async () => {
     })
     const trace = await client.waitFor('run.trace.started', () => true, start)
     assert.notEqual(trace.payload.run.runId, firstCompleted.payload.runId)
-    assert.equal(trace.payload.timeline.steps.length, 5)
+    assert.equal(trace.payload.timeline.steps.length, 4)
     assert.ok(trace.payload.timeline.steps.every((step) => step.status === 'pending'))
     assert.deepEqual(trace.payload.checkpoints.items, [])
     assert.deepEqual(trace.payload.effectiveContexts.items, [])
@@ -2183,275 +2619,6 @@ test('saving a loaded harness through Resources updates its j2 file and rendered
   }, { llm })
 })
 
-test('debug compression pauses for an atomic patch and resumes with summarized context', async () => {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-compression-runtime-'))
-  const sourceProject = path.resolve(process.env.CAPYBARA_TEST_PROJECT_DIR ?? 'test-project')
-  fs.cpSync(sourceProject, projectDir, {
-    filter: (source) => !path.relative(sourceProject, source)
-      .replaceAll('\\', '/')
-      .startsWith('.capybara/sessions.sqlite'),
-    recursive: true,
-  })
-  const configFile = path.join(projectDir, '.capybara', 'config.json')
-  const config = JSON.parse(fs.readFileSync(configFile, 'utf8'))
-  config.context.max_input_tokens = 1024
-  config.context.reserved_output_tokens = 128
-  fs.writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`)
-  const manifestFile = path.join(projectDir, 'context', 'compression', 'manifest.json')
-  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'))
-  manifest.policy = {
-    ...manifest.policy,
-    trigger_ratio: 0.1,
-    target_ratio: 0.05,
-    preserve_recent_turns: 1,
-    max_source_tokens: 4096,
-    max_output_tokens: 256,
-    retry_limit: 0,
-    apply_mode: 'debug',
-  }
-  fs.writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`)
-
-  const requests: LlmChatRequest[] = []
-  const llm = fakeLlm(async (request) => {
-    requests.push(structuredClone({ ...request, signal: undefined }))
-    const prompt = request.messages.length === 1 && request.messages[0]?.role === 'user'
-      ? request.messages[0].content
-      : ''
-    if (prompt.includes('Source units:')) {
-      const baseRevision = Number(prompt.match(/revision (\d+)/)?.[1])
-      const sourceHash = prompt.match(/source hash ([a-f0-9]+)/)?.[1]
-      const sourceUnitId = prompt.match(/"id"\s*:\s*"(unit-[^"]+)"/)?.[1]
-      assert.ok(Number.isInteger(baseRevision))
-      assert.ok(sourceHash)
-      assert.ok(sourceUnitId)
-      return {
-        provider: 'custom',
-        model: 'test-model',
-        text: JSON.stringify({
-          version: 1,
-          base_revision: baseRevision,
-          source_hash: sourceHash,
-          patch_status: 'complete',
-          operations: [{
-            op: 'replace_with_summary',
-            source_unit_ids: [sourceUnitId],
-            summary: {
-              facts: ['The first turn was completed.'],
-              decisions: [],
-              user_requirements: ['Preserve the first request.'],
-              completed_work: ['Answered the first request.'],
-              open_items: [],
-              important_evidence: [],
-            },
-          }],
-        }),
-        finishReason: 'stop',
-        usage: { inputTokens: 50, outputTokens: 20, totalTokens: 70 },
-        raw: {},
-      }
-    }
-    return {
-      provider: 'custom',
-      model: 'test-model',
-      text: JSON.stringify({ status: 'completed', content: 'Completed normally.' }),
-      finishReason: 'stop',
-      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
-      raw: {},
-    }
-  })
-
-  try {
-    await withRuntime(async (client) => {
-      const history = [
-        `First request ${'old implementation detail '.repeat(180)}`,
-        'Second request',
-      ]
-      for (const [index, text] of history.entries()) {
-        const start = client.events.length
-        client.send('chat.message.send', {
-          clientMessageId: `compression-history-${index}`,
-          content: [{ type: 'text', text }],
-          autoStart: true,
-        })
-        await client.waitFor(
-          'run.state.changed',
-          (event) => event.payload.status === 'completed',
-          start,
-        )
-      }
-
-      const start = client.events.length
-      client.send('chat.message.send', {
-        clientMessageId: 'compression-trigger',
-        content: [{ type: 'text', text: 'Third request triggers compression' }],
-        autoStart: true,
-      })
-      await client.waitFor(
-        'run.state.changed',
-        (event) => event.payload.status === 'paused',
-        start,
-      )
-      const pending = client.events.slice(start).reverse().find(
-        (event): event is EventOf<'runtime.compression.updated'> =>
-          event.type === 'runtime.compression.updated' && event.payload.status === 'pending',
-      )
-      assert.ok(pending?.payload.activeCandidateId)
-      const candidate = pending.payload.items.find(
-        (item) => item.id === pending.payload.activeCandidateId,
-      )
-      assert.equal(candidate?.status, 'candidate')
-
-      const applyStart = client.events.length
-      client.send('runtime.compression.apply', {
-        candidateId: pending.payload.activeCandidateId,
-        baseRevision: pending.payload.revision,
-      })
-      const applied = await client.waitFor(
-        'runtime.compression.updated',
-        (event) => event.payload.status === 'applied',
-        applyStart,
-      )
-      assert.ok(applied.payload.savedTokens > 0)
-      client.send('run.resume', {})
-      await client.waitFor(
-        'run.state.changed',
-        (event) => event.payload.status === 'completed',
-        applyStart,
-      )
-
-      const snapshotStart = client.events.length
-      client.send('runtime.snapshot.get', {})
-      const snapshot = await client.waitFor('runtime.snapshot', () => true, snapshotStart)
-      assert.equal(snapshot.payload.conversation.messages.filter((item) => item.role === 'user').length, 3)
-      assert.equal(snapshot.payload.variables.value.context.compressed_history.length, 1)
-      assert.match(
-        snapshot.payload.renderResult?.messages[0]?.content ?? '',
-        /Preserve the first request/,
-      )
-      assert.ok(requests.some((request) => request.messages[0]?.content.includes('Source units:')))
-    }, { projectDir, llm })
-  } finally {
-    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
-  }
-})
-
-test('manual compression applies immediately and restores the exact previous context', async () => {
-  const llm = fakeLlm(async (request) => {
-    const prompt = request.messages.length === 1 && request.messages[0]?.role === 'user'
-      ? request.messages[0].content
-      : ''
-    if (prompt.includes('Source units:')) {
-      const baseRevision = Number(prompt.match(/revision (\d+)/)?.[1])
-      const sourceHash = prompt.match(/source hash ([a-f0-9]+)/)?.[1]
-      const sourceUnitId = prompt.match(/"id"\s*:\s*"(unit-[^"]+)"/)?.[1]
-      assert.ok(Number.isInteger(baseRevision))
-      assert.ok(sourceHash)
-      assert.ok(sourceUnitId)
-      return {
-        provider: 'custom',
-        model: 'test-model',
-        text: JSON.stringify({
-          version: 1,
-          base_revision: baseRevision,
-          source_hash: sourceHash,
-          patch_status: 'complete',
-          operations: [{
-            op: 'replace_with_summary',
-            source_unit_ids: [sourceUnitId],
-            summary: {
-              facts: ['Manual compression preserved the first turn.'],
-              decisions: [],
-              user_requirements: ['Keep exact undo support.'],
-              completed_work: [],
-              open_items: [],
-              important_evidence: [],
-            },
-          }],
-        }),
-        finishReason: 'stop',
-        usage: { inputTokens: 40, outputTokens: 20, totalTokens: 60 },
-        raw: {},
-      }
-    }
-    return {
-      provider: 'custom',
-      model: 'test-model',
-      text: JSON.stringify({ status: 'completed', content: 'Turn completed.' }),
-      finishReason: 'stop',
-      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
-      raw: {},
-    }
-  })
-
-  await withRuntime(async (client) => {
-    for (let index = 0; index < 3; index += 1) {
-      const start = client.events.length
-      client.send('chat.message.send', {
-        clientMessageId: `manual-compression-turn-${index}`,
-        content: [{ type: 'text', text: `Manual compression turn ${index + 1}` }],
-        autoStart: true,
-      })
-      await client.waitFor(
-        'run.state.changed',
-        (event) => event.payload.status === 'completed',
-        start,
-      )
-    }
-
-    const beforeStart = client.events.length
-    client.send('runtime.snapshot.get', {})
-    const before = await client.waitFor('runtime.snapshot', () => true, beforeStart)
-    const beforeMessages = structuredClone(before.payload.renderResult?.messages ?? [])
-    const beforeHistory = structuredClone(
-      before.payload.variables.value.context.compressed_history,
-    )
-    const beforeConversation = structuredClone(before.payload.conversation.messages)
-
-    const compressionStart = client.events.length
-    client.send('runtime.compression.run', {
-      baseRevision: before.payload.compression.revision,
-    })
-    const applied = await client.waitFor(
-      'runtime.compression.updated',
-      (event) => event.payload.status === 'applied' && Boolean(event.payload.revertibleRecordId),
-      compressionStart,
-    )
-    const recordId = applied.payload.revertibleRecordId as string
-    assert.equal(applied.payload.items.find((item) => item.id === recordId)?.status, 'applied')
-
-    const compressedStart = client.events.length
-    client.send('runtime.snapshot.get', {})
-    const compressed = await client.waitFor('runtime.snapshot', () => true, compressedStart)
-    assert.deepEqual(compressed.payload.conversation.messages, beforeConversation)
-    assert.equal(compressed.payload.variables.value.context.compressed_history.length, 1)
-    assert.match(
-      compressed.payload.renderResult?.messages[0]?.content ?? '',
-      /Manual compression preserved the first turn/,
-    )
-
-    const undoStart = client.events.length
-    client.send('runtime.compression.undo', {
-      recordId,
-      baseRevision: applied.payload.revision,
-    })
-    const reverted = await client.waitFor(
-      'runtime.compression.updated',
-      (event) => event.payload.items.some(
-        (item) => item.id === recordId && item.status === 'reverted',
-      ),
-      undoStart,
-    )
-    assert.equal(reverted.payload.revertibleRecordId, undefined)
-
-    const restoredStart = client.events.length
-    client.send('runtime.snapshot.get', {})
-    const restored = await client.waitFor('runtime.snapshot', () => true, restoredStart)
-    assert.deepEqual(restored.payload.conversation.messages, beforeConversation)
-    assert.deepEqual(restored.payload.variables.value.context.compressed_history, beforeHistory)
-    assert.deepEqual(restored.payload.renderResult?.messages ?? [], beforeMessages)
-  }, { llm })
-})
-
 test('project sessions persist runtime requests and can be cleared', async () => {
   await withRuntime(async (client, projectDir, app) => {
     const initial = client.events.find((event) => event.type === 'runtime.snapshot')
@@ -2501,6 +2668,36 @@ test('project sessions persist runtime requests and can be cleared', async () =>
       assert.equal(stats.statusCode, 200)
       assert.equal(stats.json().sessionCount, 1)
       assert.ok(stats.json().bytes > 0)
+
+      const renamed = await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${sessionId}`,
+        payload: { projectPath: projectDir, name: '  Investigation  ' },
+      })
+      assert.equal(renamed.statusCode, 200)
+      assert.equal(renamed.json().name, 'Investigation')
+
+      const listed = await app.inject({
+        method: 'GET',
+        url: `/api/sessions?projectPath=${encodeURIComponent(projectDir)}`,
+      })
+      assert.equal(listed.json().items[0].name, 'Investigation')
+
+      const rejectedRename = await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${sessionId}`,
+        payload: { projectPath: projectDir, name: '   ' },
+      })
+      assert.equal(rejectedRename.statusCode, 400)
+      assert.match(rejectedRename.json().error, /session name is required/)
+
+      const overlongRename = await app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${sessionId}`,
+        payload: { projectPath: projectDir, name: 'x'.repeat(81) },
+      })
+      assert.equal(overlongRename.statusCode, 400)
+      assert.match(overlongRename.json().error, /must not exceed 80 characters/)
 
       const cleared = await app.inject({
         method: 'DELETE',

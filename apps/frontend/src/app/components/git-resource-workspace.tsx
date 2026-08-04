@@ -268,7 +268,7 @@ export default function GitResourceWorkspace({ divider, projectPath }: {
             </div>
           ) : view === "changes" ? (
             selectedPath ? (
-              <CodeSurface ariaLabel={t("git.diff", { path: selectedPath })} language="Text" lineNumbers readOnly statusBar={false} value={diff?.path === selectedPath ? diff.content : ""} />
+              <CodeSurface ariaLabel={t("git.diff", { path: selectedPath })} language="Diff" lineNumbers readOnly statusBar={false} value={diff?.path === selectedPath ? diff.content : ""} />
             ) : (
               <div className="flex h-full items-center justify-center text-[10px] text-[#718488]">{t("git.selectFile")}</div>
             )

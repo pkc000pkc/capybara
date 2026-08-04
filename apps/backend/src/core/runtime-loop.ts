@@ -4,23 +4,10 @@ import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import nunjucks from 'nunjucks'
 
-import {
-  applyCompressionPatch,
-  createCompressionPlan,
-  estimateTokens,
-  omitCompressedUnits,
-  renderCompressionPrompt,
-  runCompression,
-  shrinkCompressionPlan,
-} from '#core/compression/compression-engine'
-import { CompressionResourceStore } from '#core/compression/compression-resource'
-import type {
-  CompressionPatch,
-  CompressionPlan,
-  CompressionResource,
-  CompressionRunResult,
-} from '#core/compression/types'
 import { ContextBuilder, type RenderEvent } from '#core/context-builder'
+import { HookRegistry } from '#core/hooks/hook-registry'
+import { HookRunner } from '#core/hooks/hook-runner'
+import type { HookFixture, HookResult, HookStatusSnapshot } from '#core/hooks/types'
 import { Loop } from '#core/loop'
 import {
   ProjectResources,
@@ -64,8 +51,6 @@ import {
   type RuntimeArtifactMeta,
   type RuntimeBreakpoint,
   type RuntimeCheckpointMeta,
-  type RuntimeCompressionRecord,
-  type RuntimeCompressionState,
   type RuntimeContextRevision,
   type RuntimeEffectiveContextRevision,
   type RuntimeFailure,
@@ -96,6 +81,7 @@ import {
   type LlmToolDefinition,
   type LlmUsage,
 } from '#util/llm'
+import { estimateTokens } from '#util/token-estimate'
 
 export interface RuntimeLlm {
   chat(request: LlmChatRequest): Promise<LlmChatResponse>
@@ -139,8 +125,6 @@ interface Checkpoint {
   toolRound: number
   continuationRound: number
   usage: LlmUsage
-  compression: RuntimeCompressionState
-  pendingCompression?: PendingCompression
 }
 
 interface StoredArtifact {
@@ -164,22 +148,6 @@ export interface RuntimeLoopState {
   toolRound: number
   continuationRound: number
   runUsage: LlmUsage
-  pendingCompression?: PendingCompression
-  compressionUndo?: CompressionUndoSnapshot
-}
-
-interface PendingCompression {
-  id: string
-  plan: CompressionPlan
-  patch: CompressionPatch
-}
-
-interface CompressionUndoSnapshot {
-  recordId: string
-  llmMessages: LlmMessage[]
-  compressedHistory: RuntimeVariables['context']['compressed_history']
-  currentTokens: number
-  savedTokens: number
 }
 
 interface ModelOutput {
@@ -209,11 +177,13 @@ const INITIAL_VARIABLES: RuntimeVariables = {
     main_template: 'main.j2',
     initialized_at: '',
     prompts: {},
+    shared_prompts: [],
     missing_prompts: [],
+    sys_message: [],
   },
   task: { title: '' },
   agent: { name: 'capybara' },
-  context: { files: [], compressed_history: [] },
+  context: { files: [], history_summary: '', evidence_refs: [], evidence_digest: '' },
   user_message: '',
   tools: [],
   harnesses: [],
@@ -306,7 +276,6 @@ const STEP_BLUEPRINT: Array<{
 }> = [
   { id: 'context', type: 'context', summary: '装载变量与上下文文件' },
   { id: 'render', type: 'render', summary: '在服务端渲染提示模板' },
-  { id: 'compression', type: 'compression', summary: '检查并压缩历史上下文' },
   { id: 'model', type: 'model', summary: '调用模型并解析原生工具请求' },
   { id: 'output', type: 'output', summary: '提交最终输出' },
 ]
@@ -317,6 +286,28 @@ function now(): string {
 
 function clone<T>(value: T): T {
   return structuredClone(value)
+}
+
+function changedVariablePaths(
+  before: JsonValue,
+  after: JsonValue,
+  prefix = '',
+  changed = new Set<string>(),
+): Set<string> {
+  if (JSON.stringify(before) === JSON.stringify(after)) return changed
+  if (isObject(before) && isObject(after)) {
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      changedVariablePaths(
+        before[key] ?? null,
+        after[key] ?? null,
+        prefix ? `${prefix}.${key}` : key,
+        changed,
+      )
+    }
+    return changed
+  }
+  if (prefix) changed.add(prefix)
+  return changed
 }
 
 function textDiff(before: string, after: string): JsonObject {
@@ -587,12 +578,12 @@ export class RuntimeLoop extends Loop {
   private readonly contextBuilder: ContextBuilder
   private readonly environment: nunjucks.Environment
   private readonly projectResources: ProjectResources
-  private compressionStore: CompressionResourceStore
-  private compressionResource?: CompressionResource
   private readonly toolRegistry: ToolRegistry
   private readonly skillRegistry: SkillRegistry
+  private readonly hookRegistry: HookRegistry
   private llm: RuntimeLlm
   private readonly projectLlmEnabled: boolean
+  private projectLlmConfigFingerprint?: string
   private toolDispatcher: ToolDispatcher
   private skillScriptRunner: SkillScriptRunner
   private maxMessages: number
@@ -622,7 +613,6 @@ export class RuntimeLoop extends Loop {
   private observationRevision = 0
   private checkpointRevision = 0
   private breakpointRevision = 0
-  private compressionRevision = 1
   private workflowRevision = 0
   private readonly clientMessageIds = new Set<string>()
   private readonly artifacts = new Map<string, StoredArtifact>()
@@ -634,9 +624,6 @@ export class RuntimeLoop extends Loop {
   private checkpoints: Checkpoint[] = []
   private activeContextRevisionId?: string
   private pendingContextRevisionId?: string
-  private pendingCompression?: PendingCompression
-  private compressionUndo?: CompressionUndoSnapshot
-  private manualCompressionActive = false
   private bypassBreakpointStepId?: string
   private pauseCorrelationId?: string
   private readonly messages: ChatMessage[] = []
@@ -649,6 +636,8 @@ export class RuntimeLoop extends Loop {
   private continuationRound = 0
   private runUsage: LlmUsage = {}
   private variables = { revision: 1, value: clone(INITIAL_VARIABLES) }
+  private loopVariableBaseline = clone(INITIAL_VARIABLES)
+  private afterLoopProcessedRunId?: string
   private template: TemplateState = {
     id: 'context-prompt',
     language: 'jinja2+markdown',
@@ -687,20 +676,10 @@ export class RuntimeLoop extends Loop {
     model: 'ready',
     context: { usedTokens: 3260, maxTokens: 16_000, utilization: 0.204 },
     queueDepth: 0,
+    messageCount: 0,
+    variableTokens: [],
     updatedAt: now(),
   }
-  private compression: RuntimeCompressionState = {
-    revision: 1,
-    enabled: false,
-    status: 'disabled',
-    currentTokens: 0,
-    maxTokens: 16_000,
-    targetTokens: 0,
-    savedTokens: 0,
-    items: [],
-    updatedAt: now(),
-  }
-
   constructor(options: RuntimeLoopOptions = {}) {
     super()
     this.streamDelayMs = options.streamDelayMs ?? 45
@@ -724,31 +703,12 @@ export class RuntimeLoop extends Loop {
       maxTokens: this.maxInputTokens - this.reservedOutputTokens,
       utilization: 0,
     }
-    this.compressionStore = new CompressionResourceStore(
-      this.projectDir,
-      config.context.compression.resource,
-    )
-    this.compressionResource = config.context.compression.enabled
-      ? this.compressionStore.read()
-      : undefined
-    this.compression = {
-      ...this.compression,
-      enabled: config.context.compression.enabled,
-      status: config.context.compression.enabled ? 'idle' : 'disabled',
-      maxTokens: this.maxInputTokens - this.reservedOutputTokens,
-      targetTokens: this.compressionResource
-        ? Math.floor(
-            (this.maxInputTokens - this.reservedOutputTokens) *
-            this.compressionResource.manifest.policy.target_ratio,
-          )
-        : 0,
-      ...(this.compressionResource ? { resourceRevision: this.compressionResource.revision } : {}),
-    }
     this.harnessPolicy = clone(config.harness_policy)
     this.toolRegistry = new ToolRegistry(this.projectDir)
     this.toolRegistry.load(config.tools)
     this.skillRegistry = new SkillRegistry(this.projectDir)
     this.skillRegistry.load(config.skills)
+    this.hookRegistry = new HookRegistry(this.projectDir)
     this.toolDispatcher = new ToolDispatcher(this.toolRegistry, this.workspaceDir, {
       timeoutMs: config.tool_timeout_ms,
       permissions: config.tool_permissions,
@@ -761,6 +721,9 @@ export class RuntimeLoop extends Loop {
       protocol: config.llm.protocol,
       apiKey: config.llm.api_key,
     })
+    if (this.projectLlmEnabled) {
+      this.projectLlmConfigFingerprint = this.llmConfigFingerprint(config)
+    }
     this.toolCatalog = this.toolRegistry.list().map((tool) => ({
       id: tool.id,
       name: tool.name,
@@ -794,6 +757,11 @@ export class RuntimeLoop extends Loop {
       main_template: config.main_template,
       initialized_at: now(),
       ...this.systemPromptState(this.systemVariables),
+      sys_message: [],
+    }
+    this.runtimeStatus = {
+      ...this.runtimeStatus,
+      ...this.runtimeStatusMetrics(),
     }
     this.contextBuilder = new ContextBuilder({
       projectDir: this.projectDir,
@@ -868,7 +836,6 @@ export class RuntimeLoop extends Loop {
         items: this.checkpoints.map((checkpoint) => this.checkpointMeta(checkpoint)),
       },
       breakpoints: { revision: this.breakpointRevision, items: this.breakpointItems },
-      compression: this.compression,
       workflows: this.workflows,
       timeline: { revision: this.timelineRevision, steps: this.timeline },
       status: this.runtimeStatus,
@@ -892,8 +859,6 @@ export class RuntimeLoop extends Loop {
       toolRound: this.toolRound,
       continuationRound: this.continuationRound,
       runUsage: this.runUsage,
-      ...(this.pendingCompression ? { pendingCompression: this.pendingCompression } : {}),
-      ...(this.compressionUndo ? { compressionUndo: this.compressionUndo } : {}),
     })
   }
 
@@ -924,15 +889,12 @@ export class RuntimeLoop extends Loop {
     this.observationRevision = snapshot.observations.revision
     this.checkpointRevision = snapshot.checkpoints.revision
     this.breakpointRevision = snapshot.breakpoints.revision
-    this.compressionRevision = snapshot.compression?.revision ?? this.compression.revision
     this.workflowRevision = snapshot.workflows?.revision ?? 0
     this.runCounter = state.runCounter
     this.assistantCounter = state.assistantCounter
     this.toolRound = state.toolRound
     this.continuationRound = state.continuationRound
     this.runUsage = clone(state.runUsage)
-    this.pendingCompression = state.pendingCompression ? clone(state.pendingCompression) : undefined
-    this.compressionUndo = state.compressionUndo ? clone(state.compressionUndo) : undefined
 
     this.messages.splice(0, this.messages.length, ...snapshot.conversation.messages.map((message) => (
       message.status === 'streaming'
@@ -964,14 +926,29 @@ export class RuntimeLoop extends Loop {
       revision: snapshot.variables.revision + 1,
       value: clone(snapshot.variables.value),
     }
+    const allowedContextKeys = new Set([
+      'files',
+      'history_summary',
+      'evidence_refs',
+      'evidence_digest',
+    ])
+    const restoredContext = Object.fromEntries(
+      Object.entries(this.variables.value.context).filter(([key]) => allowedContextKeys.has(key)),
+    ) as Record<string, JsonValue>
     this.variables.value.context = {
-      ...this.variables.value.context,
-      compressed_history: clone(this.variables.value.context.compressed_history ?? []),
+      ...restoredContext,
+      files: Array.isArray(restoredContext.files)
+        ? clone(restoredContext.files) as RuntimeVariables['context']['files']
+        : [],
+      history_summary: String(this.variables.value.context.history_summary ?? ''),
+      evidence_refs: Array.isArray(this.variables.value.context.evidence_refs)
+        ? clone(this.variables.value.context.evidence_refs)
+        : [],
+      evidence_digest: String(this.variables.value.context.evidence_digest ?? ''),
     }
-    if (snapshot.compression) this.compression = clone(snapshot.compression)
     this.workflows = clone(snapshot.workflows ?? { revision: 0, items: [] })
-    if (!this.compressionUndo) this.compression.revertibleRecordId = undefined
     this.variables.value.builtin = currentBuiltin
+    this.variables.value.builtin.sys_message = this.systemMessageValue()
     this.template = {
       ...currentTemplate,
       revision: snapshot.template.revision + (
@@ -1046,6 +1023,7 @@ export class RuntimeLoop extends Loop {
       ...clone(snapshot.status),
       model: 'ready',
       queueDepth: this.pendingToolCalls.size,
+      ...this.runtimeStatusMetrics(),
       updatedAt: now(),
     }
     this.activeAssistantId = undefined
@@ -1071,13 +1049,6 @@ export class RuntimeLoop extends Loop {
   }
 
   validate(command: ClientCommand): void {
-    if (
-      this.manualCompressionActive &&
-      command.type !== 'runtime.snapshot.get' &&
-      command.type !== 'runtime.artifact.get'
-    ) {
-      throw new CommandError('RUN_BUSY', 'manual context compression is in progress')
-    }
     switch (command.type) {
       case 'runtime.snapshot.get':
       case 'run.mode.set':
@@ -1102,44 +1073,6 @@ export class RuntimeLoop extends Loop {
             'INVALID_STATE',
             'historical contexts are inspectable; restore their checkpoint before execution',
           )
-        }
-        return
-      case 'runtime.compression.run':
-        if (!variablesEditable(this.run)) {
-          throw new CommandError('INVALID_STATE', 'pause before compressing context')
-        }
-        if (!this.compression.enabled || !this.compressionResource) {
-          throw new CommandError('INVALID_STATE', 'context compression is disabled')
-        }
-        if (this.pendingCompression) {
-          throw new CommandError('INVALID_STATE', 'resolve the pending compression candidate first')
-        }
-        this.assertRevision(command.payload.baseRevision, this.compression.revision)
-        return
-      case 'runtime.compression.undo':
-        if (!variablesEditable(this.run)) {
-          throw new CommandError('INVALID_STATE', 'pause before undoing context compression')
-        }
-        this.assertRevision(command.payload.baseRevision, this.compression.revision)
-        if (
-          !this.compressionUndo ||
-          this.compressionUndo.recordId !== command.payload.recordId ||
-          this.compression.revertibleRecordId !== command.payload.recordId
-        ) {
-          throw new CommandError('NOT_FOUND', 'revertible compression record was not found')
-        }
-        return
-      case 'runtime.compression.apply':
-      case 'runtime.compression.reject':
-        if (['running', 'waiting', 'pause_requested', 'interrupting'].includes(this.run.status)) {
-          throw new CommandError('INVALID_STATE', 'pause before resolving a compression candidate')
-        }
-        this.assertRevision(command.payload.baseRevision, this.compression.revision)
-        if (
-          !this.pendingCompression ||
-          this.pendingCompression.id !== command.payload.candidateId
-        ) {
-          throw new CommandError('NOT_FOUND', 'compression candidate was not found')
         }
         return
       case 'chat.message.send':
@@ -1182,16 +1115,10 @@ export class RuntimeLoop extends Loop {
         if (this.run.currentStep >= this.timeline.length) {
           throw new CommandError('INVALID_STATE', 'the run has no remaining steps')
         }
-        if (this.pendingCompression) {
-          throw new CommandError('INVALID_STATE', 'apply or reject the compression candidate first')
-        }
         return
       case 'run.resume':
         if (!['paused', 'interrupted'].includes(this.run.status)) {
           throw new CommandError('INVALID_STATE', 'only a paused or interrupted run can resume')
-        }
-        if (this.pendingCompression) {
-          throw new CommandError('INVALID_STATE', 'apply or reject the compression candidate first')
         }
         return
       case 'run.pause':
@@ -1260,6 +1187,16 @@ export class RuntimeLoop extends Loop {
         return
       case 'variables.apply': {
         this.assertRevision(command.payload.baseRevision, this.variables.revision)
+        const sharedPatch = command.payload.patch.filter((operation) =>
+          operation.path.startsWith('/builtin/prompts/'),
+        )
+        if (sharedPatch.length > 0) {
+          if (sharedPatch.length !== command.payload.patch.length) {
+            throw new CommandError('INVALID_PAYLOAD', 'shared variable updates cannot be mixed with session variables')
+          }
+          this.sharedVariableUpdates(command.payload.patch)
+          return
+        }
         if (!variablesEditable(this.run)) {
           throw new CommandError('VARIABLES_LOCKED', 'variables are editable only while paused or in step mode')
         }
@@ -1357,30 +1294,6 @@ export class RuntimeLoop extends Loop {
       case 'runtime.context.apply':
         this.applyContextRevision(command.payload.contextRevisionId, command.id)
         return
-      case 'runtime.compression.run':
-        void this.runManualCompression(command.id)
-        return
-      case 'runtime.compression.undo':
-        this.undoCompression(
-          command.payload.recordId,
-          command.payload.baseRevision,
-          command.id,
-        )
-        return
-      case 'runtime.compression.apply':
-        this.applyCompressionCandidate(
-          command.payload.candidateId,
-          command.payload.baseRevision,
-          command.id,
-        )
-        return
-      case 'runtime.compression.reject':
-        this.rejectCompressionCandidate(
-          command.payload.candidateId,
-          command.payload.baseRevision,
-          command.id,
-        )
-        return
       case 'chat.message.send':
         this.sendMessage(command)
         return
@@ -1395,7 +1308,6 @@ export class RuntimeLoop extends Loop {
         this.beginRun(command.id)
         return
       case 'run.step':
-        this.invalidateCompressionUndo(command.id)
         this.bypassBreakpointStepId = this.timeline[this.run.currentStep]?.id
         this.run = this.withRun({ status: 'running' })
         this.emitRun(command.id)
@@ -1411,7 +1323,6 @@ export class RuntimeLoop extends Loop {
         this.interrupt(command.id)
         return
       case 'run.restartStep':
-        this.invalidateCompressionUndo(command.id)
         this.restartStep(command.id, command.payload.stepId)
         return
       case 'run.restorePrevious':
@@ -1430,7 +1341,11 @@ export class RuntimeLoop extends Loop {
         this.removeBreakpoint(command.payload.breakpointId, command.id)
         return
       case 'variables.apply':
-        this.updateVariables(command.payload.patch, 'user', command.id)
+        if (command.payload.patch.some((operation) => operation.path.startsWith('/builtin/prompts/'))) {
+          this.updateSharedVariables(command.payload.patch, command.id)
+        } else {
+          this.updateVariables(command.payload.patch, 'user', command.id)
+        }
         return
       case 'template.update':
         this.saveContextFile(
@@ -1518,7 +1433,6 @@ export class RuntimeLoop extends Loop {
 
   private beginRun(correlationId: string, requestId = `request-${randomUUID()}`): void {
     this.abortActiveWork()
-    this.compressionUndo = undefined
     this.generation += 1
     this.runCounter += 1
     this.run = this.withRun({
@@ -1536,27 +1450,14 @@ export class RuntimeLoop extends Loop {
     this.workflowData.clear()
     this.workflowRevision += 1
     this.workflows = { revision: this.workflowRevision, items: [] }
-    this.pendingCompression = undefined
-    this.compression = {
-      ...this.compression,
-      status: this.compression.enabled ? 'idle' : 'disabled',
-      activeCandidateId: undefined,
-      revertibleRecordId: undefined,
-      failure: undefined,
-      updatedAt: now(),
-    }
     this.toolRound = 0
     this.continuationRound = 0
     this.runUsage = {}
-    const system = this.renderResult.messages.find((message) => message.role === 'system')
-      ?.content ?? ''
-    this.llmMessages = omitCompressedUnits(
-      this.conversationMessages(system),
-      this.variables.value.context.compressed_history.flatMap((item) => item.sourceUnitIds),
-    )
+    this.afterLoopProcessedRunId = undefined
     const latestContext = this.pendingContextRevisionId ?? this.contextItems.at(-1)?.id
     if (latestContext) this.applyContextRevision(latestContext, correlationId)
     this.publishRenderedMessages(correlationId)
+    this.loopVariableBaseline = clone(this.variables.value)
     this.checkpoints = []
     this.snapshotRevision += 1
     this.emit('run.trace.started', {
@@ -1692,9 +1593,6 @@ export class RuntimeLoop extends Loop {
         case 'render':
           this.renderAndPublish(correlationId)
           break
-        case 'compression':
-          await this.executeCompressionStep(runningStep, correlationId, generation)
-          break
         case 'model':
           await this.executeModelStep(runningStep, correlationId, generation)
           break
@@ -1726,9 +1624,14 @@ export class RuntimeLoop extends Loop {
         },
       }, correlationId)
       this.failAssistant(failure, correlationId)
-      this.run = this.withRun({ status: 'failed', failure })
+      this.run = this.withRun({ status: 'waiting', failure })
       this.updateRuntimeStatus({ model: 'ready' }, correlationId)
       this.emitRun(correlationId)
+      await this.runAfterLoopHooks('failed', correlationId, generation)
+      if (this.generation === generation && this.run.status === 'waiting') {
+        this.run = this.withRun({ status: 'failed', failure })
+        this.emitRun(correlationId)
+      }
       return false
     }
 
@@ -1758,11 +1661,18 @@ export class RuntimeLoop extends Loop {
       currentStep: nextStep,
       currentStepId: completedStep.id,
       status: isComplete
-        ? 'completed'
+        ? 'waiting'
         : pauseAfterBreakpoint || pauseRequested
           ? 'paused'
           : this.run.status,
     })
+    if (isComplete) {
+      await this.runAfterLoopHooks('completed', correlationId, generation)
+      if (this.generation !== generation || ['interrupted', 'cancelled'].includes(this.run.status)) {
+        return false
+      }
+      this.run = this.withRun({ status: 'completed' })
+    }
     this.pushCheckpoint(nextStep, completedStep.id, correlationId, afterCheckpointId)
     this.emitRun(pauseRequested ? this.pauseCorrelationId ?? correlationId : correlationId)
     if (pauseAfterBreakpoint) {
@@ -1802,7 +1712,6 @@ export class RuntimeLoop extends Loop {
   }
 
   private resume(correlationId: string): void {
-    this.invalidateCompressionUndo(correlationId)
     if (this.run.status === 'interrupted') this.generation += 1
     this.bypassBreakpointStepId = this.timeline[this.run.currentStep]?.id
     this.run = this.withRun({ status: 'running' })
@@ -1947,6 +1856,7 @@ export class RuntimeLoop extends Loop {
     }
     this.messages.splice(0, this.messages.length, ...clone(checkpoint.messages))
     this.llmMessages = clone(checkpoint.llmMessages)
+    this.variables.value.builtin.sys_message = this.systemMessageValue()
     this.tools = {
       ...this.tools,
       revision: this.tools.revision + 1,
@@ -1981,19 +1891,12 @@ export class RuntimeLoop extends Loop {
     this.toolRound = checkpoint.toolRound
     this.continuationRound = checkpoint.continuationRound
     this.runUsage = clone(checkpoint.usage)
-    this.compression = clone(checkpoint.compression ?? this.compression)
-    this.compression.revertibleRecordId = undefined
-    this.compressionRevision = this.compression.revision
-    this.compressionUndo = undefined
-    this.pendingCompression = checkpoint.pendingCompression
-      ? clone(checkpoint.pendingCompression)
-      : undefined
     this.renderResult = clone(checkpoint.renderResult)
     this.activeContextRevisionId = checkpoint.contextRevisionId
     this.pendingContextRevisionId = undefined
     this.activeAssistantId = this.messages.find((message) => message.status === 'streaming')?.id
     this.responseGeneration += 1
-    const patch: JsonPatchOperation[] = Object.entries(checkpoint.variables).map(
+    const patch: JsonPatchOperation[] = Object.entries(this.variables.value).map(
       ([key, value]) => ({
         op: 'add',
         path: `/${escapePointerToken(key)}`,
@@ -2038,7 +1941,6 @@ export class RuntimeLoop extends Loop {
   private sendMessage(
     command: Extract<ClientCommand, { type: 'chat.message.send' }>,
   ): void {
-    this.invalidateCompressionUndo(command.id)
     const timestamp = now()
     const text = command.payload.content
       .filter((part): part is Extract<typeof part, { type: 'text' }> => part.type === 'text')
@@ -2062,11 +1964,7 @@ export class RuntimeLoop extends Loop {
     this.conversationRevision += 1
     this.snapshotRevision += 1
     this.emit('chat.user.created', clone(message), command.id)
-    const system = this.renderResult.messages.find((item) => item.role === 'system')
-      ?.content ?? ''
-    if (command.payload.autoStart) {
-      this.llmMessages = this.conversationMessages(system)
-    } else if (this.run.runId) {
+    if (!command.payload.autoStart && this.run.runId) {
       this.llmMessages.push({ role: 'user', content: text })
       const conversationLimit = Math.max(this.maxMessages - 1, 0)
       const system = this.llmMessages[0]?.role === 'system' ? this.llmMessages[0] : undefined
@@ -2089,402 +1987,18 @@ export class RuntimeLoop extends Loop {
     if (harnessesChanged) {
       this.emit('runtime.harnesses.updated', clone(this.harnesses), command.id)
     }
+    if (command.payload.autoStart) {
+      const system = this.renderResult.messages.find((item) => item.role === 'system')?.content ?? ''
+      const conversation = this.llmMessages.filter((item) => item.role !== 'system')
+      const conversationLimit = Math.max(this.maxMessages - 1, 0)
+      this.llmMessages = [
+        { role: 'system', content: system },
+        ...(conversationLimit > 0
+          ? [...conversation, { role: 'user' as const, content: text }].slice(-conversationLimit)
+          : []),
+      ]
+    }
     if (command.payload.autoStart) this.beginRun(command.id, requestId)
-  }
-
-  private updateCompression(
-    changes: Partial<Omit<RuntimeCompressionState, 'revision' | 'updatedAt'>>,
-    correlationId: string,
-  ): void {
-    this.compressionRevision += 1
-    this.compression = {
-      ...this.compression,
-      ...changes,
-      revision: this.compressionRevision,
-      updatedAt: now(),
-    }
-    this.snapshotRevision += 1
-    this.emit('runtime.compression.updated', clone(this.compression), correlationId)
-  }
-
-  private invalidateCompressionUndo(correlationId: string): void {
-    if (!this.compressionUndo && !this.compression.revertibleRecordId) return
-    this.compressionUndo = undefined
-    this.updateCompression({ revertibleRecordId: undefined }, correlationId)
-  }
-
-  private compressionTools(): LlmToolDefinition[] {
-    return [
-      ...this.internalResourceTools(),
-      ...this.tools.items.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.inputSchema,
-      })),
-    ]
-  }
-
-  private async executeCompressionStep(
-    step: TimelineStep,
-    correlationId: string,
-    generation: number,
-    options: {
-      force?: boolean
-      applyImmediately?: boolean
-      captureUndo?: boolean
-      reportNoPlan?: boolean
-    } = {},
-  ): Promise<void> {
-    const tools = this.compressionTools()
-    const availableTokens = this.maxInputTokens - this.reservedOutputTokens
-    const currentTokens = estimateTokens({ messages: this.llmMessages, tools })
-    this.updateRuntimeStatus({
-      context: {
-        usedTokens: currentTokens,
-        maxTokens: availableTokens,
-        utilization: Math.min(currentTokens / availableTokens, 1),
-      },
-    }, correlationId)
-    this.updateCompression({
-      currentTokens,
-      maxTokens: availableTokens,
-      status: this.compression.enabled ? 'planning' : 'disabled',
-      failure: undefined,
-    }, correlationId)
-
-    const resource = this.compressionResource
-    if (!this.compression.enabled || !resource) {
-      step.detail = { ...(step.detail ?? {}), triggered: false, reason: 'disabled' }
-      return
-    }
-    let plan = createCompressionPlan(
-      this.llmMessages,
-      resource,
-      this.compression.revision,
-      availableTokens,
-      tools,
-      options.force ?? false,
-    )
-    if (!plan) {
-      const failure = options.reportNoPlan
-        ? { code: 'NO_ELIGIBLE_HISTORY', message: 'No completed historical turn can be compressed' }
-        : undefined
-      this.updateCompression({
-        status: failure ? 'failed' : 'idle',
-        failure,
-      }, correlationId)
-      step.detail = {
-        ...(step.detail ?? {}),
-        triggered: false,
-        currentTokens,
-        ...(failure ? { error: failure } : {}),
-      }
-      return
-    }
-
-    this.updateCompression({
-      status: 'generating',
-      targetTokens: plan.targetTokens,
-    }, correlationId)
-    let result: CompressionRunResult | undefined
-    let requestArtifact: RuntimeArtifactMeta | undefined
-    let responseArtifact: RuntimeArtifactMeta | undefined
-    let failure: Error | undefined
-    for (let attempt = 0; attempt <= resource.manifest.policy.retry_limit; attempt += 1) {
-      const prompt = renderCompressionPrompt(this.compressionStore, resource, plan)
-      requestArtifact = this.createArtifact(
-        'compression-request',
-        `Compression request · attempt ${attempt + 1}`,
-        {
-          resourceRevision: resource.revision,
-          baseRevision: plan.baseRevision,
-          sourceHash: plan.sourceHash,
-          sourceUnitIds: plan.units.map((unit) => unit.id),
-          prompt,
-        },
-        correlationId,
-      )
-      const controller = new AbortController()
-      this.activeAbortController = controller
-      try {
-        result = await runCompression(
-          this.llm,
-          this.compressionStore,
-          resource,
-          plan,
-          controller.signal,
-        )
-        responseArtifact = this.createArtifact(
-          'compression-response',
-          `Compression response · attempt ${attempt + 1}`,
-          {
-            text: result.responseText,
-            finishReason: result.finishReason ?? null,
-            usage: result.usage ?? null,
-          },
-          correlationId,
-        )
-        this.addUsage(result.usage)
-        failure = undefined
-        break
-      } catch (error) {
-        failure = error instanceof Error ? error : new Error(String(error))
-        responseArtifact = this.createArtifact(
-          'compression-response',
-          `Compression response · attempt ${attempt + 1}`,
-          { error: failure.message },
-          correlationId,
-        )
-        const smaller = shrinkCompressionPlan(plan)
-        if (!smaller || attempt >= resource.manifest.policy.retry_limit) break
-        plan = smaller
-      } finally {
-        if (this.activeAbortController === controller) this.activeAbortController = undefined
-      }
-      if (this.generation !== generation) return
-    }
-
-    if (!result || !requestArtifact || !responseArtifact) {
-      const failureValue = {
-        code: 'COMPRESSION_OUTPUT_INVALID',
-        message: failure?.message ?? 'compression failed',
-      }
-      const record: RuntimeCompressionRecord = {
-        id: `compression-${randomUUID()}`,
-        runId: this.run.runId ?? `manual:${correlationId}`,
-        resourceRevision: resource.revision,
-        status: 'failed',
-        baseRevision: plan.baseRevision,
-        sourceUnitIds: plan.units.map((unit) => unit.id),
-        beforeTokens: plan.beforeTokens,
-        targetTokens: plan.targetTokens,
-        requestArtifactId: requestArtifact?.id ?? '',
-        responseArtifactId: responseArtifact?.id ?? '',
-        failure: failureValue,
-        createdAt: now(),
-      }
-      this.updateCompression({
-        status: 'failed',
-        items: [...this.compression.items, record],
-        failure: failureValue,
-      }, correlationId)
-      step.detail = {
-        ...(step.detail ?? {}),
-        triggered: true,
-        recordId: record.id,
-        requestArtifactId: requestArtifact?.id ?? null,
-        responseArtifactId: responseArtifact?.id ?? null,
-        error: failureValue,
-      }
-      if (currentTokens > availableTokens) {
-        throw new RuntimeStageError(
-          'compression',
-          'CONTEXT_OVERFLOW',
-          `context uses ${currentTokens} tokens and compression failed: ${failureValue.message}`,
-          true,
-        )
-      }
-      return
-    }
-
-    this.updateCompression({ status: 'validating' }, correlationId)
-    const patchArtifact = this.createArtifact(
-      'compression-patch',
-      'Validated compression patch',
-      result.patch,
-      correlationId,
-    )
-    const validationArtifact = this.createArtifact(
-      'compression-validation',
-      'Compression patch validation',
-      {
-        valid: true,
-        baseRevision: result.patch.base_revision,
-        sourceHash: result.patch.source_hash,
-        operationCount: result.patch.operations.length,
-        sourceUnitIds: result.patch.operations.flatMap((operation) => operation.source_unit_ids),
-      },
-      correlationId,
-    )
-    const id = `compression-${randomUUID()}`
-    const record: RuntimeCompressionRecord = {
-      id,
-      runId: this.run.runId ?? `manual:${correlationId}`,
-      resourceRevision: resource.revision,
-      status: 'candidate',
-      baseRevision: result.plan.baseRevision,
-      sourceUnitIds: result.patch.operations.flatMap((operation) => operation.source_unit_ids),
-      beforeTokens: result.plan.beforeTokens,
-      targetTokens: result.plan.targetTokens,
-      requestArtifactId: requestArtifact.id,
-      responseArtifactId: responseArtifact.id,
-      patchArtifactId: patchArtifact.id,
-      validationArtifactId: validationArtifact.id,
-      createdAt: now(),
-    }
-    this.pendingCompression = { id, plan: result.plan, patch: result.patch }
-    this.updateCompression({
-      status: 'pending',
-      activeCandidateId: id,
-      items: [...this.compression.items, record],
-    }, correlationId)
-    step.detail = {
-      ...(step.detail ?? {}),
-      triggered: true,
-      recordId: id,
-      beforeTokens: result.plan.beforeTokens,
-      targetTokens: result.plan.targetTokens,
-      requestArtifactId: requestArtifact.id,
-      responseArtifactId: responseArtifact.id,
-      patchArtifactId: patchArtifact.id,
-      validationArtifactId: validationArtifact.id,
-    }
-    if (options.applyImmediately) {
-      this.applyCompressionCandidate(
-        id,
-        this.compression.revision,
-        correlationId,
-        options.captureUndo ?? false,
-      )
-    } else if (this.run.mode === 'continuous' && resource.manifest.policy.apply_mode === 'automatic') {
-      this.applyCompressionCandidate(id, this.compression.revision, correlationId)
-    } else if (this.run.mode === 'continuous') {
-      this.requestPause(correlationId)
-    }
-  }
-
-  private applyCompressionCandidate(
-    candidateId: string,
-    baseRevision: number,
-    correlationId: string,
-    captureUndo = false,
-  ): void {
-    this.assertRevision(baseRevision, this.compression.revision)
-    const pending = this.pendingCompression
-    if (!pending || pending.id !== candidateId) {
-      throw new CommandError('NOT_FOUND', 'compression candidate was not found')
-    }
-    const record = this.compression.items.find((item) => item.id === candidateId)
-    if (!record || record.status !== 'candidate') {
-      throw new CommandError('INVALID_STATE', 'compression candidate is not pending')
-    }
-    this.compressionUndo = captureUndo
-      ? {
-          recordId: candidateId,
-          llmMessages: clone(this.llmMessages),
-          compressedHistory: clone(this.variables.value.context.compressed_history),
-          currentTokens: this.compression.currentTokens,
-          savedTokens: this.compression.savedTokens,
-        }
-      : undefined
-    this.llmMessages = applyCompressionPatch(this.llmMessages, pending.plan, pending.patch)
-    const createdAt = now()
-    const additions = pending.patch.operations.map((operation, index) => ({
-      id: `${candidateId}-${index + 1}`,
-      sourceUnitIds: [...operation.source_unit_ids],
-      summary: clone(operation.summary),
-      createdAt,
-    }))
-    this.updateVariables([{
-      op: 'replace',
-      path: '/context/compressed_history',
-      value: [...this.variables.value.context.compressed_history, ...additions],
-    }], 'runtime', correlationId)
-    const afterTokens = estimateTokens({ messages: this.llmMessages, tools: this.compressionTools() })
-    const savedTokens = Math.max(0, pending.plan.beforeTokens - afterTokens)
-    const applied: RuntimeCompressionRecord = {
-      ...record,
-      status: 'applied',
-      afterTokens,
-      savedTokens,
-      appliedAt: createdAt,
-    }
-    this.pendingCompression = undefined
-    this.updateCompression({
-      status: 'applied',
-      activeCandidateId: undefined,
-      revertibleRecordId: captureUndo ? candidateId : undefined,
-      currentTokens: afterTokens,
-      savedTokens: this.compression.savedTokens + savedTokens,
-      items: this.compression.items.map((item) => item.id === candidateId ? applied : item),
-      failure: undefined,
-    }, correlationId)
-  }
-
-  private async runManualCompression(correlationId: string): Promise<void> {
-    this.manualCompressionActive = true
-    this.invalidateCompressionUndo(correlationId)
-    const step: TimelineStep = {
-      id: `manual-compression-${randomUUID()}`,
-      index: -1,
-      type: 'compression',
-      status: 'running',
-      summary: 'Manual context compression',
-    }
-    try {
-      await this.executeCompressionStep(step, correlationId, this.generation, {
-        force: true,
-        applyImmediately: true,
-        captureUndo: true,
-        reportNoPlan: true,
-      })
-    } catch (error) {
-      const failure = {
-        code: error instanceof RuntimeStageError ? error.code : 'COMPRESSION_FAILED',
-        message: error instanceof Error ? error.message : String(error),
-      }
-      this.updateCompression({ status: 'failed', failure }, correlationId)
-    } finally {
-      this.manualCompressionActive = false
-    }
-  }
-
-  private undoCompression(
-    recordId: string,
-    baseRevision: number,
-    correlationId: string,
-  ): void {
-    this.assertRevision(baseRevision, this.compression.revision)
-    const snapshot = this.compressionUndo
-    if (!snapshot || snapshot.recordId !== recordId) {
-      throw new CommandError('NOT_FOUND', 'revertible compression record was not found')
-    }
-    this.llmMessages = clone(snapshot.llmMessages)
-    this.updateVariables([{
-      op: 'replace',
-      path: '/context/compressed_history',
-      value: clone(snapshot.compressedHistory),
-    }], 'runtime', correlationId)
-    this.compressionUndo = undefined
-    this.updateCompression({
-      status: 'idle',
-      revertibleRecordId: undefined,
-      currentTokens: snapshot.currentTokens,
-      savedTokens: snapshot.savedTokens,
-      items: this.compression.items.map((item) => item.id === recordId
-        ? { ...item, status: 'reverted', revertedAt: now() }
-        : item),
-      failure: undefined,
-    }, correlationId)
-  }
-
-  private rejectCompressionCandidate(
-    candidateId: string,
-    baseRevision: number,
-    correlationId: string,
-  ): void {
-    this.assertRevision(baseRevision, this.compression.revision)
-    if (!this.pendingCompression || this.pendingCompression.id !== candidateId) {
-      throw new CommandError('NOT_FOUND', 'compression candidate was not found')
-    }
-    this.pendingCompression = undefined
-    this.updateCompression({
-      status: 'rejected',
-      activeCandidateId: undefined,
-      items: this.compression.items.map((item) => item.id === candidateId
-        ? { ...item, status: 'rejected', rejectedAt: now() }
-        : item),
-    }, correlationId)
   }
 
   private publishWorkflows(correlationId: string): void {
@@ -3008,6 +2522,7 @@ export class RuntimeLoop extends Loop {
     correlationId: string,
     generation: number,
   ): Promise<void> {
+    this.refreshProjectLlm()
     const llm = this.llm
     this.ensureAssistantStarted(correlationId)
     const controller = new AbortController()
@@ -3678,8 +3193,6 @@ export class RuntimeLoop extends Loop {
     const phase: RuntimeFailurePhase = staged?.phase ?? (
       step.type === 'model'
         ? 'model_transport'
-        : step.type === 'compression'
-          ? 'compression'
         : step.type === 'tool'
           ? 'tool_dispatch'
           : step.type === 'workflow'
@@ -3932,7 +3445,7 @@ export class RuntimeLoop extends Loop {
     }
     const defer = Boolean(
       this.run.runId &&
-      ['running', 'waiting', 'pause_requested', 'interrupting'].includes(this.run.status),
+      ['running', 'pause_requested', 'interrupting'].includes(this.run.status),
     )
     if (defer) {
       this.pendingContextRevisionId = context.id
@@ -3944,6 +3457,7 @@ export class RuntimeLoop extends Loop {
       if (system?.role === 'system' && this.llmMessages[0]?.role === 'system') {
         this.llmMessages[0] = { role: 'system', content: system.content }
       }
+      this.syncSystemMessages(correlationId)
     }
     this.contextItems.push(context)
     this.contextRevision += 1
@@ -3979,6 +3493,7 @@ export class RuntimeLoop extends Loop {
         this.llmMessages[0] = { role: 'system', content: system.content }
       }
     }
+    this.syncSystemMessages(correlationId)
     this.emit('runtime.context.applied', {
       revision: this.contextRevision,
       contextRevisionId: context.id,
@@ -4027,8 +3542,6 @@ export class RuntimeLoop extends Loop {
       toolRound: this.toolRound,
       continuationRound: this.continuationRound,
       usage: clone(this.runUsage),
-      compression: clone(this.compression),
-      ...(this.pendingCompression ? { pendingCompression: clone(this.pendingCompression) } : {}),
     }
   }
 
@@ -4082,9 +3595,28 @@ export class RuntimeLoop extends Loop {
 
   private updateVariables(
     patch: JsonPatchOperation[],
-    source: 'user' | 'runtime' | 'tool' | 'restore',
+    source: 'user' | 'runtime' | 'tool' | 'hook' | 'restore',
     correlationId: string,
   ): void {
+    const sharedPatch = patch.filter((operation) =>
+      operation.path.startsWith('/builtin/prompts/'),
+    )
+    if (sharedPatch.length > 0) {
+      try {
+        const updates = this.sharedVariableUpdates(sharedPatch)
+        void this.projectResources.updateSharedSystemVariables(updates).catch((error: unknown) => {
+          this.emit('protocol.error', {
+            code: 'SHARED_VARIABLE_UPDATE_FAILED',
+            message: error instanceof Error ? error.message : String(error),
+          }, correlationId)
+        })
+      } catch (error) {
+        this.emit('protocol.error', {
+          code: 'SHARED_VARIABLE_UPDATE_FAILED',
+          message: error instanceof Error ? error.message : String(error),
+        }, correlationId)
+      }
+    }
     const baseRevision = this.variables.revision
     const effectivePatch = [...patch]
     let value = applyPatch(this.variables.value, effectivePatch)
@@ -4112,6 +3644,49 @@ export class RuntimeLoop extends Loop {
     this.renderAndPublish(correlationId)
   }
 
+  private sharedVariableUpdates(
+    patch: readonly JsonPatchOperation[],
+  ): Array<{ key: string; value: string }> {
+    return patch.map((operation) => {
+      if (operation.op === 'remove' || typeof operation.value !== 'string') {
+        throw new CommandError('INVALID_PAYLOAD', 'shared variables accept text add or replace operations only')
+      }
+      const tokens = decodePointer(operation.path)
+      if (tokens.length !== 3 || tokens[0] !== 'builtin' || tokens[1] !== 'prompts') {
+        throw new CommandError('INVALID_PAYLOAD', 'shared variables must target /builtin/prompts/<key>')
+      }
+      const key = tokens[2]
+      if (!key) throw new CommandError('INVALID_PAYLOAD', 'shared variable key is required')
+      const variable = this.systemVariables.variables.find((item) => item.key === key)
+      if (!variable || variable.scope !== 'project') {
+        throw new CommandError('INVALID_PAYLOAD', `variable is not project-scoped: ${key}`)
+      }
+      return { key, value: operation.value }
+    })
+  }
+
+  private updateSharedVariables(
+    patch: readonly JsonPatchOperation[],
+    correlationId: string,
+  ): void {
+    let updates: Array<{ key: string; value: string }>
+    try {
+      updates = this.sharedVariableUpdates(patch)
+    } catch (error) {
+      this.emit('protocol.error', {
+        code: 'SHARED_VARIABLE_UPDATE_FAILED',
+        message: error instanceof Error ? error.message : String(error),
+      }, correlationId)
+      return
+    }
+    void this.projectResources.updateSharedSystemVariables(updates).catch((error: unknown) => {
+      this.emit('protocol.error', {
+        code: 'SHARED_VARIABLE_UPDATE_FAILED',
+        message: error instanceof Error ? error.message : String(error),
+      }, correlationId)
+    })
+  }
+
   private contextRenderResult(
     content: string,
     missingVariables: readonly string[] = [],
@@ -4121,8 +3696,6 @@ export class RuntimeLoop extends Loop {
       .filter((variable) => variable.required)
       .map((variable) => `builtin.prompts.${variable.key}`)
       .filter((name) => !referencedVariables.has(name))
-    const compressionReferenceMissing = this.compression.enabled &&
-      !referencedVariables.has('context.compressed_history')
     const missingValues = [
       ...missingVariables,
       ...this.variables.value.builtin.missing_prompts.map(
@@ -4148,11 +3721,6 @@ export class RuntimeLoop extends Loop {
           code: 'MISSING_SYSTEM_VARIABLE_REFERENCE',
           message: `Required system variable "${name}" is not referenced by the template`,
         })),
-        ...(compressionReferenceMissing ? [{
-          severity: 'warning' as const,
-          code: 'MISSING_COMPRESSION_CONTEXT_REFERENCE',
-          message: 'Compression is enabled but "context.compressed_history" is not referenced by the template',
-        }] : []),
       ],
     }
   }
@@ -4160,12 +3728,223 @@ export class RuntimeLoop extends Loop {
   private systemPromptState(resource: SystemVariablesResource) {
     return {
       prompts: Object.fromEntries(
-        resource.variables.map((variable) => [variable.key, variable.value]),
+        resource.variables
+          .filter((variable) => variable.key !== 'sys_message')
+          .map((variable) => [variable.key, variable.value]),
       ),
+      shared_prompts: resource.variables
+        .filter((variable) => variable.key !== 'sys_message' && variable.scope === 'project')
+        .map((variable) => variable.key),
       missing_prompts: resource.variables
-        .filter((variable) => variable.required && !variable.value.trim())
+        .filter((variable) => (
+          variable.key !== 'sys_message' && variable.required && !variable.value.trim()
+        ))
         .map((variable) => variable.key),
     }
+  }
+
+  private systemMessageValue(): JsonValue[] {
+    return this.llmMessages.map((message) => toJsonValue(message))
+  }
+
+  private statusVariableTokens(): RuntimeStatusState['variableTokens'] {
+    return this.systemVariables.variables
+      .filter((variable) => variable.show_in_status)
+      .map((variable) => ({
+        key: variable.key,
+        label: variable.label,
+        tokens: estimateTokens(
+          variable.key === 'sys_message'
+            ? this.llmMessages
+            : this.variables.value.builtin.prompts[variable.key] ?? variable.value,
+        ),
+      }))
+  }
+
+  private runtimeStatusMetrics(): Pick<RuntimeStatusState, 'messageCount' | 'variableTokens'> {
+    return {
+      messageCount: this.llmMessages.length,
+      variableTokens: this.statusVariableTokens(),
+    }
+  }
+
+  private hookStatus(outcome: 'completed' | 'failed' | 'cancelled'): HookStatusSnapshot {
+    const metrics = this.runtimeStatusMetrics()
+    return {
+      run: {
+        status: outcome,
+        ...(this.run.failure ? { failure: toJsonValue(this.run.failure) } : {}),
+      },
+      context: clone(this.runtimeStatus.context),
+      queueDepth: this.runtimeStatus.queueDepth,
+      messageCount: metrics.messageCount,
+      variableTokens: Object.fromEntries(metrics.variableTokens.map((variable) => [
+        variable.key === 'sys_message' ? 'builtin.sys_message' : `builtin.prompts.${variable.key}`,
+        variable.tokens,
+      ])),
+    }
+  }
+
+  private async runAfterLoopHooks(
+    outcome: 'completed' | 'failed' | 'cancelled',
+    correlationId: string,
+    generation: number,
+  ): Promise<void> {
+    const runId = this.run.runId
+    if (!runId || this.afterLoopProcessedRunId === runId) return
+    this.afterLoopProcessedRunId = runId
+    this.syncSystemMessages(correlationId)
+    const changedVariables = [...changedVariablePaths(
+      this.loopVariableBaseline,
+      this.variables.value,
+    )].sort()
+    const fixture: HookFixture = {
+      checkpoint: 'after_loop',
+      runId,
+      loopIteration: this.runCounter,
+      status: this.hookStatus(outcome),
+      changedVariables,
+      variables: clone(this.variables.value),
+      messages: clone(this.llmMessages),
+    }
+    const hooks = this.hookRegistry.list()
+      .filter((hook) => hook.loadable && hook.enabled)
+      .sort((left, right) => right.schedule.priority - left.schedule.priority || left.name.localeCompare(right.name))
+    const claimedPaths = new Set<string>()
+    const controller = new AbortController()
+    this.activeAbortController = controller
+    try {
+      for (const hook of hooks) {
+        if (this.generation !== generation || controller.signal.aborted) return
+        try {
+          const execution = await new HookRunner(this.llm).run(hook, fixture, controller.signal)
+          this.addUsage(execution.usage)
+          if (execution.matched && execution.result) {
+            this.applyHookResult(hook, execution.result, claimedPaths, correlationId)
+          }
+          this.createArtifact(
+            'hook-result',
+            `Hook ${execution.matched ? 'result' : 'check'} · ${hook.name}`,
+            {
+              hookId: hook.id,
+              hookRevision: hook.revision,
+              checkpoint: 'after_loop',
+              changedVariables,
+              matched: execution.matched,
+              attempts: execution.attempts,
+              durationMs: execution.durationMs,
+              usage: toJsonValue(execution.usage),
+              result: toJsonValue(execution.result ?? {}),
+            },
+            correlationId,
+          )
+          if (execution.logs.length > 0) {
+            this.createArtifact(
+              'hook-log',
+              `Hook log · ${hook.name}`,
+              toJsonValue(execution.logs),
+              correlationId,
+            )
+          }
+        } catch (error) {
+          this.createArtifact(
+            'runtime-error',
+            `Hook failed · ${hook.name}`,
+            {
+              hookId: hook.id,
+              hookRevision: hook.revision,
+              checkpoint: 'after_loop',
+              message: error instanceof Error ? error.message : String(error),
+            },
+            correlationId,
+          )
+        }
+      }
+    } finally {
+      if (this.activeAbortController === controller) this.activeAbortController = undefined
+    }
+    const usedTokens = estimateTokens(this.llmMessages)
+    const maxTokens = this.runtimeStatus.context.maxTokens
+    this.updateRuntimeStatus({
+      context: {
+        usedTokens,
+        maxTokens,
+        utilization: Math.min(usedTokens / maxTokens, 1),
+      },
+    }, correlationId)
+  }
+
+  private applyHookResult(
+    hook: ReturnType<HookRegistry['list']>[number],
+    result: HookResult,
+    claimedPaths: Set<string>,
+    correlationId: string,
+  ): void {
+    if (result.messages !== undefined) {
+      if (hook.permissions.messages !== 'replace') {
+        throw new Error(`Hook ${hook.id} returned messages without messages:replace permission`)
+      }
+      if (!Array.isArray(result.messages) || result.messages[0]?.role !== 'system') {
+        throw new Error(`Hook ${hook.id} messages must retain a leading system message`)
+      }
+      for (const [index, message] of result.messages.entries()) {
+        if (!message || !['system', 'user', 'assistant', 'tool'].includes(message.role) || typeof message.content !== 'string') {
+          throw new Error(`Hook ${hook.id} returned an invalid message at index ${index}`)
+        }
+      }
+      this.llmMessages = clone(result.messages)
+    }
+
+    if (result.patches !== undefined) {
+      if (hook.permissions.variables !== 'patch') {
+        throw new Error(`Hook ${hook.id} returned patches without variables:patch permission`)
+      }
+      if (!Array.isArray(result.patches)) throw new Error(`Hook ${hook.id} patches must be an array`)
+      const conflict = result.patches.find((operation) => claimedPaths.has(operation.path))
+      if (conflict) throw new Error(`Hook patch conflict at ${conflict.path}`)
+      const candidate = applyPatch(this.variables.value, result.patches)
+      this.assertRuntimeVariables(candidate)
+      result.patches.forEach((operation) => claimedPaths.add(operation.path))
+      this.updateVariables(result.patches, 'hook', correlationId)
+    } else if (result.messages !== undefined) {
+      this.publishRenderedMessages(correlationId)
+    }
+
+    if (result.artifacts !== undefined) {
+      if (hook.permissions.artifacts !== 'write') {
+        throw new Error(`Hook ${hook.id} returned artifacts without artifacts:write permission`)
+      }
+      if (!Array.isArray(result.artifacts)) throw new Error(`Hook ${hook.id} artifacts must be an array`)
+      for (const artifact of result.artifacts) {
+        if (!artifact || typeof artifact.title !== 'string') {
+          throw new Error(`Hook ${hook.id} returned an invalid artifact`)
+        }
+        this.createArtifact('hook-result', artifact.title, toJsonValue(artifact.value), correlationId)
+      }
+    }
+  }
+
+  private syncSystemMessages(correlationId?: string): void {
+    const sysMessage = this.systemMessageValue()
+    if (JSON.stringify(sysMessage) === JSON.stringify(this.variables.value.builtin.sys_message)) return
+    const baseRevision = this.variables.revision
+    this.variables = {
+      revision: baseRevision + 1,
+      value: {
+        ...this.variables.value,
+        builtin: {
+          ...this.variables.value.builtin,
+          sys_message: sysMessage,
+        },
+      },
+    }
+    this.snapshotRevision += 1
+    this.emit('variables.updated', {
+      baseRevision,
+      revision: this.variables.revision,
+      patch: [{ op: 'add', path: '/builtin/sys_message', value: sysMessage }],
+      source: 'runtime',
+    }, correlationId)
   }
 
   private internalResourceTools(): LlmToolDefinition[] {
@@ -4182,38 +3961,20 @@ export class RuntimeLoop extends Loop {
         const settings = this.projectResources.readSettings()
         this.maxMessages = settings.max_messages
         this.maxToolRounds = settings.max_tool_rounds
-        if (change === 'settings' || change === 'compression') {
+        if (change === 'settings') {
           this.maxInputTokens = settings.context.max_input_tokens
           this.reservedOutputTokens = settings.context.reserved_output_tokens
-          this.compressionStore = new CompressionResourceStore(
-            this.projectDir,
-            settings.context.compression.resource,
-          )
-          this.compressionResource = settings.context.compression.enabled
-            ? this.compressionStore.read()
-            : undefined
           const availableTokens = this.maxInputTokens - this.reservedOutputTokens
-          this.updateCompression({
-            enabled: settings.context.compression.enabled,
-            status: settings.context.compression.enabled ? 'idle' : 'disabled',
-            maxTokens: availableTokens,
-            targetTokens: this.compressionResource
-              ? Math.floor(
-                  availableTokens * this.compressionResource.manifest.policy.target_ratio,
-                )
-              : 0,
-            resourceRevision: this.compressionResource?.revision,
-            failure: undefined,
+          const usedTokens = estimateTokens(this.llmMessages)
+          this.updateRuntimeStatus({
+            context: {
+              usedTokens,
+              maxTokens: availableTokens,
+              utilization: Math.min(usedTokens / availableTokens, 1),
+            },
           }, `resource:${change}`)
         }
-        if (change === 'settings' && this.projectLlmEnabled) {
-          this.llm = createLlmService({
-            model: settings.llm.model,
-            baseUrl: settings.llm.base_url,
-            protocol: settings.llm.protocol,
-            apiKey: settings.llm.api_key,
-          })
-        }
+        if (change === 'settings') this.refreshProjectLlm(settings)
         if (change === 'settings') {
           this.skillScriptRunner.abort()
           this.skillScriptRunner = new SkillScriptRunner(this.workspaceDir, settings.tool_timeout_ms)
@@ -4235,11 +3996,13 @@ export class RuntimeLoop extends Loop {
       this.updateVariables(
         [
           { op: 'replace', path: '/builtin/prompts', value: state.prompts },
+          { op: 'replace', path: '/builtin/shared_prompts', value: state.shared_prompts },
           { op: 'replace', path: '/builtin/missing_prompts', value: state.missing_prompts },
         ],
         'runtime',
         'resource:system-variables',
       )
+      this.updateRuntimeStatus({}, 'resource:system-variables')
     } catch (error) {
       this.emit('render.result.failed', {
         templateRevision: this.template.revision,
@@ -4251,6 +4014,32 @@ export class RuntimeLoop extends Loop {
         }],
       }, `resource:${change}`)
     }
+  }
+
+  private llmConfigFingerprint(
+    settings: ReturnType<ProjectResources['readSettings']>,
+  ): string {
+    return JSON.stringify([
+      settings.llm.model,
+      settings.llm.base_url,
+      settings.llm.protocol,
+      settings.llm.api_key ?? '',
+    ])
+  }
+
+  private refreshProjectLlm(
+    settings = this.projectResources.readSettings(),
+  ): void {
+    if (!this.projectLlmEnabled) return
+    const fingerprint = this.llmConfigFingerprint(settings)
+    if (fingerprint === this.projectLlmConfigFingerprint) return
+    this.llm = createLlmService({
+      model: settings.llm.model,
+      baseUrl: settings.llm.base_url,
+      protocol: settings.llm.protocol,
+      apiKey: settings.llm.api_key,
+    })
+    this.projectLlmConfigFingerprint = fingerprint
   }
 
   private conversationMessages(system: string): LlmMessage[] {
@@ -4293,6 +4082,7 @@ export class RuntimeLoop extends Loop {
   }
 
   private publishRenderedMessages(correlationId: string): void {
+    this.syncSystemMessages(correlationId)
     const system = this.renderResult.messages.find((message) => message.role === 'system')
       ?.content ?? ''
     this.renderResult = {
@@ -4326,6 +4116,7 @@ export class RuntimeLoop extends Loop {
     } else if (this.llmMessages.length > 0) {
       this.llmMessages.unshift({ role: 'system', content: system })
     }
+    this.syncSystemMessages(this.saveCorrelationId)
     this.renderResult = this.contextRenderResult(
       system,
       event.missingVariables,
@@ -5314,6 +5105,7 @@ export class RuntimeLoop extends Loop {
     this.runtimeStatus = {
       ...this.runtimeStatus,
       ...changes,
+      ...this.runtimeStatusMetrics(),
       revision: this.runtimeStatus.revision + 1,
       updatedAt: now(),
     }
@@ -5327,12 +5119,6 @@ export class RuntimeLoop extends Loop {
         return { variableRevision: this.variables.revision, files: 2 }
       case 'render':
         return { templateRevision: this.template.revision, format: 'markdown' }
-      case 'compression':
-        return {
-          enabled: this.compression.enabled,
-          status: this.compression.status,
-          resourceRevision: this.compression.resourceRevision ?? null,
-        }
       case 'model':
         return {
           provider: this.llm.getConfig().provider,
@@ -5398,7 +5184,9 @@ export class RuntimeLoop extends Loop {
       typeof value.builtin?.workspace_path !== 'string' ||
       typeof value.agent?.name !== 'string' ||
       !Array.isArray(value.context?.files) ||
-      !Array.isArray(value.context?.compressed_history) ||
+      typeof value.context?.history_summary !== 'string' ||
+      !Array.isArray(value.context?.evidence_refs) ||
+      typeof value.context?.evidence_digest !== 'string' ||
       typeof value.user_message !== 'string' ||
       !Array.isArray(value.tools)
       || !Array.isArray(value.harnesses)

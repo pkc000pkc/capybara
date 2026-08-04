@@ -62,6 +62,32 @@ test.afterAll(async () => {
   });
 });
 
+test("training workspace presents the static AppWorld learning lifecycle", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+
+  await page.goto("/");
+  await page.locator("#app-experiments-tab").click();
+  await page.locator("#experiment-training-tab").click();
+
+  const workspace = page.locator("#experiment-training-workspace");
+  await expect(page.locator("#experiment-training-tab")).toHaveAttribute("aria-selected", "true");
+  await expect(workspace).toHaveAttribute("data-static-preview", "true");
+  await expect(workspace.getByRole("button", { name: "开始训练" })).toBeDisabled();
+  await expect(page.locator("#experiment-training-phase-training")).toContainText("20 个样本");
+  await expect(page.locator("#experiment-training-phase-testing")).toContainText("10 个样本");
+
+  await page.locator("#experiment-training-phase-freeze").click();
+  await expect(workspace.getByText("训练结果冻结为不可变版本，测试始终绑定同一快照。")).toBeVisible();
+  await page.locator("#experiment-training-phase-testing").click();
+  await expect(workspace.getByText("闭卷运行测试集；可读取冻结变量，但不能产生新的学习内容。")).toBeVisible();
+
+  await workspace.getByText("appworld.tool_routing", { exact: true }).click();
+  await expect(workspace.locator("pre").last()).toContainText("search.id → detail.entity_id");
+  await expect(workspace.getByText("knowledge@r7 · 只读", { exact: true })).toBeVisible();
+  expect(pageErrors).toEqual([]);
+});
+
 test("dataset-scoped experiment analysis uses real project data and backend validation", async ({ page }) => {
   test.setTimeout(90_000);
   const pageErrors: string[] = [];

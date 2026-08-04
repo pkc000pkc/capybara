@@ -2,6 +2,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { loadLlmConfig } from '#util/llm/config'
+import { enqueueProjectWrite } from '#core/project-write-queue'
+
+export type SystemVariableScope = 'session' | 'project'
 
 export interface SystemVariableDefinition {
   key: string
@@ -10,6 +13,8 @@ export interface SystemVariableDefinition {
   value: string
   required: boolean
   readonly: boolean
+  show_in_status: boolean
+  scope?: SystemVariableScope
   source: 'builtin' | 'project'
 }
 
@@ -32,10 +37,6 @@ export interface ProjectSettings {
   context: {
     max_input_tokens: number
     reserved_output_tokens: number
-    compression: {
-      enabled: boolean
-      resource: string
-    }
   }
   tools: string[]
   skills: string[]
@@ -54,9 +55,19 @@ export type ProjectResourceChange =
   | 'tools'
   | 'skills'
   | 'harnesses'
-  | 'compression'
+  | 'hooks'
 
 const EMPTY_SYSTEM_VARIABLES: SystemVariablesResource = { version: 1, variables: [] }
+const SYS_MESSAGE_VARIABLE: SystemVariableDefinition = {
+  key: 'sys_message',
+  label: 'LLM messages',
+  description: 'Runtime-managed complete LLM message list exposed as builtin.sys_message.',
+  value: '',
+  required: false,
+  readonly: true,
+  show_in_status: true,
+  source: 'builtin',
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -111,10 +122,6 @@ export class ProjectResources {
       context: value.context ?? {
         max_input_tokens: 16_000,
         reserved_output_tokens: 2_000,
-        compression: {
-          enabled: false,
-          resource: 'context/compression/manifest.json',
-        },
       },
       tools: value.tools ?? [],
       skills: value.skills ?? [],
@@ -128,7 +135,7 @@ export class ProjectResources {
     })
   }
 
-  saveSettings(value: unknown): ProjectSettings {
+  resolveSettings(value: unknown): ProjectSettings {
     if (!isObject(value)) throw new Error('settings must be an object')
     const current = this.readSettings()
     let nextLlm: unknown = current.llm
@@ -159,7 +166,11 @@ export class ProjectResources {
       ...(value.harness_policy === undefined ? {} : { harness_policy: value.harness_policy }),
       ...(value.tool_permissions === undefined ? {} : { tool_permissions: value.tool_permissions }),
     }
-    const settings = this.validateSettings(next)
+    return this.validateSettings(next)
+  }
+
+  saveSettings(value: unknown): ProjectSettings {
+    const settings = this.resolveSettings(value)
     const { api_key: apiKey, ...llm } = settings.llm
     this.writeJson(this.configFile, { ...settings, llm })
     if (apiKey) this.writeJson(this.secretsFile, { version: 1, llm: { api_key: apiKey } })
@@ -184,9 +195,11 @@ export class ProjectResources {
       if (existing && (
         variable.label !== existing.label ||
         variable.description !== existing.description ||
-        variable.value !== existing.value ||
-        variable.required !== existing.required ||
-        !variable.readonly
+         variable.value !== existing.value ||
+         variable.required !== existing.required ||
+         variable.show_in_status !== existing.show_in_status ||
+         (variable.scope ?? 'session') !== (existing.scope ?? 'session') ||
+         !variable.readonly
       )) {
         throw new Error(`readonly system variable is immutable: ${variable.key}`)
       }
@@ -203,11 +216,33 @@ export class ProjectResources {
         source: variable.readonly ? 'builtin' as const : 'project' as const,
       })),
     }
-    this.writeJson(this.systemVariablesFile, {
-      version: 1,
-      variables: resource.variables.map(({ source: _source, ...variable }) => variable),
-    })
+    this.writeSystemVariablesFile(resource)
     return resource
+  }
+
+  saveSystemVariablesQueued(value: unknown): Promise<SystemVariablesResource> {
+    return enqueueProjectWrite(this.projectDir, () => this.saveSystemVariables(value))
+  }
+
+  updateSharedSystemVariables(
+    updates: readonly { key: string; value: string }[],
+  ): Promise<SystemVariablesResource> {
+    return enqueueProjectWrite(this.projectDir, () => {
+      const current = this.readProjectSystemVariables()
+      const byKey = new Map(current.variables.map((variable) => [variable.key, variable]))
+      for (const update of updates) {
+        const variable = byKey.get(update.key)
+        if (!variable) throw new Error(`system variable was not found: ${update.key}`)
+        if (variable.readonly) throw new Error(`system variable is read-only: ${update.key}`)
+        if (variable.scope !== 'project') {
+          throw new Error(`system variable is session-scoped: ${update.key}`)
+        }
+        variable.value = update.value
+      }
+      const resource = { version: 1 as const, variables: [...byKey.values()] }
+      this.writeSystemVariablesFile(resource)
+      return resource
+    })
   }
 
   onChange(listener: (change: ProjectResourceChange) => void): () => void {
@@ -271,18 +306,6 @@ export class ProjectResources {
     if (!Number.isInteger(reservedOutputTokens) || Number(reservedOutputTokens) < 128 || Number(reservedOutputTokens) >= Number(maxInputTokens)) {
       throw new Error('context.reserved_output_tokens must be an integer below max_input_tokens')
     }
-    if (!isObject(context.compression)) throw new Error('context.compression must be an object')
-    if (typeof context.compression.enabled !== 'boolean') {
-      throw new Error('context.compression.enabled must be a boolean')
-    }
-    if (
-      typeof context.compression.resource !== 'string' ||
-      !context.compression.resource.trim() ||
-      path.isAbsolute(context.compression.resource) ||
-      context.compression.resource.replaceAll('\\', '/').split('/').includes('..')
-    ) {
-      throw new Error('context.compression.resource must be a project-relative path')
-    }
     if (!Array.isArray(value.tools) || !value.tools.every((item) => typeof item === 'string' && item.trim())) {
       throw new Error('tools must be an array of project-relative manifest paths')
     }
@@ -320,10 +343,6 @@ export class ProjectResources {
       context: {
         max_input_tokens: Number(maxInputTokens),
         reserved_output_tokens: Number(reservedOutputTokens),
-        compression: {
-          enabled: context.compression.enabled,
-          resource: context.compression.resource.replaceAll('\\', '/'),
-        },
       },
       tools: [...value.tools] as string[],
       skills: [...value.skills] as string[],
@@ -353,6 +372,9 @@ export class ProjectResources {
       if (typeof item.value !== 'string' || typeof item.required !== 'boolean') {
         throw new Error(`variables[${index}] requires string value and boolean required`)
       }
+      if (item.readonly === true && item.scope === 'project') {
+        throw new Error(`variables[${index}] readonly variables must be session-scoped`)
+      }
       return {
         key,
         label: typeof item.label === 'string' ? item.label : key,
@@ -360,6 +382,8 @@ export class ProjectResources {
         value: item.value,
         required: item.required,
         readonly: item.readonly === true,
+        show_in_status: item.show_in_status === true,
+        scope: item.scope === 'project' ? 'project' as const : 'session' as const,
         source: item.source === 'builtin' ? 'builtin' as const : 'project' as const,
       }
     })
@@ -372,15 +396,29 @@ export class ProjectResources {
     )
     return {
       version: 1,
-      variables: resource.variables.map((variable) => ({
-        ...variable,
-        source: variable.readonly ? 'builtin' : 'project',
-      })),
+      variables: [
+        ...resource.variables
+          .filter((variable) => variable.key !== SYS_MESSAGE_VARIABLE.key)
+          .map((variable) => ({
+            ...variable,
+            source: variable.readonly ? 'builtin' as const : 'project' as const,
+          })),
+        { ...SYS_MESSAGE_VARIABLE },
+      ],
     }
   }
 
   private readJson(file: string, fallback: unknown): unknown {
     return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : fallback
+  }
+
+  private writeSystemVariablesFile(resource: SystemVariablesResource): void {
+    this.writeJsonAtomic(this.systemVariablesFile, {
+      version: 1,
+      variables: resource.variables
+        .filter((variable) => variable.key !== SYS_MESSAGE_VARIABLE.key)
+        .map(({ source: _source, ...variable }) => variable),
+    })
   }
 
   private readApiKey(): string | undefined {
@@ -400,6 +438,23 @@ export class ProjectResources {
     fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
   }
 
+  private writeJsonAtomic(file: string, value: unknown): void {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    const temporary = `${file}.${process.pid}.${Date.now()}.tmp`
+    try {
+      fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+      try {
+        fs.renameSync(temporary, file)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        fs.rmSync(file, { force: true })
+        fs.renameSync(temporary, file)
+      }
+    } finally {
+      fs.rmSync(temporary, { force: true })
+    }
+  }
+
   private watch(): void {
     this.watcher = fs.watch(this.projectDir, { recursive: true }, (_event, filename) => {
       if (!filename) return
@@ -414,8 +469,8 @@ export class ProjectResources {
             ? 'skills'
           : file.startsWith('harnesses/')
               ? 'harnesses'
-              : file.startsWith('context/compression/')
-                ? 'compression'
+              : file.startsWith('.capybara/hooks/') && file.endsWith('.ts')
+                ? 'hooks'
               : undefined
       if (!change) return
       if (this.debounceTimer) clearTimeout(this.debounceTimer)

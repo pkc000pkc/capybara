@@ -1,4 +1,4 @@
-export type ResourceKind = "tool" | "skill" | "harness";
+export type ResourceKind = "tool" | "skill" | "harness" | "hook";
 
 export type ResourceDiagnostic = {
   severity: "info" | "warning" | "error";
@@ -73,7 +73,33 @@ export type HarnessResourceDefinition = {
   diagnostics: ResourceDiagnostic[];
 };
 
-export type ResourceDefinition = ToolResourceDefinition | SkillResourceDefinition | HarnessResourceDefinition;
+export type HookResourceDefinition = {
+  id: string;
+  kind: "hook";
+  name: string;
+  description: string;
+  entry: string;
+  enabled: boolean;
+  checkpoint: "after_loop";
+  schedule: {
+    priority: number;
+    timeoutMs: number;
+    onError: "continue" | "retry";
+  };
+  permissions: {
+    llm?: "project";
+    variables?: "patch";
+    messages?: "replace";
+    artifacts?: "write";
+  };
+  triggerSummary: string;
+  triggerInputs: string[];
+  content: string;
+  entryRevision: string;
+  diagnostics: ResourceDiagnostic[];
+};
+
+export type ResourceDefinition = ToolResourceDefinition | SkillResourceDefinition | HarnessResourceDefinition | HookResourceDefinition;
 
 export type ToolResourceModule = ResourceModule<"tool"> & {
   runner: { type: "stdio"; entry: string };
@@ -88,9 +114,38 @@ export type HarnessResourceModule = ResourceModule<"harness"> & {
   harnesses: HarnessResourceDefinition[];
 };
 
-export type ProjectResourceModule = ToolResourceModule | SkillResourceModule | HarnessResourceModule;
+export type HookResourceModule = ResourceModule<"hook"> & {
+  hooks: HookResourceDefinition[];
+};
+
+export type ProjectResourceModule = ToolResourceModule | SkillResourceModule | HarnessResourceModule | HookResourceModule;
 export type ResourceCatalog = { revision: string; items: ProjectResourceModule[] };
 export type ResourceFileContent = ResourceFile & { content: string; revision: string };
+
+export type ProjectFileEntry = {
+  name: string;
+  path: string;
+  type: "directory" | "file" | "symlink";
+  language: string;
+  size: number;
+  modifiedAt: string;
+  editable: boolean;
+};
+
+export type ProjectDirectoryListing = {
+  path: string;
+  entries: ProjectFileEntry[];
+};
+
+export type ProjectTextFile = {
+  name: string;
+  path: string;
+  language: string;
+  size: number;
+  modifiedAt: string;
+  content: string;
+  revision: string;
+};
 
 export type ProjectGitChange = {
   path: string;
@@ -130,43 +185,33 @@ export type ProjectGitDiff = {
   truncated: boolean;
 };
 
-export type CompressionPolicy = {
-  trigger_ratio: number;
-  target_ratio: number;
-  preserve_recent_turns: number;
-  max_source_tokens: number;
-  max_output_tokens: number;
-  retry_limit: number;
-  apply_mode: "automatic" | "debug";
-};
-
-export type CompressionResource = {
-  manifest: {
-    version: 1;
-    id: string;
-    name: string;
-    description: string;
-    entry: string;
-    policy: CompressionPolicy;
+export type HookTestFixture = {
+  runId?: string;
+  loopIteration?: number;
+  status?: {
+    run?: { status?: "completed" | "failed" | "cancelled"; failure?: unknown };
+    context?: { usedTokens?: number; maxTokens?: number; utilization?: number };
+    queueDepth?: number;
+    messageCount?: number;
+    variableTokens?: Record<string, number>;
   };
-  prompt: string;
-  revision: string;
-  source: string;
-  variables: string[];
-  diagnostics: ResourceDiagnostic[];
+  changedVariables?: string[];
+  variables?: Record<string, unknown>;
+  messages?: Array<{ role: "system" | "user" | "assistant" | "tool"; content: string }>;
 };
 
-export type CompressionTestResult = {
-  resourceRevision: string;
-  beforeTokens: number;
-  targetTokens: number;
-  afterTokens: number;
-  sourceUnits: unknown[];
-  renderedPrompt: string;
-  responseText: string;
-  patch: unknown;
-  afterMessages: unknown[];
-  usage: unknown;
+export type HookTestResult = {
+  matched: boolean;
+  result?: {
+    patches?: Array<Record<string, unknown>>;
+    messages?: HookTestFixture["messages"];
+    artifacts?: Array<{ title: string; value: unknown }>;
+    metadata?: unknown;
+  };
+  durationMs: number;
+  attempts: number;
+  usage: Record<string, number>;
+  logs: Array<{ level: "debug" | "info" | "warn" | "error"; message: string; data?: unknown }>;
 };
 
 function apiUrl(path: string, projectPath: string): string {
@@ -188,6 +233,18 @@ async function request<T>(projectPath: string, path: string, method = "GET", bod
 }
 
 export const resourceApi = {
+  projectDirectory: (projectPath: string, path = "") =>
+    request<ProjectDirectoryListing>(projectPath, `files?path=${encodeURIComponent(path)}`),
+  projectFile: (projectPath: string, path: string) =>
+    request<ProjectTextFile>(projectPath, `files/content?path=${encodeURIComponent(path)}`),
+  saveProjectFile: (projectPath: string, path: string, content: string, revision: string) =>
+    request<ProjectTextFile>(projectPath, "files/content", "PUT", { path, content, revision }),
+  createProjectEntry: (projectPath: string, parent: string, name: string, type: "file" | "directory") =>
+    request<ProjectFileEntry>(projectPath, "files", "POST", { parent, name, type }),
+  renameProjectEntry: (projectPath: string, path: string, name: string) =>
+    request<ProjectFileEntry>(projectPath, "files", "PATCH", { path, name }),
+  deleteProjectEntry: (projectPath: string, path: string, recursive: boolean) =>
+    request<{ deleted: true; path: string }>(projectPath, "files", "DELETE", { path, recursive }),
   catalog: (projectPath: string) => request<ResourceCatalog>(projectPath, "catalog"),
   file: (projectPath: string, path: string) =>
     request<ResourceFileContent>(projectPath, `file?path=${encodeURIComponent(path)}`),
@@ -201,16 +258,14 @@ export const resourceApi = {
     request<SkillResourceModule>(projectPath, `skills/${encodeURIComponent(id)}`, "PUT", { content, revision }),
   saveHarness: (projectPath: string, id: string, content: string, revision: string) =>
     request<HarnessResourceModule>(projectPath, `harnesses/${encodeURIComponent(id)}`, "PUT", { content, revision }),
-  compression: (projectPath: string) =>
-    request<CompressionResource>(projectPath, "compression"),
-  saveCompression: (projectPath: string, resource: CompressionResource) =>
-    request<CompressionResource>(projectPath, "compression", "PUT", {
-      baseRevision: resource.revision,
-      manifest: resource.manifest,
-      prompt: resource.prompt,
-    }),
-  testCompression: (projectPath: string, messages: unknown[]) =>
-    request<CompressionTestResult>(projectPath, "compression/test", "POST", { messages }),
+  createHook: (projectPath: string, name: string, content: string) =>
+    request<HookResourceModule>(projectPath, "hooks", "POST", { name, content }),
+  saveHook: (projectPath: string, id: string, content: string, revision: string) =>
+    request<HookResourceModule>(projectPath, `hooks/${encodeURIComponent(id)}`, "PUT", { content, revision }),
+  deleteHook: (projectPath: string, id: string, revision: string) =>
+    request<{ deleted: true; id: string }>(projectPath, `hooks/${encodeURIComponent(id)}`, "DELETE", { revision }),
+  testHook: (projectPath: string, id: string, fixture: HookTestFixture) =>
+    request<HookTestResult>(projectPath, `hooks/${encodeURIComponent(id)}/test`, "POST", { fixture }),
   gitStatus: (projectPath: string) =>
     request<ProjectGitStatus>(projectPath, "git/status"),
   gitHistory: (projectPath: string, limit = 50) =>

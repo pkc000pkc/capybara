@@ -32,7 +32,6 @@ export type RuntimeFailurePhase =
   | 'skill_script'
   | 'workflow_validation'
   | 'workflow_execution'
-  | 'compression'
   | 'template'
   | 'runtime'
 
@@ -67,25 +66,18 @@ export interface RuntimeVariables extends JsonObject {
     main_template: string
     initialized_at: string
     prompts: { [key: string]: string }
+    shared_prompts?: string[]
     missing_prompts: string[]
+    sys_message: JsonValue[]
   }
   task: { title: string }
   agent: { name: string }
   context: {
     files: Array<{ path: string; summary: string }>
-    compressed_history: Array<{
-      id: string
-      sourceUnitIds: string[]
-      summary: {
-        facts: string[]
-        decisions: string[]
-        user_requirements: string[]
-        completed_work: string[]
-        open_items: string[]
-        important_evidence: string[]
-      }
-      createdAt: string
-    }>
+    history_summary: string
+    evidence_refs: JsonValue[]
+    evidence_digest: string
+    [key: string]: JsonValue
   }
   user_message: string
   tools: Array<{ id: string; name: string; description: string }>
@@ -285,10 +277,6 @@ export type RuntimeArtifactKind =
   | 'effective-messages'
   | 'effective-tools'
   | 'runtime-error'
-  | 'compression-request'
-  | 'compression-response'
-  | 'compression-patch'
-  | 'compression-validation'
   | 'workflow-definition'
   | 'workflow-result'
 
@@ -402,57 +390,9 @@ export interface RuntimeBreakpointsState {
   items: RuntimeBreakpoint[]
 }
 
-export interface RuntimeCompressionRecord {
-  id: string
-  runId: string
-  resourceRevision: string
-  status: 'candidate' | 'applied' | 'rejected' | 'failed' | 'reverted'
-  baseRevision: number
-  sourceUnitIds: string[]
-  beforeTokens: number
-  targetTokens: number
-  afterTokens?: number
-  savedTokens?: number
-  requestArtifactId: string
-  responseArtifactId: string
-  patchArtifactId?: string
-  validationArtifactId?: string
-  failure?: { code: string; message: string }
-  createdAt: string
-  appliedAt?: string
-  rejectedAt?: string
-  revertedAt?: string
-}
-
-export interface RuntimeCompressionState {
-  revision: number
-  enabled: boolean
-  status:
-    | 'disabled'
-    | 'idle'
-    | 'planning'
-    | 'generating'
-    | 'validating'
-    | 'pending'
-    | 'applied'
-    | 'rejected'
-    | 'failed'
-  resourceRevision?: string
-  currentTokens: number
-  maxTokens: number
-  targetTokens: number
-  savedTokens: number
-  activeCandidateId?: string
-  revertibleRecordId?: string
-  items: RuntimeCompressionRecord[]
-  failure?: { code: string; message: string }
-  updatedAt: string
-}
-
 export type TimelineStepType =
   | 'context'
   | 'render'
-  | 'compression'
   | 'model'
   | 'tool'
   | 'workflow'
@@ -535,6 +475,12 @@ export interface RuntimeStatusState {
     utilization: number
   }
   queueDepth: number
+  messageCount: number
+  variableTokens: Array<{
+    key: string
+    label: string
+    tokens: number
+  }>
   updatedAt: string
 }
 
@@ -558,7 +504,6 @@ export interface RuntimeSnapshot {
   observations: RuntimeObservationsState
   checkpoints: RuntimeCheckpointsState
   breakpoints: RuntimeBreakpointsState
-  compression: RuntimeCompressionState
   workflows: RuntimeWorkflowsState
   timeline: {
     revision: number
@@ -571,10 +516,6 @@ export interface CommandPayloadMap {
   'runtime.snapshot.get': { afterSequence?: number }
   'runtime.artifact.get': { artifactId: string }
   'runtime.context.apply': { contextRevisionId: string }
-  'runtime.compression.run': { baseRevision: number }
-  'runtime.compression.undo': { recordId: string; baseRevision: number }
-  'runtime.compression.apply': { candidateId: string; baseRevision: number }
-  'runtime.compression.reject': { candidateId: string; baseRevision: number }
   'chat.message.send': {
     clientMessageId: string
     content: ChatContent[]
@@ -689,7 +630,6 @@ export interface EventPayloadMap {
     contextRevisionId: string
     previousContextRevisionId?: string
   }
-  'runtime.compression.updated': RuntimeCompressionState
   'runtime.effectiveContext.created': {
     revision: number
     context: RuntimeEffectiveContextRevision
@@ -771,7 +711,7 @@ export interface EventPayloadMap {
     baseRevision: number
     revision: number
     patch: JsonPatchOperation[]
-    source: 'user' | 'runtime' | 'tool' | 'restore'
+    source: 'user' | 'runtime' | 'tool' | 'hook' | 'restore'
   }
   'template.updated': TemplateState
   'template.validation.failed': {
@@ -844,10 +784,6 @@ const COMMAND_TYPES = new Set<CommandType>([
   'runtime.snapshot.get',
   'runtime.artifact.get',
   'runtime.context.apply',
-  'runtime.compression.run',
-  'runtime.compression.undo',
-  'runtime.compression.apply',
-  'runtime.compression.reject',
   'chat.message.send',
   'chat.response.cancel',
   'run.mode.set',
@@ -938,25 +874,6 @@ function validatePayload(type: CommandType, payload: Record<string, unknown>): v
         throw new CommandError('INVALID_PAYLOAD', 'runtime.context.apply requires contextRevisionId')
       }
       return
-    case 'runtime.compression.run':
-      if (!hasInteger(payload, 'baseRevision')) {
-        throw new CommandError('INVALID_PAYLOAD', 'runtime.compression.run requires baseRevision')
-      }
-      return
-    case 'runtime.compression.undo':
-      if (!hasString(payload, 'recordId') || !hasInteger(payload, 'baseRevision')) {
-        throw new CommandError(
-          'INVALID_PAYLOAD',
-          'runtime.compression.undo requires recordId and baseRevision',
-        )
-      }
-      return
-    case 'runtime.compression.apply':
-    case 'runtime.compression.reject':
-      if (!hasString(payload, 'candidateId') || !hasInteger(payload, 'baseRevision')) {
-        throw new CommandError('INVALID_PAYLOAD', `${type} requires candidateId and baseRevision`)
-      }
-      return
     case 'chat.message.send': {
       if (!hasString(payload, 'clientMessageId') || typeof payload.autoStart !== 'boolean') {
         throw new CommandError('INVALID_PAYLOAD', 'chat message requires clientMessageId and autoStart')
@@ -1034,7 +951,7 @@ function validatePayload(type: CommandType, payload: Record<string, unknown>): v
       }
       if (
         breakpoint.stepType !== undefined &&
-        !['context', 'render', 'compression', 'model', 'tool', 'harness', 'output'].includes(String(breakpoint.stepType))
+        !['context', 'render', 'model', 'tool', 'workflow', 'harness', 'output'].includes(String(breakpoint.stepType))
       ) {
         throw new CommandError('INVALID_PAYLOAD', 'breakpoint stepType is invalid')
       }

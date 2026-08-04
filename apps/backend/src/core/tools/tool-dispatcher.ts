@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import path from 'node:path'
 
 import { ToolRegistry } from '#core/tools/tool-registry'
@@ -29,6 +29,22 @@ interface RunnerResponse {
 
 function now(): string {
   return new Date().toISOString()
+}
+
+function terminateProcessTree(child: ChildProcessWithoutNullStreams): void {
+  if (!child.pid || child.exitCode !== null) return
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    return
+  }
+  try {
+    process.kill(-child.pid, 'SIGTERM')
+  } catch {
+    child.kill('SIGTERM')
+  }
 }
 
 export class ToolDispatcher {
@@ -75,6 +91,7 @@ export class ToolDispatcher {
     return new Promise((resolve) => {
       const child = spawn(process.execPath, [tool.runnerEntry], {
         cwd: path.dirname(tool.runnerEntry),
+        detached: process.platform !== 'win32',
         env: { ...process.env, CAPYBARA_PROJECT_DIR: path.resolve(this.workspaceDir) },
         stdio: ['pipe', 'pipe', 'pipe'],
       })
@@ -95,7 +112,7 @@ export class ToolDispatcher {
       }
       const stop = (result: ToolCallResult) => {
         forcedError = result
-        child.kill()
+        terminateProcessTree(child)
       }
       const abort = () => stop(fail('ABORTED', 'tool call was aborted'))
       const timer = setTimeout(

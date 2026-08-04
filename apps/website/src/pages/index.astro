@@ -1,0 +1,257 @@
+---
+import CapybaraMark from "../components/CapybaraMark.astro";
+import ContextAssembly from "../components/ContextAssembly.astro";
+import "../styles/global.css";
+
+const base = import.meta.env.BASE_URL;
+const asset = (path: string) => `${base}${path.replace(/^\//, "")}`;
+const canonical = Astro.site ? new URL(Astro.url.pathname, Astro.site) : Astro.url;
+const ogImage = Astro.site
+  ? new URL(asset("images/runtime-overview.png"), Astro.site)
+  : new URL(asset("images/runtime-overview.png"), Astro.url);
+
+const title = "Capybara | Build context your agents can trust";
+const description =
+  "Capybara is an open-source, local-first workspace for building, inspecting, compressing, and improving AI agent context.";
+const repositoryUrl = "https://github.com/pkc000pkc/capybara";
+
+const structuredData = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  name: "Capybara",
+  applicationCategory: "DeveloperApplication",
+  operatingSystem: "Windows, macOS, Linux",
+  description,
+  url: canonical.toString(),
+  codeRepository: repositoryUrl,
+  license: "https://www.apache.org/licenses/LICENSE-2.0",
+};
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="description" content={description} />
+    <meta name="robots" content="index, follow" />
+    <meta name="theme-color" content="#f7f9f8" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:site_name" content="Capybara" />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" type="image/svg+xml" href={asset("favicon.svg")} />
+    <title>{title}</title>
+    <script is:inline type="application/ld+json" set:html={JSON.stringify(structuredData)} />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href={base} aria-label="Capybara home">
+          <CapybaraMark />
+          <span class="brand-name">Capybara</span>
+          <span class="brand-status">Open source</span>
+        </a>
+
+        <nav class="site-nav" aria-label="Primary navigation">
+          <a href="#workspace">Workspace</a>
+          <a href="#context-model">Context model</a>
+          <a href="#workflow">Workflow</a>
+        </nav>
+
+        <a class="header-link" href={repositoryUrl}>GitHub</a>
+      </div>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="shell hero-inner">
+          <div class="hero-copy">
+            <p class="eyebrow"><span></span> Local-first agent context workspace</p>
+            <h1 id="hero-title">Capybara</h1>
+            <p class="hero-statement">Build context your agents can trust.</p>
+            <p class="hero-description">
+              Design the method. Keep only the information that matters. Inspect every source,
+              compression, and change before it reaches the model.
+            </p>
+            <div class="hero-actions">
+              <a class="button button-primary" href={repositoryUrl}>View on GitHub</a>
+              <a class="button button-secondary" href="#context-model">Explore the context model</a>
+            </div>
+          </div>
+
+          <ContextAssembly />
+        </div>
+      </section>
+
+      <section class="workspace-section" id="workspace" aria-labelledby="workspace-title">
+        <div class="shell">
+          <div class="section-heading workspace-heading">
+            <div>
+              <p class="section-index">01 / The workspace</p>
+              <h2 id="workspace-title">See what enters the context.<br />Change what happens next.</h2>
+            </div>
+            <p>
+              Capybara keeps context, project resources, runtime state, and experiments in one
+              local workspace so an answer can always be traced back to its inputs.
+            </p>
+          </div>
+
+          <figure class="product-frame">
+            <div class="product-frame-bar" aria-hidden="true">
+              <span>CAPYBARA / RUNTIME</span>
+              <span>LOCAL SESSION</span>
+            </div>
+            <img
+              src={asset("images/runtime-overview.png")}
+              alt="Capybara runtime workspace showing context resources, a conversation, runtime status, and an execution trace"
+              width="1280"
+              height="720"
+              loading="eager"
+              decoding="async"
+            />
+            <figcaption>Current development build · Runtime workspace</figcaption>
+          </figure>
+
+          <div class="capability-rail" aria-label="Core workspace capabilities">
+            <div>
+              <span>01</span>
+              <h3>Context provenance</h3>
+              <p>Know where every instruction, tool result, resource, and variable came from.</p>
+            </div>
+            <div>
+              <span>02</span>
+              <h3>Runtime control</h3>
+              <p>Observe execution state and keep the developer in control of the next step.</p>
+            </div>
+            <div>
+              <span>03</span>
+              <h3>Repeatable improvement</h3>
+              <p>Compare runs against datasets and turn failures into reusable project knowledge.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="model-section" id="context-model" aria-labelledby="model-title">
+        <div class="shell model-grid">
+          <div class="model-intro">
+            <p class="section-index section-index-dark">02 / Context model</p>
+            <h2 id="model-title">Quality context is a system, not a prompt.</h2>
+            <p>
+              Stable agent behavior depends on two things: a method that captures experience, and
+              information that stays necessary, current, and non-redundant.
+            </p>
+          </div>
+
+          <div class="model-stack">
+            <article>
+              <span class="model-number">01</span>
+              <div>
+                <p class="model-label">Method</p>
+                <h3>Make experience reusable</h3>
+                <p>Roles, Harnesses, Skills, and evaluation rules encode how work should be done.</p>
+              </div>
+              <span class="model-signal signal-method" aria-hidden="true"></span>
+            </article>
+            <article>
+              <span class="model-number">02</span>
+              <div>
+                <p class="model-label">Information</p>
+                <h3>Keep the useful evidence</h3>
+                <p>Instructions, history, files, and tool results stay attributable and compressible.</p>
+              </div>
+              <span class="model-signal signal-info" aria-hidden="true"></span>
+            </article>
+            <article>
+              <span class="model-number">03</span>
+              <div>
+                <p class="model-label">Control</p>
+                <h3>Put the user back in charge</h3>
+                <p>Inspect, edit, compress, replay, and decide what the model receives next.</p>
+              </div>
+              <span class="model-signal signal-control" aria-hidden="true"></span>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="workflow-section" id="workflow" aria-labelledby="workflow-title">
+        <div class="shell">
+          <div class="section-heading workflow-heading">
+            <div>
+              <p class="section-index">03 / Development loop</p>
+              <h2 id="workflow-title">Every run should improve the next one.</h2>
+            </div>
+            <p>
+              Capybara connects project resources, runtime evidence, and experiments into one
+              development loop instead of scattering them across disconnected tools.
+            </p>
+          </div>
+
+          <ol class="workflow-steps">
+            <li>
+              <span>01</span>
+              <h3>Build</h3>
+              <p>Define prompts, tools, skills, Harnesses, and context resources as project files.</p>
+            </li>
+            <li>
+              <span>02</span>
+              <h3>Run</h3>
+              <p>Execute locally with project state, model configuration, and runtime controls.</p>
+            </li>
+            <li>
+              <span>03</span>
+              <h3>Inspect</h3>
+              <p>Read the real context, tool calls, compression events, and execution timeline.</p>
+            </li>
+            <li>
+              <span>04</span>
+              <h3>Improve</h3>
+              <p>Turn evidence into reusable context and validate changes against datasets.</p>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="open-source-section" aria-labelledby="open-source-title">
+        <div class="shell open-source-grid">
+          <div>
+            <p class="section-index">04 / Open source</p>
+            <h2 id="open-source-title">Your agents.<br />Your context.<br />Your machine.</h2>
+          </div>
+          <div class="open-source-copy">
+            <p>
+              Capybara is built in the open and designed to keep sensitive prompts, project files,
+              experiments, and runtime state under your control.
+            </p>
+            <dl>
+              <div><dt>License</dt><dd>Apache 2.0</dd></div>
+              <div><dt>Runtime</dt><dd>Local first</dd></div>
+              <div><dt>Repository</dt><dd>Public on GitHub</dd></div>
+            </dl>
+            <a class="text-link" href={repositoryUrl}>Explore the source <span aria-hidden="true">→</span></a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-inner">
+        <a class="brand footer-brand" href={base} aria-label="Capybara home">
+          <CapybaraMark />
+          <span class="brand-name">Capybara</span>
+        </a>
+        <p>Open-source infrastructure for trustworthy agent context.</p>
+        <p>Apache-2.0 · 2026</p>
+      </div>
+    </footer>
+  </body>
+</html>

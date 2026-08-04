@@ -550,6 +550,32 @@ html[data-theme="dark"] .markdown-content code {
   text-decoration: underline wavy #9b4141;
 }
 
+.code-surface .cm-line.cm-diff-header {
+  background: #edf3f2;
+  color: #294f55;
+  font-weight: 600;
+}
+
+.code-surface .cm-line.cm-diff-file {
+  color: #45666a;
+  font-weight: 600;
+}
+
+.code-surface .cm-line.cm-diff-hunk {
+  background: #ddf2f8;
+  color: #245d74;
+}
+
+.code-surface .cm-line.cm-diff-added {
+  background: #e4f4e8;
+  color: #1f633a;
+}
+
+.code-surface .cm-line.cm-diff-deleted {
+  background: #fae8e7;
+  color: #8a373d;
+}
+
 html[data-theme="dark"] .code-surface .cm-editor,
 html[data-theme="dark"] .code-surface .cm-tooltip,
 html[data-theme="dark"] .code-surface .cm-panels {
@@ -607,6 +633,30 @@ html[data-theme="dark"] .code-surface .tok-atom {
 html[data-theme="dark"] .code-surface .tok-operator,
 html[data-theme="dark"] .code-surface .tok-punctuation {
   color: #9fb1b3;
+}
+
+html[data-theme="dark"] .code-surface .cm-line.cm-diff-header {
+  background: #223033;
+  color: #d3dfdf;
+}
+
+html[data-theme="dark"] .code-surface .cm-line.cm-diff-file {
+  color: #b5c7c9;
+}
+
+html[data-theme="dark"] .code-surface .cm-line.cm-diff-hunk {
+  background: #193747;
+  color: #a6d9ee;
+}
+
+html[data-theme="dark"] .code-surface .cm-line.cm-diff-added {
+  background: #183827;
+  color: #a8dfb9;
+}
+
+html[data-theme="dark"] .code-surface .cm-line.cm-diff-deleted {
+  background: #46282b;
+  color: #efb0b4;
 }
 
 .code-surface-composer,

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  BrainCircuit,
   ChevronLeft,
   ChevronRight,
   Database,
@@ -10,10 +11,12 @@ import { useState } from "react";
 import { useI18n } from "../i18n";
 import DatasetWorkspace from "./dataset-workspace";
 import ExperimentRunAnalysis from "./experiment-run-analysis";
+import ExperimentTrainingWorkspace from "./experiment-training-workspace";
 import { WorkspaceNavigation } from "./workspace-ui";
 
 const EXPERIMENT_SECTIONS = [
   { id: "datasets", icon: Database },
+  { id: "training", icon: BrainCircuit },
   { id: "runs", icon: FlaskConical },
 ] as const;
 
@@ -31,9 +34,11 @@ function ExperimentNavigation({
   onSelect: (section: ExperimentSection) => void;
 }) {
   const { t } = useI18n();
-  const label = (section: ExperimentSection) => section === "datasets"
-    ? t("experiments.datasets")
-    : t("experiments.runAnalysis");
+  const label = (section: ExperimentSection) => {
+    if (section === "datasets") return t("experiments.datasets");
+    if (section === "training") return t("experiments.trainingValidation");
+    return t("experiments.runAnalysis");
+  };
 
   return (
     <WorkspaceNavigation
@@ -90,9 +95,9 @@ export default function ExperimentsWorkspace({ projectPath }: { projectPath: str
         id={`experiment-${activeSection}-panel`}
         role="tabpanel"
       >
-        {activeSection === "datasets"
-          ? <DatasetWorkspace projectPath={projectPath} />
-          : <ExperimentRunAnalysis projectPath={projectPath} />}
+        {activeSection === "datasets" && <DatasetWorkspace projectPath={projectPath} />}
+        {activeSection === "training" && <ExperimentTrainingWorkspace projectPath={projectPath} />}
+        {activeSection === "runs" && <ExperimentRunAnalysis projectPath={projectPath} />}
       </div>
     </div>
   );

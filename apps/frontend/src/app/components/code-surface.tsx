@@ -9,11 +9,12 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { python } from "@codemirror/lang-python";
 import { yaml } from "@codemirror/lang-yaml";
 import { StreamLanguage, syntaxHighlighting } from "@codemirror/language";
+import { diff } from "@codemirror/legacy-modes/mode/diff";
 import { shell } from "@codemirror/legacy-modes/mode/shell";
 import { powerShell } from "@codemirror/legacy-modes/mode/powershell";
 import { linter } from "@codemirror/lint";
-import { EditorState, Prec, type Extension } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
+import { EditorState, Prec, type Extension, type Range } from "@codemirror/state";
+import { Decoration, EditorView, keymap } from "@codemirror/view";
 import { classHighlighter } from "@lezer/highlight";
 import CodeMirror from "@uiw/react-codemirror";
 import { useMemo } from "react";
@@ -41,6 +42,21 @@ export type CodeSurfaceProps = {
 function normalizedLanguage(language: string) {
   return language.toLowerCase().replaceAll(/[^a-z0-9+#]+/g, "");
 }
+
+const diffLineDecorations = EditorView.decorations.compute(["doc"], (state) => {
+  const decorations: Range<Decoration>[] = [];
+  for (let lineNumber = 1; lineNumber <= state.doc.lines; lineNumber += 1) {
+    const line = state.doc.line(lineNumber);
+    let className = "";
+    if (line.text.startsWith("diff --git ") || line.text.startsWith("index ")) className = "cm-diff-header";
+    else if (line.text.startsWith("@@")) className = "cm-diff-hunk";
+    else if (line.text.startsWith("+++") || line.text.startsWith("---")) className = "cm-diff-file";
+    else if (line.text.startsWith("+")) className = "cm-diff-added";
+    else if (line.text.startsWith("-")) className = "cm-diff-deleted";
+    if (className) decorations.push(Decoration.line({ attributes: { class: className } }).range(line.from));
+  }
+  return Decoration.set(decorations);
+});
 
 export function codeLanguageExtensions(language = "Text"): Extension[] {
   switch (normalizedLanguage(language)) {
@@ -83,6 +99,9 @@ export function codeLanguageExtensions(language = "Text"): Extension[] {
     case "powershell":
     case "ps1":
       return [StreamLanguage.define(powerShell)];
+    case "diff":
+    case "patch":
+      return [StreamLanguage.define(diff), diffLineDecorations];
     default:
       return [];
   }

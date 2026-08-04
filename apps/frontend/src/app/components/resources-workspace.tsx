@@ -1,22 +1,25 @@
 "use client";
 
 import {
+  Activity,
   BookOpen,
   Brain,
+  CircleAlert,
+  CircleCheck,
   Eye,
   EyeOff,
-  FileCode2,
   FileText,
   GitBranch,
   Layers3,
+  LoaderCircle,
   LockKeyhole,
-  Minimize2,
   Plus,
   Save,
   Settings2,
   SlidersHorizontal,
   Trash2,
   Variable,
+  Webhook,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
@@ -24,8 +27,9 @@ import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from
 import { useI18n } from "../i18n";
 import type { RuntimeToolsState } from "../runtime-protocol";
 import CodeSurface from "./code-surface";
-import CompressionResourceWorkspace from "./compression-resource-workspace";
 import GitResourceWorkspace from "./git-resource-workspace";
+import HookResourceWorkspace from "./hook-resource-workspace";
+import ProjectFilesWorkspace from "./project-files-workspace";
 import ResourceDefinitionWorkspace from "./resource-definition-workspace";
 import ResizeHandle from "./resize-handle";
 import {
@@ -40,18 +44,11 @@ export type ResourceSection =
   | "tools"
   | "skills"
   | "harnesses"
+  | "hooks"
   | "system-variables"
   | "project-settings"
   | "system-settings"
-  | "memory"
-  | "compression";
-type ResourceFile = {
-  id: string;
-  path: string;
-  language: "JSON" | "TSX" | "TypeScript" | "Markdown";
-  content: string;
-};
-
+  | "memory";
 type SystemVariableDefinition = {
   key: string;
   label: string;
@@ -59,6 +56,8 @@ type SystemVariableDefinition = {
   value: string;
   required: boolean;
   readonly: boolean;
+  show_in_status: boolean;
+  scope?: "session" | "project";
   source: "builtin" | "project";
 };
 
@@ -85,12 +84,12 @@ type ProjectSettings = {
   context: {
     max_input_tokens: number;
     reserved_output_tokens: number;
-    compression: {
-      enabled: boolean;
-      resource: string;
-    };
   };
 };
+
+type LlmTestState =
+  | { status: "success"; model: string; durationMs: number }
+  | { status: "error"; message: string };
 
 const DIVIDER_SIZE = 1;
 const NAVIGATION_DEFAULT_WIDTH = 156;
@@ -110,116 +109,12 @@ const RESOURCE_SECTIONS: {
   { id: "tools", icon: Wrench },
   { id: "harnesses", icon: Layers3 },
   { id: "skills", icon: BookOpen },
+  { id: "hooks", icon: Webhook },
   { id: "system-variables", icon: Variable },
   { id: "project-settings", icon: SlidersHorizontal },
   { id: "memory", icon: Brain },
-  { id: "compression", icon: Minimize2 },
 ];
 const SYSTEM_SETTINGS_SECTION = { id: "system-settings", icon: Settings2 } as const;
-
-const INITIAL_FILES: ResourceFile[] = [
-  {
-    id: "system-design",
-    path: "SYSTEM_DESIGN.md",
-    language: "Markdown",
-    content: [
-      "# 系统设计",
-      "",
-      "Capybara 是面向 Agent 开发者的运行时框架。后端负责模板渲染、Loop 生命周期、状态同步和外挂能力接入。",
-      "",
-      "## 核心流程",
-      "",
-      "1. 从项目目录加载 .capybara/config.json 和入口模板。",
-      "2. 将内置变量与开发者变量注入模板。",
-      "3. 生成以 system 开头的 LLM messages。",
-      "4. 通过 WebSocket 同步会话、变量、模板和运行状态。",
-      "5. Loop 接收用户消息并驱动模型、工具与 harness。",
-    ].join("\n"),
-  },
-  {
-    id: "project-config",
-    path: ".capybara/config.json",
-    language: "JSON",
-    content: [
-      "{",
-      '  "main_template": "main.j2",',
-      '  "max_messages": 20,',
-      '  "llm": {',
-      '    "model": "gpt-5",',
-      '    "base_url": "https://api.example.com/v1",',
-      '    "protocol": "responses"',
-      '  }',
-      "}",
-    ].join("\n"),
-  },
-  {
-    id: "page",
-    path: "src/app/page.tsx",
-    language: "TSX",
-    content: [
-      '"use client";',
-      "",
-      'import Image from "next/image";',
-      'import ContextWorkspace from "./components/context-workspace";',
-      'import ResourcesWorkspace from "./components/resources-workspace";',
-      "",
-      "export default function Home() {",
-      "  return (",
-      '    <I18nProvider>',
-      "      <HomeContent />",
-      "    </I18nProvider>",
-      "  );",
-      "}",
-    ].join("\n"),
-  },
-  {
-    id: "runtime-context",
-    path: "src/app/runtime-context.ts",
-    language: "TypeScript",
-    content: [
-      "export type RuntimeVariables = {",
-      "  task: { title: string };",
-      "  agent: { name: string };",
-      "  context: { files: ContextFile[] };",
-      "  user_message: string;",
-      "  tools: RuntimeTool[];",
-      "};",
-      "",
-      'export type RuntimeVariablePath = "task.title" | "agent.name";',
-    ].join("\n"),
-  },
-  {
-    id: "i18n",
-    path: "src/app/i18n.tsx",
-    language: "TSX",
-    content: [
-      '"use client";',
-      "",
-      'export type Locale = "zh-CN" | "en";',
-      "",
-      "const dictionaries = {",
-      '  "zh-CN": { navigation: "主导航" },',
-      '  en: { navigation: "Primary navigation" },',
-      "};",
-    ].join("\n"),
-  },
-  {
-    id: "package",
-    path: "package.json",
-    language: "JSON",
-    content: [
-      "{",
-      '  "name": "capybara-frontend",',
-      '  "private": true,',
-      '  "scripts": {',
-      '    "dev": "next dev --webpack",',
-      '    "build": "next build --webpack",',
-      '    "lint": "eslint"',
-      "  }",
-      "}",
-    ].join("\n"),
-  },
-];
 
 function resourceApiUrl(path: string, projectPath: string): string {
   const configured = process.env.NEXT_PUBLIC_RUNTIME_HTTP_URL?.replace(/\/$/, "");
@@ -228,9 +123,14 @@ function resourceApiUrl(path: string, projectPath: string): string {
   return `${base}/api/resources/${path}${separator}projectPath=${encodeURIComponent(projectPath)}`;
 }
 
-async function resourceRequest<T>(projectPath: string, path: string, body?: unknown): Promise<T> {
+async function resourceRequest<T>(
+  projectPath: string,
+  path: string,
+  body?: unknown,
+  method?: "POST" | "PUT",
+): Promise<T> {
   const response = await fetch(resourceApiUrl(path, projectPath), {
-    method: body === undefined ? "GET" : "PUT",
+    method: body === undefined ? "GET" : method ?? "PUT",
     headers: body === undefined ? undefined : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -254,6 +154,8 @@ function sectionLabel(
       return t("resources.skills");
     case "harnesses":
       return t("resources.harnesses");
+    case "hooks":
+      return t("resources.hooks");
     case "system-variables":
       return t("resources.systemVariables");
     case "project-settings":
@@ -262,8 +164,6 @@ function sectionLabel(
       return t("resources.systemSettings");
     case "memory":
       return t("resources.memory");
-    case "compression":
-      return t("resources.compression");
   }
 }
 
@@ -297,48 +197,6 @@ function ResourceNavigation({
       onChange={onSelect}
       title={t("navigation.resources")}
     />
-  );
-}
-
-function FileListItem({
-  file,
-  onSelect,
-  selected,
-}: {
-  file: ResourceFile;
-  onSelect: () => void;
-  selected: boolean;
-}) {
-  const name = file.path.split("/").at(-1);
-  const directory = file.path.slice(0, Math.max(0, file.path.lastIndexOf("/")));
-
-  return (
-    <button
-      aria-pressed={selected}
-      className={
-        "grid h-14 w-full grid-cols-[20px_1fr] items-center border-b border-[#e0e8e8] px-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] " +
-        (selected
-          ? "bg-[#dcecea] text-[#173f43]"
-          : "bg-white text-[#35555a] hover:bg-[#eef4f3]")
-      }
-      onClick={onSelect}
-      type="button"
-    >
-      <FileCode2
-        aria-hidden="true"
-        className={selected ? "text-[#0c766e]" : "text-[#718488]"}
-        size={15}
-        strokeWidth={1.7}
-      />
-      <span className="min-w-0">
-        <span className="block truncate font-mono text-[11px] font-semibold">
-          {name}
-        </span>
-        <span className="mt-0.5 block truncate font-mono text-[9px] text-[#7a8d91]">
-          {directory || "/"}
-        </span>
-      </span>
-    </button>
   );
 }
 
@@ -380,26 +238,6 @@ function DefinitionListItem({
         </span>
       </span>
     </button>
-  );
-}
-
-function FileDetails({ file }: { file: ResourceFile }) {
-  const { t } = useI18n();
-  return (
-    <section className="grid h-full min-h-0 grid-rows-[34px_1fr] bg-white">
-      <PanelHeader
-        actions={<span className="font-mono text-[9px] text-[#718488]">{t("resources.readOnly")}</span>}
-        icon={FileCode2}
-        monospace
-        title={file.path}
-      />
-      <CodeSurface
-        ariaLabel={t("resources.fileContent")}
-        language={file.language}
-        readOnly
-        value={file.content}
-      />
-    </section>
   );
 }
 
@@ -511,6 +349,22 @@ function SystemVariableDetails({
             <input checked={variable.required} disabled={variable.readonly} onChange={(event) => onChange({ required: event.target.checked })} type="checkbox" />
             {t("resources.variableRequired")}
           </label>
+          <label className="flex items-center gap-2 text-[11px] text-[#35555a]">
+            <input checked={variable.show_in_status} disabled={variable.readonly} onChange={(event) => onChange({ show_in_status: event.target.checked })} type="checkbox" />
+            {t("resources.variableShowInStatus")}
+          </label>
+          <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
+            {t("resources.variableScope")}
+            <select
+              className={fieldClass}
+              disabled={variable.readonly}
+              onChange={(event) => onChange({ scope: event.target.value as SystemVariableDefinition["scope"] })}
+              value={variable.scope ?? "session"}
+            >
+              <option value="session">{t("resources.variableScopeSession")}</option>
+              <option value="project">{t("resources.variableScopeProject")}</option>
+            </select>
+          </label>
         </div>
       </div>
     </section>
@@ -521,14 +375,20 @@ function ProjectSettingsPanel({
   dirty,
   onChange,
   onSave,
+  onTestLlm,
   projectControls,
   settings,
+  testingLlm,
+  testState,
 }: {
   dirty: boolean;
   onChange: (settings: ProjectSettings) => void;
   onSave: () => void;
+  onTestLlm: () => void;
   projectControls?: ReactNode;
   settings: ProjectSettings;
+  testingLlm: boolean;
+  testState: LlmTestState | null;
 }) {
   const { t } = useI18n();
   const [showApiKey, setShowApiKey] = useState(false);
@@ -562,7 +422,7 @@ function ProjectSettingsPanel({
             </label>
             <div className="mt-3 grid max-w-xl grid-cols-2 gap-3">
               <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
-                {t("compression.maxInputTokens")}
+                {t("resources.maxInputTokens")}
                 <input
                   className={fieldClass}
                   min={1024}
@@ -575,7 +435,7 @@ function ProjectSettingsPanel({
                 />
               </label>
               <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
-                {t("compression.reservedOutputTokens")}
+                {t("resources.reservedOutputTokens")}
                 <input
                   className={fieldClass}
                   min={128}
@@ -587,40 +447,25 @@ function ProjectSettingsPanel({
                   value={settings.context.reserved_output_tokens}
                 />
               </label>
-              <label className="col-span-2 flex items-center gap-2 text-[11px] text-[#35555a]">
-                <input
-                  checked={settings.context.compression.enabled}
-                  onChange={(event) => onChange({
-                    ...settings,
-                    context: {
-                      ...settings.context,
-                      compression: { ...settings.context.compression, enabled: event.target.checked },
-                    },
-                  })}
-                  type="checkbox"
-                />
-                {t("compression.enabled")}
-              </label>
-              <label className="col-span-2 grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
-                {t("compression.resourcePath")}
-                <input
-                  className={fieldClass}
-                  onChange={(event) => onChange({
-                    ...settings,
-                    context: {
-                      ...settings.context,
-                      compression: { ...settings.context.compression, resource: event.target.value },
-                    },
-                  })}
-                  value={settings.context.compression.resource}
-                />
-              </label>
             </div>
           </section>
           <section aria-labelledby="llm-settings-heading" className="border-t border-[#cbd8d9] py-5">
-            <h3 className="text-[10px] font-semibold uppercase text-[#6a7e82]" id="llm-settings-heading">
-              {t("resources.llmSettings")}
-            </h3>
+            <div className="flex max-w-xl items-center justify-between gap-3">
+              <h3 className="text-[10px] font-semibold uppercase text-[#6a7e82]" id="llm-settings-heading">
+                {t("resources.llmSettings")}
+              </h3>
+              <button
+                className="flex h-7 shrink-0 items-center gap-1.5 border border-[#8aafab] bg-white px-2.5 text-[10px] font-semibold text-[#0c655f] outline-none hover:bg-[#edf6f4] focus-visible:ring-2 focus-visible:ring-[#0c766e] disabled:cursor-wait disabled:border-[#c6d4d4] disabled:text-[#839497]"
+                disabled={testingLlm}
+                onClick={onTestLlm}
+                type="button"
+              >
+                {testingLlm
+                  ? <LoaderCircle aria-hidden="true" className="animate-spin" size={13} />
+                  : <Activity aria-hidden="true" size={13} />}
+                {testingLlm ? t("resources.testingLlm") : t("resources.testLlm")}
+              </button>
+            </div>
             <div className="mt-3 grid max-w-xl grid-cols-2 gap-3">
               <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
                 {t("resources.llmModel")}
@@ -690,6 +535,29 @@ function ProjectSettingsPanel({
                   </button>
                 </span>
               </div>
+              {testState && (
+                <div
+                  className={
+                    "col-span-2 flex min-h-8 items-start gap-2 border px-2.5 py-2 text-[11px] " +
+                    (testState.status === "success"
+                      ? "border-[#a9cbc2] bg-[#eef8f4] text-[#17675d]"
+                      : "border-[#dfb9b5] bg-[#fff3f1] text-[#9b3d35]")
+                  }
+                  role="status"
+                >
+                  {testState.status === "success"
+                    ? <CircleCheck aria-hidden="true" className="mt-px shrink-0" size={14} />
+                    : <CircleAlert aria-hidden="true" className="mt-px shrink-0" size={14} />}
+                  <span className="min-w-0 break-words">
+                    {testState.status === "success"
+                      ? t("resources.llmTestSucceeded", {
+                          duration: testState.durationMs,
+                          model: testState.model,
+                        })
+                      : t("resources.llmTestFailed", { message: testState.message })}
+                  </span>
+                </div>
+              )}
             </div>
           </section>
           <section aria-labelledby="harness-settings-heading" className="border-t border-[#cbd8d9] py-5">
@@ -812,7 +680,6 @@ export default function ResourcesWorkspace({
     useState<ResourceSection>("files");
   const activeSection = controlledActiveSection ?? internalActiveSection;
   const [query, setQuery] = useState("");
-  const [selectedFileId, setSelectedFileId] = useState(INITIAL_FILES[0].id);
   const [systemVariables, setSystemVariables] = useState<SystemVariableDefinition[]>([]);
   const [selectedSystemVariableIndex, setSelectedSystemVariableIndex] = useState(0);
   const [systemVariablesDirty, setSystemVariablesDirty] = useState(false);
@@ -834,13 +701,11 @@ export default function ResourcesWorkspace({
     context: {
       max_input_tokens: 16000,
       reserved_output_tokens: 2000,
-      compression: {
-        enabled: false,
-        resource: "context/compression/manifest.json",
-      },
     },
   });
   const [settingsDirty, setSettingsDirty] = useState(false);
+  const [testingLlm, setTestingLlm] = useState(false);
+  const [llmTestState, setLlmTestState] = useState<LlmTestState | null>(null);
   const [resourceError, setResourceError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [navigationWidth, setNavigationWidth] = useState(NAVIGATION_DEFAULT_WIDTH);
@@ -854,6 +719,7 @@ export default function ResourcesWorkspace({
     ]).then(([variablesResource, loadedSettings]) => {
       setSystemVariables(variablesResource.variables);
       setSettings(loadedSettings);
+      setLlmTestState(null);
       setResourceError(null);
     }).catch((error: unknown) => {
       setResourceError(error instanceof Error ? error.message : String(error));
@@ -867,13 +733,6 @@ export default function ResourcesWorkspace({
   };
 
   const normalizedQuery = query.trim().toLowerCase();
-  const filteredFiles = useMemo(
-    () =>
-      INITIAL_FILES.filter((file) =>
-        file.path.toLowerCase().includes(normalizedQuery),
-      ),
-    [normalizedQuery],
-  );
   const filteredSystemVariables = useMemo(
     () => systemVariables
       .map((variable, index) => ({ variable, index }))
@@ -883,8 +742,6 @@ export default function ResourcesWorkspace({
     [normalizedQuery, systemVariables],
   );
 
-  const selectedFile =
-    INITIAL_FILES.find((file) => file.id === selectedFileId) ?? INITIAL_FILES[0];
   const selectedSystemVariable = systemVariables[selectedSystemVariableIndex];
 
   const updateSystemVariable = (changes: Partial<SystemVariableDefinition>) => {
@@ -905,6 +762,8 @@ export default function ResourcesWorkspace({
       value: "",
       required: false,
       readonly: false,
+      show_in_status: false,
+      scope: "session",
       source: "project",
     }]);
     setSelectedSystemVariableIndex(systemVariables.length);
@@ -958,6 +817,36 @@ export default function ResourcesWorkspace({
       setResourceError(error instanceof Error ? error.message : String(error));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const testLlm = async () => {
+    if (testingLlm) return;
+    setTestingLlm(true);
+    setLlmTestState(null);
+    try {
+      const result = await resourceRequest<{
+        ok: true;
+        model: string;
+        duration_ms: number;
+      }>(projectPath, "project-settings/llm/test", {
+        model: settings.llm.model,
+        base_url: settings.llm.base_url,
+        protocol: settings.llm.protocol,
+        ...(settings.llm.api_key ? { api_key: settings.llm.api_key } : {}),
+      }, "POST");
+      setLlmTestState({
+        status: "success",
+        model: result.model,
+        durationMs: result.duration_ms,
+      });
+    } catch (error) {
+      setLlmTestState({
+        status: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setTestingLlm(false);
     }
   };
 
@@ -1016,36 +905,7 @@ export default function ResourcesWorkspace({
       />
 
       {activeSection === "files" && (
-        <>
-          <WorkspaceListPane
-            countLabel={t("resources.itemCount", { count: filteredFiles.length })}
-            empty={filteredFiles.length === 0}
-            emptyLabel={t("resources.noResults")}
-            id="resource-files-list"
-            onQueryChange={setQuery}
-            query={query}
-            searchLabel={t("resources.search")}
-            title={t("resources.files")}
-          >
-            {filteredFiles.map((file) => (
-              <FileListItem
-                file={file}
-                key={file.id}
-                onSelect={() => setSelectedFileId(file.id)}
-                selected={selectedFile.id === file.id}
-              />
-            ))}
-          </WorkspaceListPane>
-          {catalogDivider}
-          <div
-            aria-labelledby="resource-files-tab"
-            className="min-h-0"
-            id="resource-files-panel"
-            role="tabpanel"
-          >
-            <FileDetails file={selectedFile} />
-          </div>
-        </>
+        <ProjectFilesWorkspace divider={catalogDivider} key={projectPath} projectPath={projectPath} />
       )}
 
       {activeSection === "version-control" && (
@@ -1062,6 +922,10 @@ export default function ResourcesWorkspace({
 
       {activeSection === "harnesses" && (
         <ResourceDefinitionWorkspace catalogWidth={catalogWidth} divider={catalogDivider} key={`harnesses:${projectPath}`} kind="harness" projectPath={projectPath} runtimeTools={runtimeTools} />
+      )}
+
+      {activeSection === "hooks" && (
+        <HookResourceWorkspace divider={catalogDivider} key={`hooks:${projectPath}`} projectPath={projectPath} />
       )}
 
       {activeSection === "system-variables" && (
@@ -1089,6 +953,8 @@ export default function ResourcesWorkspace({
                 key={`${variable.key}-${index}`}
                 metadata={variable.readonly
                   ? t("resources.readOnly")
+                  : variable.scope === "project"
+                    ? t("resources.variableScopeProject")
                   : variable.required ? t("resources.required") : t("resources.optional")}
                 name={variable.key}
                 onSelect={() => setSelectedSystemVariableIndex(index)}
@@ -1126,10 +992,14 @@ export default function ResourcesWorkspace({
             onChange={(next) => {
               setSettings(next);
               setSettingsDirty(true);
+              setLlmTestState(null);
             }}
             onSave={() => void saveSettings()}
+            onTestLlm={() => void testLlm()}
             projectControls={projectControls}
             settings={settings}
+            testingLlm={testingLlm}
+            testState={llmTestState}
           />
         </div>
       )}
@@ -1156,16 +1026,6 @@ export default function ResourcesWorkspace({
         </div>
       )}
 
-      {activeSection === "compression" && (
-        <div
-          aria-labelledby="resource-compression-tab"
-          className="col-span-3 min-h-0"
-          id="resource-compression-panel"
-          role="tabpanel"
-        >
-          <CompressionResourceWorkspace projectPath={projectPath} />
-        </div>
-      )}
       {resourceError && (
         <div className="absolute bottom-3 right-3 border border-[#c68d8d] bg-[#fff1f0] px-3 py-2 text-[10px] text-[#8f3535]" role="alert">
           {resourceError}

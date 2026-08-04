@@ -111,9 +111,6 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
     "data-context-replay-mode",
     "live",
   );
-  const compressContext = page.getByRole("button", { name: /压缩当前上下文/ });
-  await expect(compressContext).toBeEnabled();
-  await expect(page.getByRole("button", { name: "撤销最近一次上下文压缩" })).toHaveCount(0);
   await expect(page.getByLabel("第 1 / 1 页")).toBeVisible();
   await expect(page.locator("#context-request-tab")).toHaveCount(0);
   await expect(page.locator("[data-render-warnings]")).toContainText(
@@ -140,7 +137,7 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
   await expect(page.getByRole("button", { name: "显示系统变量" })).toHaveCount(0);
   await page.locator("#variables-tab").click();
   await expect(page.getByRole("button", { name: "显示系统变量" })).toBeVisible();
-  await expect(page.locator("#controls-timeline-panel tbody tr")).toHaveCount(5);
+  await expect(page.locator("#controls-timeline-panel tbody tr")).toHaveCount(4);
   await expect(page.locator("#context-tools-tab")).toHaveText("工具");
   const contextDivider = page.getByRole("separator", {
     name: "调整上下文渲染区宽度",
@@ -239,7 +236,6 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
     "data-context-replay-mode",
     "history",
   );
-  await expect(compressContext).toBeDisabled();
   await expect(page.locator("#context-rendered-panel")).toContainText("历史上下文");
   await expect(page.locator("#context-rendered-panel [data-context-role='system']")).toBeVisible();
   await page.getByRole("button", { name: "回到实时上下文" }).click();
@@ -247,7 +243,6 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
     "data-context-replay-mode",
     "live",
   );
-  await expect(compressContext).toBeEnabled();
 
   const completedModelStep = page
     .locator("#controls-timeline-panel tbody tr")
