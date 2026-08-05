@@ -62,6 +62,23 @@ export default defineHook({
 });
 `
 
+const TIMEOUT_EXPERIENCE_HOOK = `import { defineHook } from "@capybara/sdk";
+
+export default defineHook({
+  name: "timeout-extractor",
+  description: "Times out before succeeding on a retried training run.",
+  enabled: true,
+  checkpoint: "after_evaluation",
+  trigger() { return true; },
+  schedule: { priority: 1, timeoutMs: 100, onError: "retry" },
+  permissions: { llm: "project" },
+  async run({ llm }) {
+    await llm.responses.create({ input: "learning-hook-probe" });
+    return { experiences: [] };
+  },
+});
+`
+
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true }).trim()
 }
@@ -346,6 +363,94 @@ test('failed training retries only the failed case and preserves completed work'
     const retried = training.cases(created.id).find((item) => item.phase === 'training')
     assert.equal(retried?.attempt, 4)
     assert.equal(retried?.status, 'completed')
+  } finally {
+    await training.close()
+    await experiments.close()
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  }
+})
+
+test('Hook failures mark the evaluated case retryable and resume without rerunning the agent', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-training-hook-retry-'))
+  initializeProjectDirectory(projectDir)
+  fs.mkdirSync(path.join(projectDir, '.capybara', 'hooks'), { recursive: true })
+  fs.writeFileSync(path.join(projectDir, '.capybara', 'hooks', 'timeout-extractor.ts'), TIMEOUT_EXPERIENCE_HOOK)
+  fs.mkdirSync(path.join(projectDir, 'experiments'), { recursive: true })
+  fs.writeFileSync(path.join(projectDir, '.capybara', 'experiment-adapter.json'), `${JSON.stringify({
+    version: 1,
+    runner: { type: 'stdio', entry: 'experiments/training-adapter.mjs' },
+    phases: ['evaluate'],
+  }, null, 2)}\n`)
+  fs.writeFileSync(path.join(projectDir, 'experiments', 'training-adapter.mjs'), [
+    "let input = '';",
+    'for await (const chunk of process.stdin) input += chunk;',
+    'const request = JSON.parse(input);',
+    "process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { score: 1, passed: true, rationale: 'passed', metrics: {} } }));",
+    '',
+  ].join('\n'))
+  const datasets = new DatasetStore(projectDir)
+  const train = datasets.create({ name: 'train', storage: 'jsonl', path: 'datasets/train.jsonl', tags: ['train'], scoringPrompt: '' })
+  const heldOut = datasets.create({ name: 'test', storage: 'jsonl', path: 'datasets/test.jsonl', tags: ['test'], scoringPrompt: '' })
+  datasets.createRecord(train.id, { question: 'training question', thinking: '', answer: 'done' })
+  datasets.createRecord(heldOut.id, { question: 'test question', thinking: '', answer: 'done' })
+  git(projectDir, 'init', '--initial-branch=main')
+  git(projectDir, 'config', 'user.name', 'Capybara Test')
+  git(projectDir, 'config', 'user.email', 'capybara@example.invalid')
+  git(projectDir, 'add', '.')
+  git(projectDir, 'commit', '-m', 'fixture')
+
+  let hookInvocations = 0
+  let agentInvocations = 0
+  const retryLlm: RuntimeLlm = {
+    async chat(request) {
+      if (request.messages.some((message) => message.content.includes('learning-hook-probe'))) {
+        hookInvocations += 1
+        if (hookInvocations <= 2) return new Promise(() => {})
+        return { provider: 'custom', model: 'hook-retry-model', text: 'ok', raw: {} }
+      }
+      agentInvocations += 1
+      return {
+        provider: 'custom',
+        model: 'hook-retry-model',
+        text: JSON.stringify({ status: 'completed', content: 'done' }),
+        raw: {},
+      }
+    },
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'hook-retry-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1_000, maxRetries: 0,
+    }),
+  }
+  const experiments = new ExperimentManager(projectDir, { llm: retryLlm, runtimeLoop: { stepDelayMs: 0, streamDelayMs: 0 } })
+  const training = new TrainingManager(projectDir, experiments)
+  try {
+    const created = training.create({
+      trainDatasetId: train.id,
+      testDatasetId: heldOut.id,
+      trainLimit: 1,
+      testLimit: 1,
+      learningMode: 'auto',
+      reviewScope: 'failed',
+      pauseOnFailure: false,
+      experienceExtractorHook: { hookId: 'timeout-extractor', parameters: {} },
+      timeoutMs: 10_000,
+    })
+    const failed = await waitFor(training, created.id, ['failed'])
+    assert.match(failed.failure?.message ?? '', /Hook exceeded 100 ms/)
+    const failedCase = training.cases(created.id).find((item) => item.phase === 'training')
+    assert.equal(failedCase?.status, 'error')
+    assert.equal(failedCase?.passed, true)
+    assert.equal(failedCase?.attempt, 1)
+    const agentCallsBeforeRetry = agentInvocations
+
+    training.retry(created.id)
+    const recovered = await waitFor(training, created.id, ['ready_to_freeze', 'failed'])
+    assert.equal(recovered.status, 'ready_to_freeze', recovered.failure?.message ?? 'Hook retry did not recover the run')
+    const recoveredCase = training.cases(created.id).find((item) => item.phase === 'training')
+    assert.equal(recoveredCase?.status, 'completed')
+    assert.equal(recoveredCase?.attempt, 1)
+    assert.equal(agentInvocations, agentCallsBeforeRetry)
+    assert.equal(hookInvocations, 3)
   } finally {
     await training.close()
     await experiments.close()

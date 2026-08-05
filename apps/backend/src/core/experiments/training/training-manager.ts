@@ -419,7 +419,9 @@ export class TrainingManager {
   retry(id: string): TrainingRun {
     const run = this.store.getRun(id)
     if (run.status !== 'failed') throw new Error('training run has no terminal failure to retry')
-    const failedCase = this.store.listCases(id).find((item) => item.status === 'error')
+    const cases = this.store.listCases(id)
+    const failedCase = cases.find((item) => item.status === 'error')
+      ?? cases.find((item) => item.status !== 'completed')
     if (!failedCase) throw new Error('training run has no failed case to retry')
     this.store.retryCase(failedCase.id)
     const status = failedCase.phase === 'testing' ? 'testing' : 'running'
@@ -554,7 +556,13 @@ export class TrainingManager {
       }
     } catch (error) {
       if (this.stopped) return
-      this.store.setRunStatus(id, 'failed', { failure: failure(error), currentCaseId: null })
+      const problem = failure(error)
+      const currentCaseId = this.store.getRun(id).currentCaseId
+      if (currentCaseId) {
+        const currentCase = this.store.getCase(currentCaseId)
+        if (!['completed', 'error'].includes(currentCase.status)) this.store.failCase(currentCaseId, problem)
+      }
+      this.store.setRunStatus(id, 'failed', { failure: problem, currentCaseId: null })
     }
   }
 

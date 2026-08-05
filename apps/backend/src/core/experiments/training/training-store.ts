@@ -343,12 +343,21 @@ export class TrainingStore {
 
   retryCase(id: string): void {
     const current = this.getCase(id)
-    if (current.status !== 'error') throw new Error('only a failed training case can be retried')
+    if (current.status === 'completed') throw new Error('completed training cases cannot be retried')
+    const status: TrainingCaseStatus = current.passed === undefined ? 'queued' : 'evaluated'
     const now = new Date().toISOString()
     this.database.prepare(`
-      UPDATE training_cases SET status = 'queued', failure_json = NULL,
+      UPDATE training_cases SET status = ?, failure_json = NULL,
         completed_at = NULL, updated_at = ? WHERE id = ?
-    `).run(now, id)
+    `).run(status, now, id)
+  }
+
+  failCase(id: string, value: ExperimentFailure): void {
+    const now = new Date().toISOString()
+    this.database.prepare(`
+      UPDATE training_cases SET status = 'error', failure_json = ?,
+        completed_at = ?, updated_at = ? WHERE id = ?
+    `).run(JSON.stringify(value), now, now, id)
   }
 
   recordEvaluation(id: string, value: {
