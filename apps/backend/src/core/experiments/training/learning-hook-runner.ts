@@ -73,6 +73,7 @@ export class LearningHookRunner {
     checkpoint: HookCheckpoint,
     binding: TrainingHookBinding,
     context: Omit<HookTrainingContext, 'parameters'>,
+    variableValues: Record<string, string> = {},
     signal?: AbortSignal,
   ): Promise<LearningHookExecution> {
     const hook = this.registry.get(binding.hookId)
@@ -83,7 +84,12 @@ export class LearningHookRunner {
     }
     const execution = await new HookRunner(this.llm).run(
       hook,
-      learningFixture(checkpoint, { ...context, parameters: binding.parameters }, this.resources.readSystemVariables().variables),
+      learningFixture(
+        checkpoint,
+        { ...context, parameters: binding.parameters },
+        this.resources.readSystemVariables().variables,
+        variableValues,
+      ),
       signal,
     )
     const experiences = execution.matched ? candidates(execution.result?.experiences) : []

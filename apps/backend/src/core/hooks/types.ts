@@ -83,6 +83,17 @@ export interface HookTrainingCase {
   actualAnswer: string
   expectedTools: string[]
   actualTools: string[]
+  toolCalls: Array<{
+    callId: string
+    name: string
+    status: 'completed' | 'failed'
+    arguments: unknown
+    resultPreview?: string
+    error?: unknown
+    startedAt: string
+    completedAt?: string
+    durationMs?: number
+  }>
 }
 
 export interface HookTrainingContext {

@@ -644,16 +644,17 @@ export class TrainingManager {
     this.store.setCaseStatus(item.id, 'learning')
     const hookRunner = new LearningHookRunner(this.projectDir, this.experiments.runtimeLlm())
     let context = this.hookContext(run, item, 'training')
+    const variableValues = this.store.runVariables(run.id)
     const generated: ExperienceCandidate[] = []
     if (item.passed === false && run.config.correctionHook) {
-      const correction = await hookRunner.run('after_evaluation', run.config.correctionHook, context)
+      const correction = await hookRunner.run('after_evaluation', run.config.correctionHook, context, variableValues)
       generated.push(...correction.experiences.map((candidate) =>
         this.candidate(run, item, run.config.correctionHook?.hookId ?? '', candidate)))
       if (correction.metadata !== undefined) {
         context = { ...context, priorResults: { correction: correction.metadata } }
       }
     }
-    const extraction = await hookRunner.run('after_evaluation', run.config.experienceExtractorHook, context)
+    const extraction = await hookRunner.run('after_evaluation', run.config.experienceExtractorHook, context, variableValues)
     generated.push(...extraction.experiences.map((candidate) =>
       this.candidate(run, item, run.config.experienceExtractorHook.hookId, candidate)))
     if (generated.length === 0) {
@@ -706,7 +707,7 @@ export class TrainingManager {
       await hooks.run('after_replay', binding, this.hookContext(run, this.store.getCase(source.id), 'replay', {
         ...candidate,
         patches: candidate.patches.map(({ variableName, baseHash, unifiedDiff }) => ({ variableName, baseHash, unifiedDiff })),
-      }))
+      }), overrides)
     }
     this.store.setCaseStatus(source.id, 'evaluated')
   }
@@ -802,6 +803,7 @@ export class TrainingManager {
         actualAnswer: item.actualAnswer,
         expectedTools: item.expectedTools,
         actualTools: item.actualTools,
+        toolCalls: item.toolCalls,
       },
       evaluation: {
         passed: item.passed === true,

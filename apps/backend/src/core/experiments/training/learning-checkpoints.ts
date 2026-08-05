@@ -6,8 +6,12 @@ export function learningFixture(
   checkpoint: HookFixture['checkpoint'],
   training: HookTrainingContext,
   variables: SystemVariableDefinition[],
+  variableValues: Record<string, string> = {},
 ): HookFixture {
-  const prompts = Object.fromEntries(variables.map((variable) => [variable.key, variable.value]))
+  const prompts = Object.fromEntries(variables.map((variable) => [
+    variable.key,
+    variableValues[variable.key] ?? variable.value,
+  ]))
   const runtimeVariables = {
     builtin: {
       project_path: '',

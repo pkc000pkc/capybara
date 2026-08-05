@@ -27,11 +27,11 @@ export default defineHook({
   },
   schedule: { priority: 1, timeoutMs: 2000, onError: "continue" },
   permissions: { variables: "patch" },
-  run({ variables }) {
+  run({ variables, training }) {
     const before = variables.builtin.prompts.agent_identity;
     return { experiences: [{
       summary: "Persist a replayed rule",
-      rationale: "Integration test",
+      rationale: "Integration test with " + training.case.toolCalls.length + " tool calls",
       patches: [{
         variableName: "agent_identity",
         unifiedDiff: [
@@ -148,6 +148,7 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
   const train = datasets.create({ name: 'train', storage: 'jsonl', path: 'datasets/train.jsonl', tags: ['train'], scoringPrompt: '' })
   const heldOut = datasets.create({ name: 'test', storage: 'jsonl', path: 'datasets/test.jsonl', tags: ['test'], scoringPrompt: '' })
   datasets.createRecord(train.id, { question: 'training question', thinking: 'reference thinking', answer: '' })
+  datasets.createRecord(train.id, { question: 'second training question', thinking: 'reference thinking', answer: '' })
   datasets.createRecord(heldOut.id, { question: 'held-out question', thinking: 'reference thinking', answer: '' })
   git(projectDir, 'init', '--initial-branch=main')
   git(projectDir, 'config', 'user.name', 'Capybara Test')
@@ -162,7 +163,7 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
       name: 'AppWorld correction baseline',
       trainDatasetId: train.id,
       testDatasetId: heldOut.id,
-      trainLimit: 1,
+      trainLimit: 2,
       testLimit: 1,
       learningMode: 'auto',
       reviewScope: 'failed',
@@ -173,7 +174,8 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     assert.equal(created.name, 'AppWorld correction baseline')
     const trained = await waitFor(training, created.id, ['ready_to_freeze', 'failed'])
     assert.equal(trained.status, 'ready_to_freeze', trained.failure?.message ?? 'training did not reach ready_to_freeze')
-    assert.equal(trained.progress.training.completed, 1)
+    assert.equal(trained.progress.training.completed, 2)
+    assert.equal(training.experiences(created.id).length, 1)
     assert.equal(training.experiences(created.id)[0]?.status, 'applied')
     assert.equal(resources.readSystemVariables().variables.find((item) => item.key === 'agent_identity')?.value, initialAgentIdentity)
     assert.match(training.store.runVariables(created.id).agent_identity ?? '', /learned replay rule/)
@@ -235,7 +237,7 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     training.cancel(inherited.id)
     const analysis = training.analysis(created.id)
     assert.equal(analysis.run.name, 'AppWorld correction baseline')
-    assert.equal(analysis.training.evaluated, 1)
+    assert.equal(analysis.training.evaluated, 2)
     assert.equal(analysis.testing.passRate, 1)
     assert.equal(analysis.experiences.applied, 1)
     assert.equal(analysis.variables.changed, 1)
