@@ -46,12 +46,30 @@ import { PanelHeader } from "./workspace-ui";
 
 type PhaseId = "training" | "freeze" | "testing";
 type LearningView = "attempt" | "evaluate" | "correct" | "extract" | "replay";
-type HookOption = { id: string; name: string; checkpoint: "after_loop" | "after_evaluation" | "after_replay" };
+type HookParameterOption = {
+  key: string;
+  label: string;
+  description?: string;
+  defaultValue: string;
+  input: "text" | "number";
+  min?: number;
+  max?: number;
+};
+type HookOption = {
+  id: string;
+  name: string;
+  checkpoint: "after_loop" | "after_evaluation" | "after_replay";
+  parameters: HookParameterOption[];
+};
 
 const TRAIN_LIMIT = 10;
 const TEST_LIMIT = 5;
 const ACTIVE_RUN_STATUSES = new Set(["queued", "running", "paused", "paused_failure", "waiting_review", "ready_to_freeze", "ready_for_test", "testing"]);
 const FIELD_CLASS = "h-7 w-full border border-[#c6d4d4] bg-white px-2 font-mono text-[9px] text-[#294247] outline-none focus:border-[#0c766e] focus:ring-1 focus:ring-[#0c766e] disabled:bg-[#edf3f2] disabled:text-[#718488]";
+
+function hookParameterDefaults(hook?: HookOption): Record<string, string> {
+  return Object.fromEntries((hook?.parameters ?? []).map((parameter) => [parameter.key, parameter.defaultValue]));
+}
 
 function AccessBadge({ tone, children }: { tone: "write" | "frozen" | "read"; children: ReactNode }) {
   const styles = tone === "write"
@@ -140,10 +158,12 @@ function LearningStrategy({
   correctionHook,
   disabled,
   extractorHook,
+  extractorParameters,
   hooks,
   learningMode,
   onCorrectionHookChange,
   onExtractorHookChange,
+  onExtractorParameterChange,
   onLearningModeChange,
   onReviewScopeChange,
   onStopOnFailureChange,
@@ -153,10 +173,12 @@ function LearningStrategy({
   correctionHook: string;
   disabled: boolean;
   extractorHook: string;
+  extractorParameters: Record<string, string>;
   hooks: HookOption[];
   learningMode: TrainingLearningMode;
   onCorrectionHookChange: (value: string) => void;
   onExtractorHookChange: (value: string) => void;
+  onExtractorParameterChange: (key: string, value: string) => void;
   onLearningModeChange: (value: TrainingLearningMode) => void;
   onReviewScopeChange: (value: TrainingReviewScope) => void;
   onStopOnFailureChange: (value: boolean) => void;
@@ -166,6 +188,7 @@ function LearningStrategy({
   const { t } = useI18n();
   const [showExtractorConfig, setShowExtractorConfig] = useState(false);
   const evaluationHooks = hooks.filter((hook) => hook.checkpoint === "after_evaluation");
+  const selectedExtractor = evaluationHooks.find((hook) => hook.id === extractorHook);
   const modes: Array<{ id: TrainingLearningMode; label: string }> = [
     { id: "review", label: t("experiments.learningModeReview") },
     { id: "author", label: t("experiments.learningModeManual") },
@@ -179,7 +202,7 @@ function LearningStrategy({
       <div className="grid gap-1"><span className="text-[9px] font-semibold text-[#60777a]">{t("experiments.reviewScope")}</span><div aria-label={t("experiments.reviewScope")} className="grid grid-cols-2 border border-[#c6d4d4]" role="radiogroup">{(["all", "failed"] as const).map((scope) => <button aria-checked={reviewScope === scope} className={`h-7 border-r border-[#c6d4d4] px-2 text-[8px] font-semibold outline-none last:border-r-0 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:opacity-55 ${reviewScope === scope ? "bg-[#d9e9e6] text-[#17665d]" : "bg-white text-[#526b70]"}`} disabled={disabled || learningMode !== "review"} key={scope} onClick={() => onReviewScopeChange(scope)} role="radio" type="button">{scope === "all" ? t("experiments.reviewScopeAll") : t("experiments.reviewScopeFailures")}</button>)}</div></div>
       <label className="grid gap-1 text-[9px] font-semibold text-[#60777a]">{t("experiments.correctionHook")}<select aria-label={t("experiments.correctionHook")} className={FIELD_CLASS} disabled={disabled} onChange={(event) => onCorrectionHookChange(event.target.value)} value={correctionHook}><option value="">-</option>{evaluationHooks.map((hook) => <option key={hook.id} value={hook.id}>{hook.name}.ts</option>)}</select></label>
       <div className="grid gap-1"><span className="flex items-center justify-between text-[9px] font-semibold text-[#60777a]">{t("experiments.experienceExtractorHook")}<button aria-expanded={showExtractorConfig} aria-label={t("experiments.configureExtractor")} className={`grid h-5 w-5 place-items-center border ${showExtractorConfig ? "border-[#8fc8bd] bg-[#e8f5f1] text-[#17665d]" : "border-[#c6d4d4] bg-white text-[#60777a]"}`} onClick={() => setShowExtractorConfig((current) => !current)} title={t("experiments.configureExtractor")} type="button"><Settings2 size={11} /></button></span><select aria-label={t("experiments.experienceExtractorHook")} className={FIELD_CLASS} disabled={disabled} onChange={(event) => onExtractorHookChange(event.target.value)} value={extractorHook}><option value="">-</option>{evaluationHooks.map((hook) => <option key={hook.id} value={hook.id}>{hook.name}.ts</option>)}</select></div>
-      {showExtractorConfig && <div className="grid gap-2 border border-[#b9d8ce] bg-[#edf7f4] p-2" id="experience-extractor-parameters"><div className="grid grid-cols-2 gap-2"><label className="grid gap-1 text-[8px] font-semibold text-[#60777a]">{t("experiments.noveltyThreshold")}<input className={FIELD_CLASS} defaultValue="0.25" disabled={disabled} /></label><label className="grid gap-1 text-[8px] font-semibold text-[#60777a]">{t("experiments.maxCandidateTokens")}<input className={FIELD_CLASS} defaultValue="600" disabled={disabled} /></label></div><span className="font-mono text-[8px] text-[#526b70]">after_evaluation · QTA · tools · evaluation</span></div>}
+      {showExtractorConfig && <div className="grid gap-2 border border-[#b9d8ce] bg-[#edf7f4] p-2" id="experience-extractor-parameters">{selectedExtractor?.parameters.length ? <div className="grid grid-cols-2 gap-2">{selectedExtractor.parameters.map((parameter) => <label className="grid gap-1 text-[8px] font-semibold text-[#60777a]" key={parameter.key} title={parameter.description}>{parameter.label}<input aria-label={parameter.label} className={FIELD_CLASS} disabled={disabled} max={parameter.max} min={parameter.min} onChange={(event) => onExtractorParameterChange(parameter.key, event.target.value)} type={parameter.input} value={extractorParameters[parameter.key] ?? parameter.defaultValue} /></label>)}</div> : <span className="text-[8px] text-[#718488]">{t("experiments.noHookParameters")}</span>}<span className="font-mono text-[8px] text-[#526b70]">after_evaluation · QTA · tools · evaluation</span></div>}
       <p className="border-l-2 border-[#63a89d] bg-[#edf7f4] px-2.5 py-1.5 text-[8px] leading-4 text-[#486b68]">{t(`experiments.learningModeHint.${learningMode === "author" ? "manual" : learningMode === "auto" ? "automatic" : "review"}`)}</p>
     </div>
   </section>;
@@ -301,6 +324,7 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
   const [error, setError] = useState("");
   const [experiences, setExperiences] = useState<ExperienceCandidate[]>([]);
   const [extractorHook, setExtractorHook] = useState("");
+  const [extractorParameters, setExtractorParameters] = useState<Record<string, string>>({});
   const [historyRuns, setHistoryRuns] = useState<TrainingRun[]>([]);
   const [hooks, setHooks] = useState<HookOption[]>([]);
   const [learningMode, setLearningMode] = useState<TrainingLearningMode>("review");
@@ -328,6 +352,17 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
       experimentApi.training.variables(projectPath, runId),
     ]);
     setRun(nextRun);
+    setRunName(nextRun.name);
+    setTrainDatasetId(nextRun.config.trainDatasetId);
+    setTestDatasetId(nextRun.config.testDatasetId);
+    setLearningMode(nextRun.config.learningMode);
+    setReviewScope(nextRun.config.reviewScope);
+    setStopOnFailure(nextRun.config.pauseOnFailure);
+    setVariableSource(nextRun.config.variableSource);
+    setVariableSourceRunId(nextRun.config.variableSourceRunId ?? "");
+    setCorrectionHook(nextRun.config.correctionHook?.hookId ?? "");
+    setExtractorHook(nextRun.config.experienceExtractorHook.hookId);
+    setExtractorParameters(nextRun.config.experienceExtractorHook.parameters);
     setCases(nextCases.items);
     setExperiences(nextExperiences.items);
     setVariables(nextVariables.items);
@@ -380,7 +415,9 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
         setRunName(suggestedTrainingName(datasetResult.items, train?.id ?? "", test?.id ?? ""));
         const evaluators = capability.hooks.filter((hook) => hook.checkpoint === "after_evaluation");
         setCorrectionHook(evaluators.find((hook) => hook.id.includes("correction"))?.id ?? "");
-        setExtractorHook(evaluators.find((hook) => hook.id.includes("experience"))?.id ?? evaluators[0]?.id ?? "");
+        const initialExtractor = evaluators.find((hook) => hook.id.includes("experience")) ?? evaluators[0];
+        setExtractorHook(initialExtractor?.id ?? "");
+        setExtractorParameters(hookParameterDefaults(initialExtractor));
         const query = new URL(window.location.href).searchParams;
         let saved: { runId?: string; phase?: PhaseId; caseId?: string } = {};
         try { saved = JSON.parse(window.localStorage.getItem(historyStorageKey) ?? "{}"); } catch { saved = {}; }
@@ -453,7 +490,7 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
         variableSource,
         ...(variableSource === "run" ? { variableSourceRunId } : {}),
         ...(correctionHook ? { correctionHook: { hookId: correctionHook, parameters: {} } } : {}),
-        experienceExtractorHook: { hookId: extractorHook, parameters: { noveltyThreshold: "0.25", maxCandidateTokens: "600" } },
+        experienceExtractorHook: { hookId: extractorHook, parameters: extractorParameters },
       });
       setCases([]);
       setExperiences([]);
@@ -503,6 +540,8 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
     setActivePhase("training");
     setRunName(suggestedTrainingName(datasets, trainDatasetId, testDatasetId));
     setVariableSource("project");
+    const selectedExtractor = hooks.find((hook) => hook.id === extractorHook);
+    setExtractorParameters(hookParameterDefaults(selectedExtractor));
     const url = new URL(window.location.href);
     url.searchParams.delete("trainingRun");
     url.searchParams.delete("trainingPhase");
@@ -590,7 +629,7 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
               : activePhase === "testing"
                 ? <CaseQueue activeCaseId={run?.currentCaseId} cases={testingCases} currentCaseId={inspectedCaseId} onFollowCurrent={followCurrentCase} onSelect={inspectCase} title={t("experiments.testingQueue")} />
                 : <section className="grid min-h-0 grid-rows-[34px_1fr] border border-[#cbd8d9] bg-white"><PanelHeader icon={LockKeyhole} metadata={run?.snapshotId?.slice(0, 8) ?? "-"} title={t("experiments.snapshotCandidate")} /><div className="grid place-items-center p-6 text-center text-[9px] leading-4 text-[#60777a]">{frozen ? t("experiments.snapshotFrozen") : t("experiments.snapshotReviewHint")}</div></section>}
-          <LearningStrategy correctionHook={correctionHook} disabled={Boolean(run)} extractorHook={extractorHook} hooks={hooks} learningMode={learningMode} onCorrectionHookChange={setCorrectionHook} onExtractorHookChange={setExtractorHook} onLearningModeChange={setLearningMode} onReviewScopeChange={setReviewScope} onStopOnFailureChange={setStopOnFailure} reviewScope={reviewScope} stopOnFailure={stopOnFailure} />
+          <LearningStrategy correctionHook={correctionHook} disabled={Boolean(run)} extractorHook={extractorHook} extractorParameters={extractorParameters} hooks={hooks} learningMode={learningMode} onCorrectionHookChange={setCorrectionHook} onExtractorHookChange={(value) => { setExtractorHook(value); setExtractorParameters(hookParameterDefaults(hooks.find((hook) => hook.id === value))); }} onExtractorParameterChange={(key, value) => setExtractorParameters((current) => ({ ...current, [key]: value }))} onLearningModeChange={setLearningMode} onReviewScopeChange={setReviewScope} onStopOnFailureChange={setStopOnFailure} reviewScope={reviewScope} stopOnFailure={stopOnFailure} />
         </div>
         <div className={`grid min-h-0 gap-3 ${activePhase === "training" ? "grid-rows-[minmax(360px,1.12fr)_minmax(300px,0.88fr)]" : activePhase === "testing" ? "grid-rows-[minmax(320px,1fr)_minmax(300px,1fr)]" : "grid-rows-1"}`}>
           {activePhase === "training" && <LearningCaseInspector busy={busy} candidate={candidate} caseItem={currentCase} draft={draft} editing={editing} onAccept={() => candidate && run && action(() => experimentApi.training.acceptExperience(projectPath, run.id, candidate.id))} onDraftChange={setDraft} onEdit={() => { if (editing) void saveDraft(); else { setDraft(currentPatch?.unifiedDiff ?? ""); setEditing(true); } }} onPatchChange={(index) => { setPatchIndex(index); setDraft(candidate?.patches[index]?.unifiedDiff ?? ""); setEditing(false); }} onReject={() => candidate && run && action(() => experimentApi.training.rejectExperience(projectPath, run.id, candidate.id))} onReplay={() => candidate && run && action(async () => { if (editing) await persistDraft(); return experimentApi.training.replayExperience(projectPath, run.id, candidate.id); })} onViewChange={setLearningView} patchIndex={patchIndex} view={learningView} />}

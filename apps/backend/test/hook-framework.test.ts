@@ -23,6 +23,7 @@ export default defineHook({
   },
   schedule: { priority: 10, timeoutMs: 2000, onError: "continue" },
   permissions: { llm: "project", variables: "patch", messages: "replace" },
+  parameters: [{ key: "summaryTokens", label: "Summary tokens", defaultValue: "1200", input: "number", min: 100, max: 4000 }],
   async run({ llm, messages }) {
     const response = await llm.responses.create({ input: "summarize" });
     return {
@@ -79,6 +80,14 @@ test('Hook registry scans single-file definitions and rejects name mismatches', 
     const invalid = hooks.find((hook) => hook.id === 'wrong-name')
     assert.equal(valid?.loadable, true)
     assert.equal(valid?.triggerSummary, 'status + builtin.sys_message')
+    assert.deepEqual(structuredClone(valid?.parameters), [{
+      key: 'summaryTokens',
+      label: 'Summary tokens',
+      defaultValue: '1200',
+      input: 'number',
+      min: 100,
+      max: 4000,
+    }])
     assert.ok(valid?.triggerInputs.includes('changed.builtin.sys_message'))
     assert.equal(invalid?.loadable, false)
     assert.match(invalid?.diagnostics[0]?.message ?? '', /match file name/)

@@ -7,6 +7,7 @@ import ts from 'typescript'
 import type {
   HookDiagnostic,
   HookCheckpoint,
+  HookParameterDefinition,
   HookPermissions,
   HookSchedule,
   ProjectHookDefinition,
@@ -102,6 +103,55 @@ function validatePermissions(value: unknown): HookPermissions {
   return value as HookPermissions
 }
 
+function validateParameters(value: unknown): HookParameterDefinition[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error('parameters must be an array')
+  const keys = new Set<string>()
+  return value.map((parameter, index) => {
+    if (!isObject(parameter)) throw new Error(`parameters[${index}] must be an object`)
+    if (typeof parameter.key !== 'string' || !/^[a-z][a-zA-Z0-9]*$/.test(parameter.key)) {
+      throw new Error(`parameters[${index}].key must use lower camelCase letters and numbers`)
+    }
+    if (keys.has(parameter.key)) throw new Error(`duplicate Hook parameter: ${parameter.key}`)
+    keys.add(parameter.key)
+    if (typeof parameter.label !== 'string' || !parameter.label.trim()) {
+      throw new Error(`parameters[${index}].label must be a non-empty string`)
+    }
+    if (typeof parameter.defaultValue !== 'string') {
+      throw new Error(`parameters[${index}].defaultValue must be a string`)
+    }
+    const input = parameter.input ?? 'text'
+    if (input !== 'text' && input !== 'number') {
+      throw new Error(`parameters[${index}].input must be text or number`)
+    }
+    if (parameter.description !== undefined && typeof parameter.description !== 'string') {
+      throw new Error(`parameters[${index}].description must be a string`)
+    }
+    const min = parameter.min === undefined ? undefined : Number(parameter.min)
+    const max = parameter.max === undefined ? undefined : Number(parameter.max)
+    if (min !== undefined && !Number.isFinite(min)) throw new Error(`parameters[${index}].min must be finite`)
+    if (max !== undefined && !Number.isFinite(max)) throw new Error(`parameters[${index}].max must be finite`)
+    if (min !== undefined && max !== undefined && min > max) {
+      throw new Error(`parameters[${index}].min must not exceed max`)
+    }
+    if (input === 'number') {
+      const defaultNumber = Number(parameter.defaultValue)
+      if (!Number.isFinite(defaultNumber)) throw new Error(`parameters[${index}].defaultValue must be numeric`)
+      if (min !== undefined && defaultNumber < min) throw new Error(`parameters[${index}].defaultValue is below min`)
+      if (max !== undefined && defaultNumber > max) throw new Error(`parameters[${index}].defaultValue exceeds max`)
+    }
+    return {
+      key: parameter.key,
+      label: parameter.label.trim(),
+      ...(parameter.description ? { description: parameter.description.trim() } : {}),
+      defaultValue: parameter.defaultValue,
+      input,
+      ...(min === undefined ? {} : { min }),
+      ...(max === undefined ? {} : { max }),
+    }
+  })
+}
+
 function triggerInputs(source: string): string[] {
   const inputs = new Set<string>()
   for (const match of source.matchAll(/status\.([a-zA-Z][\w.]*)/g)) inputs.add(`status.${match[1]}`)
@@ -123,7 +173,7 @@ function summary(inputs: readonly string[]): string {
 function validateDefinition(
   value: ProjectHookDefinition,
   expectedName: string,
-): Pick<RegisteredHook, 'name' | 'description' | 'enabled' | 'checkpoint' | 'schedule' | 'permissions'> {
+): Pick<RegisteredHook, 'name' | 'description' | 'enabled' | 'checkpoint' | 'schedule' | 'permissions' | 'parameters'> {
   if (typeof value.name !== 'string' || !HOOK_NAME.test(value.name)) {
     throw new Error('Hook name must use lowercase letters, numbers, and single hyphens')
   }
@@ -145,6 +195,7 @@ function validateDefinition(
     checkpoint,
     schedule: validateSchedule(value.schedule),
     permissions: validatePermissions(value.permissions),
+    parameters: validateParameters(value.parameters),
   }
 }
 
@@ -241,6 +292,7 @@ export class HookRegistry {
       checkpoint: 'after_loop',
       schedule: { ...DEFAULT_SCHEDULE },
       permissions: {},
+      parameters: [],
       triggerSummary: 'invalid',
       triggerInputs: [],
       diagnostics: [diagnostic],

@@ -123,10 +123,14 @@ export class TrainingManager {
       throw new Error('variable source run must have completed training')
     }
     const timeoutMs = boundedInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, 60 * 60_000, 'timeoutMs')
-    const experienceExtractorHook = binding(input.experienceExtractorHook, 'experienceExtractorHook', true)
-    const correctionHook = binding(input.correctionHook, 'correctionHook', false)
-    this.assertHook(experienceExtractorHook, 'after_evaluation')
-    if (correctionHook) this.assertHook(correctionHook, 'after_evaluation')
+    const experienceExtractorHook = this.assertHook(
+      binding(input.experienceExtractorHook, 'experienceExtractorHook', true),
+      'after_evaluation',
+    )
+    const correctionBinding = binding(input.correctionHook, 'correctionHook', false)
+    const correctionHook = correctionBinding
+      ? this.assertHook(correctionBinding, 'after_evaluation')
+      : undefined
     const config: TrainingConfig = {
       trainDatasetId,
       testDatasetId,
@@ -305,7 +309,12 @@ export class TrainingManager {
   capabilities() {
     const hooks = new HookRegistry(this.projectDir).list()
       .filter((hook) => hook.enabled && hook.loadable)
-      .map((hook) => ({ id: hook.id, name: hook.name, checkpoint: hook.checkpoint }))
+      .map((hook) => ({
+        id: hook.id,
+        name: hook.name,
+        checkpoint: hook.checkpoint,
+        parameters: hook.parameters.map((parameter) => ({ ...parameter })),
+      }))
     return { maxTrainingCases: MAX_TRAINING_CASES, maxTestCases: MAX_TEST_CASES, hooks }
   }
 
@@ -849,9 +858,27 @@ export class TrainingManager {
     return this.datasets.listRecords(datasetId, { offset: 0, limit }).items
   }
 
-  private assertHook(value: TrainingHookBinding, checkpoint: 'after_evaluation'): void {
+  private assertHook(value: TrainingHookBinding, checkpoint: 'after_evaluation'): TrainingHookBinding {
     const hook = new HookRegistry(this.projectDir).get(value.hookId)
     if (!hook || !hook.enabled || !hook.loadable) throw new Error(`training Hook is unavailable: ${value.hookId}`)
     if (hook.checkpoint !== checkpoint) throw new Error(`Hook ${value.hookId} must use ${checkpoint}`)
+    const definitions = new Map(hook.parameters.map((parameter) => [parameter.key, parameter]))
+    const unknown = Object.keys(value.parameters).find((key) => !definitions.has(key))
+    if (unknown) throw new Error(`Hook ${value.hookId} does not define parameter: ${unknown}`)
+    const parameters = Object.fromEntries(hook.parameters.map((parameter) => {
+      const configured = value.parameters[parameter.key] ?? parameter.defaultValue
+      if (parameter.input === 'number') {
+        const numeric = Number(configured)
+        if (!Number.isFinite(numeric)) throw new Error(`Hook parameter ${parameter.key} must be numeric`)
+        if (parameter.min !== undefined && numeric < parameter.min) {
+          throw new Error(`Hook parameter ${parameter.key} must be at least ${parameter.min}`)
+        }
+        if (parameter.max !== undefined && numeric > parameter.max) {
+          throw new Error(`Hook parameter ${parameter.key} must not exceed ${parameter.max}`)
+        }
+      }
+      return [parameter.key, configured]
+    }))
+    return { ...value, parameters }
   }
 }

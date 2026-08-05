@@ -522,7 +522,20 @@ export const experimentApi = {
     capabilities: (projectPath: string) => request<{
       maxTrainingCases: number;
       maxTestCases: number;
-      hooks: Array<{ id: string; name: string; checkpoint: "after_loop" | "after_evaluation" | "after_replay" }>;
+      hooks: Array<{
+        id: string;
+        name: string;
+        checkpoint: "after_loop" | "after_evaluation" | "after_replay";
+        parameters: Array<{
+          key: string;
+          label: string;
+          description?: string;
+          defaultValue: string;
+          input: "text" | "number";
+          min?: number;
+          max?: number;
+        }>;
+      }>;
     }>(projectPath, "/training/capabilities"),
     list: (projectPath: string, limit = 20) =>
       request<{ items: TrainingRun[] }>(projectPath, `/training?limit=${limit}`),

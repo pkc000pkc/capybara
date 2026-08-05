@@ -477,6 +477,7 @@ export class ProjectResourceRegistry {
       checkpoint: hook.checkpoint,
       schedule: structuredClone(hook.schedule),
       permissions: structuredClone(hook.permissions),
+      parameters: structuredClone(hook.parameters),
       triggerSummary: hook.triggerSummary,
       triggerInputs: [...hook.triggerInputs],
       content: hook.source,

@@ -92,6 +92,15 @@ export type HookResourceDefinition = {
     messages?: "replace";
     artifacts?: "write";
   };
+  parameters: Array<{
+    key: string;
+    label: string;
+    description?: string;
+    defaultValue: string;
+    input: "text" | "number";
+    min?: number;
+    max?: number;
+  }>;
   triggerSummary: string;
   triggerInputs: string[];
   content: string;

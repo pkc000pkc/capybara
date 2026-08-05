@@ -17,6 +17,16 @@ export interface HookPermissions {
   artifacts?: 'write'
 }
 
+export interface HookParameterDefinition {
+  key: string
+  label: string
+  description?: string
+  defaultValue: string
+  input: 'text' | 'number'
+  min?: number
+  max?: number
+}
+
 export interface HookStatusSnapshot {
   run: {
     status: 'completed' | 'failed' | 'cancelled'
@@ -118,6 +128,7 @@ export interface ProjectHookDefinition {
   trigger(context: HookTriggerContext): boolean
   schedule: HookSchedule
   permissions: HookPermissions
+  parameters?: HookParameterDefinition[]
   run(context: HookRunContext): Promise<HookResult> | HookResult
 }
 
@@ -138,6 +149,7 @@ export interface RegisteredHook {
   checkpoint: HookCheckpoint
   schedule: HookSchedule
   permissions: HookPermissions
+  parameters: HookParameterDefinition[]
   triggerSummary: string
   triggerInputs: string[]
   diagnostics: HookDiagnostic[]

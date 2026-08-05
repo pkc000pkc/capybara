@@ -1,6 +1,5 @@
 import type { HarnessActivation, HarnessType } from '#core/harnesses/types'
-import type { HookPermissions, HookSchedule } from '#core/hooks/types'
-import type { HookCheckpoint } from '#core/hooks/types'
+import type { HookCheckpoint, HookParameterDefinition, HookPermissions, HookSchedule } from '#core/hooks/types'
 
 export type ResourceKind = 'tool' | 'skill' | 'harness' | 'hook'
 
@@ -89,6 +88,7 @@ export interface HookResourceDefinition {
   checkpoint: HookCheckpoint
   schedule: HookSchedule
   permissions: HookPermissions
+  parameters: HookParameterDefinition[]
   triggerSummary: string
   triggerInputs: string[]
   content: string
