@@ -26,6 +26,7 @@ test('project file API browses, edits, creates, renames, and removes project dir
     assert.equal(root.statusCode, 200)
     const rootNames = root.json().entries.map((entry: { name: string }) => entry.name)
     assert.equal(rootNames.includes('.capybara'), true)
+    assert.equal(rootNames.includes('agent.md'), true)
     assert.equal(rootNames.includes('binary.bin'), true)
     assert.equal(
       root.json().entries.find((entry: { name: string }) => entry.name === 'binary.bin').editable,
@@ -38,6 +39,13 @@ test('project file API browses, edits, creates, renames, and removes project dir
     })
     assert.equal(initialFile.statusCode, 200)
     assert.match(initialFile.json().content, /builtin\.prompts\.agent_identity/)
+
+    const agentGuide = await app.inject({
+      method: 'GET',
+      url: `/api/resources/files/content?projectPath=${projectPath}&path=agent.md`,
+    })
+    assert.equal(agentGuide.statusCode, 200)
+    assert.match(agentGuide.json().content, /Project Development Guide/)
 
     const saved = await app.inject({
       method: 'PUT',

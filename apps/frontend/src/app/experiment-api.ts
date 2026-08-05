@@ -197,6 +197,260 @@ export type CreateExperimentInput = {
   sampleIds?: string[];
 };
 
+export type TrainingLearningMode = "review" | "author" | "auto";
+export type TrainingReviewScope = "all" | "failed";
+export type TrainingVariableSource = "project" | "run";
+export type TrainingRunStatus =
+  | "queued" | "running" | "paused" | "paused_failure" | "waiting_review"
+  | "ready_to_freeze" | "ready_for_test" | "testing" | "completed" | "failed" | "cancelled";
+export type TrainingCaseStatus =
+  | "queued" | "running" | "evaluated" | "learning" | "replaying" | "waiting_review" | "completed" | "error";
+export type ExperienceStatus =
+  | "draft" | "replaying" | "replay_failed" | "pending_review" | "accepted" | "rejected" | "applied" | "conflict";
+
+export type TrainingHookBinding = { hookId: string; parameters: Record<string, string> };
+
+export type TrainingRun = {
+  id: string;
+  name: string;
+  status: TrainingRunStatus;
+  config: {
+    trainDatasetId: string;
+    testDatasetId: string;
+    trainLimit: number;
+    testLimit: number;
+    learningMode: TrainingLearningMode;
+    reviewScope: TrainingReviewScope;
+    pauseOnFailure: boolean;
+    variableSource: TrainingVariableSource;
+    variableSourceRunId?: string;
+    correctionHook?: TrainingHookBinding;
+    experienceExtractorHook: TrainingHookBinding;
+    timeoutMs: number;
+    concurrency: 1;
+  };
+  progress: {
+    training: { total: number; completed: number };
+    testing: { total: number; completed: number };
+    pendingReview: number;
+    acceptedExperiences: number;
+    rejectedExperiences: number;
+  };
+  currentCaseId?: string;
+  pauseReason?: string;
+  snapshotId?: string;
+  failure?: ExperimentFailure;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt: string;
+};
+
+export type TrainingCase = {
+  id: string;
+  runId: string;
+  phase: "training" | "testing";
+  datasetId: string;
+  sampleId: string;
+  ordinal: number;
+  status: TrainingCaseStatus;
+  question: string;
+  thinking: string;
+  expectedAnswer: string;
+  referenceAvailable: boolean;
+  actualAnswer: string;
+  expectedTools: string[];
+  actualTools: string[];
+  toolCalls: ExperimentToolCall[];
+  usage: ExperimentUsage;
+  score?: number;
+  passed?: boolean;
+  rationale?: string;
+  experimentRunId?: string;
+  experimentCaseId?: string;
+  failurePauseHandled: boolean;
+  attempt: number;
+  failure?: ExperimentFailure;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt: string;
+};
+
+export type TrainingVariableView = {
+  name: string;
+  baselineValue: string;
+  runValue: string;
+  projectValue: string;
+  snapshotValue?: string;
+  sourceCaseIds: string[];
+  candidateIds: string[];
+  state: ExperienceStatus | "unchanged";
+  changed: boolean;
+};
+
+export type TrainingVariableReport = { items: TrainingVariableView[] };
+
+export type VariableDiff = {
+  variableName: string;
+  baseHash: string;
+  unifiedDiff: string;
+  beforeValue?: string;
+  afterValue?: string;
+};
+
+export type ExperienceCandidate = {
+  id: string;
+  runId: string;
+  sourceCaseId: string;
+  sourceOutcome: "success" | "failure";
+  hookId: string;
+  summary: string;
+  rationale: string;
+  patches: VariableDiff[];
+  status: ExperienceStatus;
+  replayCaseId?: string;
+  replayPassed?: boolean;
+  replayScore?: number;
+  replayRationale?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TestSnapshot = {
+  id: string;
+  runId: string;
+  variables: Record<string, string>;
+  contentHash: string;
+  createdAt: string;
+};
+
+export type TrainingEvent = {
+  id: number;
+  runId: string;
+  type: string;
+  payload: unknown;
+  createdAt: string;
+};
+
+export type TrainingCaseMetrics = {
+  total: number;
+  completed: number;
+  evaluated: number;
+  passed: number;
+  failed: number;
+  errors: number;
+  averageScore: number;
+  passRate: number;
+  usage: ExperimentUsage;
+  toolCalls: number;
+  toolErrors: number;
+  expectedTools: number;
+  matchedTools: number;
+};
+
+export type TrainingExperienceMetrics = {
+  generated: number;
+  replayed: number;
+  replayPassed: number;
+  pending: number;
+  applied: number;
+  rejected: number;
+  conflicts: number;
+  successSources: number;
+  failureSources: number;
+};
+
+export type TrainingRunAnalysisSummary = {
+  run: TrainingRun;
+  trainDataset: { id: string; name: string; version: number; samples: number };
+  testDataset: { id: string; name: string; version: number; samples: number };
+  training: TrainingCaseMetrics;
+  testing: TrainingCaseMetrics;
+  experiences: TrainingExperienceMetrics;
+  variables: { total: number; changed: number };
+  provenance?: {
+    project: ExperimentRun["project"];
+    model: ExperimentRun["model"];
+    evaluator: ExperimentEvaluator;
+  };
+};
+
+export type TrainingLineageNode = {
+  run: TrainingRunAnalysisSummary;
+  sourceRunId?: string;
+  rootRunId: string;
+  depth: number;
+};
+
+export type TrainingLineageEdge = {
+  sourceRunId: string;
+  continuationRunId: string;
+};
+
+export type TrainingLineageReport = {
+  nodes: TrainingLineageNode[];
+  edges: TrainingLineageEdge[];
+  rootRunIds: string[];
+  missingRunIds: string[];
+};
+
+export type TrainingRunAnalysis = TrainingRunAnalysisSummary & {
+  cases: TrainingCase[];
+  experienceCandidates: ExperienceCandidate[];
+  variableItems: TrainingVariableView[];
+  snapshot?: TestSnapshot;
+  events: TrainingEvent[];
+};
+
+export type TrainingTrendReport = {
+  testDatasetId: string;
+  trainDatasetId?: string;
+  items: TrainingRunAnalysisSummary[];
+  lineage: TrainingLineageReport;
+};
+
+export type TrainingCaseComparison = {
+  sampleId: string;
+  question: string;
+  left?: { score?: number; passed?: boolean; actualTools: string[]; expectedTools: string[] };
+  right?: { score?: number; passed?: boolean; actualTools: string[]; expectedTools: string[] };
+  status: "improved" | "regressed" | "unchanged" | "added" | "removed" | "pending";
+};
+
+export type TrainingVariableComparison = {
+  name: string;
+  leftValue: string;
+  rightValue: string;
+  changed: boolean;
+  unifiedDiff: string;
+};
+
+export type TrainingComparisonReport = {
+  comparable: boolean;
+  reasons: string[];
+  left: TrainingRunAnalysisSummary;
+  right: TrainingRunAnalysisSummary;
+  cases: TrainingCaseComparison[];
+  variables: TrainingVariableComparison[];
+};
+
+export type CreateTrainingInput = {
+  name?: string;
+  trainDatasetId: string;
+  testDatasetId: string;
+  trainLimit: number;
+  testLimit: number;
+  learningMode: TrainingLearningMode;
+  reviewScope: TrainingReviewScope;
+  pauseOnFailure: boolean;
+  variableSource: TrainingVariableSource;
+  variableSourceRunId?: string;
+  correctionHook?: TrainingHookBinding;
+  experienceExtractorHook: TrainingHookBinding;
+  timeoutMs?: number;
+};
+
 function apiUrl(path: string, projectPath: string): string {
   const configured = process.env.NEXT_PUBLIC_RUNTIME_HTTP_URL?.replace(/\/$/, "");
   const base = configured ?? `${window.location.protocol}//${window.location.hostname}:3005`;
@@ -264,4 +518,54 @@ export const experimentApi = {
       evaluator: ExperimentEvaluator;
       scoringPromptRequired: boolean;
     }>(projectPath, "/storage"),
+  training: {
+    capabilities: (projectPath: string) => request<{
+      maxTrainingCases: number;
+      maxTestCases: number;
+      hooks: Array<{ id: string; name: string; checkpoint: "after_loop" | "after_evaluation" | "after_replay" }>;
+    }>(projectPath, "/training/capabilities"),
+    list: (projectPath: string, limit = 20) =>
+      request<{ items: TrainingRun[] }>(projectPath, `/training?limit=${limit}`),
+    create: (projectPath: string, input: CreateTrainingInput) =>
+      request<TrainingRun>(projectPath, "/training", "POST", input),
+    get: (projectPath: string, id: string) =>
+      request<TrainingRun>(projectPath, `/training/${encodeURIComponent(id)}`),
+    cases: (projectPath: string, id: string) =>
+      request<{ items: TrainingCase[] }>(projectPath, `/training/${encodeURIComponent(id)}/cases`),
+    experiences: (projectPath: string, id: string) =>
+      request<{ items: ExperienceCandidate[] }>(projectPath, `/training/${encodeURIComponent(id)}/experiences`),
+    variables: (projectPath: string, id: string) =>
+      request<TrainingVariableReport>(projectPath, `/training/${encodeURIComponent(id)}/variables`),
+    analysis: (projectPath: string, id: string) =>
+      request<TrainingRunAnalysis>(projectPath, `/training/${encodeURIComponent(id)}/analysis`),
+    trend: (projectPath: string, testDatasetId: string, trainDatasetId?: string, limit = 50) => {
+      const query = new URLSearchParams({ testDatasetId, limit: String(limit) });
+      if (trainDatasetId) query.set("trainDatasetId", trainDatasetId);
+      return request<TrainingTrendReport>(projectPath, `/training/analysis/trend?${query}`);
+    },
+    compare: (projectPath: string, leftId: string, rightId: string) =>
+      request<TrainingComparisonReport>(projectPath, `/training/analysis/compare?leftId=${encodeURIComponent(leftId)}&rightId=${encodeURIComponent(rightId)}`),
+    pause: (projectPath: string, id: string) =>
+      request<TrainingRun>(projectPath, `/training/${encodeURIComponent(id)}/pause`, "POST", {}),
+    resume: (projectPath: string, id: string) =>
+      request<TrainingRun>(projectPath, `/training/${encodeURIComponent(id)}/resume`, "POST", {}),
+    retry: (projectPath: string, id: string) =>
+      request<TrainingRun>(projectPath, `/training/${encodeURIComponent(id)}/retry`, "POST", {}),
+    cancel: (projectPath: string, id: string) =>
+      request<TrainingRun>(projectPath, `/training/${encodeURIComponent(id)}/cancel`, "POST", {}),
+    freeze: (projectPath: string, id: string) =>
+      request<TestSnapshot>(projectPath, `/training/${encodeURIComponent(id)}/freeze`, "POST", {}),
+    startTest: (projectPath: string, id: string) =>
+      request<TrainingRun>(projectPath, `/training/${encodeURIComponent(id)}/test`, "POST", {}),
+    promote: (projectPath: string, id: string) =>
+      request<{ variables: Record<string, string>; contentHash: string }>(projectPath, `/training/${encodeURIComponent(id)}/promote`, "POST", {}),
+    updateExperience: (projectPath: string, id: string, experienceId: string, patches: VariableDiff[]) =>
+      request<ExperienceCandidate>(projectPath, `/training/${encodeURIComponent(id)}/experiences/${encodeURIComponent(experienceId)}`, "PUT", { patches }),
+    replayExperience: (projectPath: string, id: string, experienceId: string) =>
+      request<ExperienceCandidate>(projectPath, `/training/${encodeURIComponent(id)}/experiences/${encodeURIComponent(experienceId)}/replay`, "POST", {}),
+    acceptExperience: (projectPath: string, id: string, experienceId: string) =>
+      request<ExperienceCandidate>(projectPath, `/training/${encodeURIComponent(id)}/experiences/${encodeURIComponent(experienceId)}/accept`, "POST", {}),
+    rejectExperience: (projectPath: string, id: string, experienceId: string) =>
+      request<ExperienceCandidate>(projectPath, `/training/${encodeURIComponent(id)}/experiences/${encodeURIComponent(experienceId)}/reject`, "POST", {}),
+  },
 };

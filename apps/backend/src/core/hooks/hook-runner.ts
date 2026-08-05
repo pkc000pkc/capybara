@@ -53,6 +53,7 @@ function log(level, message, data) {
   }
   const changed = new Set(workerData.fixture.changedVariables);
   const triggerContext = {
+    checkpoint: workerData.fixture.checkpoint,
     status: workerData.fixture.status,
     changed,
     variables: workerData.fixture.variables,
@@ -60,6 +61,7 @@ function log(level, message, data) {
       runId: workerData.runId,
       iteration: workerData.fixture.loopIteration,
     },
+    ...(workerData.fixture.training ? { training: workerData.fixture.training } : {}),
   };
   const matched = hook.enabled === true && hook.trigger(triggerContext);
   if (matched && typeof matched.then === 'function') throw new Error('Hook trigger must be synchronous');

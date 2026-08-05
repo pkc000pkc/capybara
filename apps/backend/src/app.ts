@@ -7,6 +7,8 @@ import type WebSocket from 'ws'
 import { AgentSession } from '#core/agent-session'
 import { DatasetStore } from '#core/datasets/dataset-store'
 import { ExperimentManager, type CreateExperimentInput } from '#core/experiments/experiment-manager'
+import { TrainingManager } from '#core/experiments/training/training-manager'
+import type { CreateTrainingInput, VariableDiff } from '#core/experiments/training/training-types'
 import type { ExperimentCaseStatus, ExperimentStatus } from '#core/experiments/types'
 import { ProjectGitService } from '#core/project-git'
 import {
@@ -48,6 +50,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   )
   const stores = new Map<string, SessionStore>()
   const experimentManagers = new Map<string, ExperimentManager>()
+  const trainingManagers = new Map<string, TrainingManager>()
   const activeSessions = new Map<string, AgentSession>()
   const releasedProjects = new Set<string>()
   const userPreferences = new UserPreferencesStore(options.userConfigDir)
@@ -113,6 +116,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         },
       })
       experimentManagers.set(key, manager)
+    }
+    return manager
+  }
+  const getTrainingManager = (projectDir: string) => {
+    const key = projectKey(projectDir)
+    if (releasedProjects.has(key)) throw new Error(`project is closed: ${projectDir}`)
+    let manager = trainingManagers.get(key)
+    if (!manager) {
+      manager = new TrainingManager(projectDir, getExperimentManager(projectDir))
+      trainingManagers.set(key, manager)
     }
     return manager
   }
@@ -194,6 +207,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       }
       stores.get(key)?.close()
       stores.delete(key)
+      await trainingManagers.get(key)?.close()
+      trainingManagers.delete(key)
       await experimentManagers.get(key)?.close()
       experimentManagers.delete(key)
       return { released: true, path: projectDir }
@@ -313,9 +328,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.post('/api/datasets/import', async (request, reply) => {
     try {
       const dataset = new DatasetStore(requestProject(request).path).import(
-        (request.body ?? {}) as { path?: unknown },
+        (request.body ?? {}) as { path?: unknown; mapping?: unknown },
       )
       return reply.code(201).send(dataset)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/datasets/import/preview', async (request, reply) => {
+    try {
+      return new DatasetStore(requestProject(request).path).previewImport(
+        (request.body ?? {}) as { path?: unknown },
+      )
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
@@ -453,6 +477,160 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
   })
+  app.get('/api/experiments/training', async (request, reply) => {
+    try {
+      const query = request.query as { limit?: unknown }
+      return { items: getTrainingManager(requestProject(request).path).list(
+        query.limit === undefined ? undefined : Number(query.limit),
+      ) }
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/experiments/training', async (request, reply) => {
+    try {
+      const run = getTrainingManager(requestProject(request).path)
+        .create((request.body ?? {}) as CreateTrainingInput)
+      return reply.code(202).send(run)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.get('/api/experiments/training/capabilities', async (request, reply) => {
+    try {
+      return getTrainingManager(requestProject(request).path).capabilities()
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.get('/api/experiments/training/analysis/trend', async (request, reply) => {
+    try {
+      const query = request.query as { testDatasetId?: unknown; trainDatasetId?: unknown; limit?: unknown }
+      if (typeof query.testDatasetId !== 'string' || !query.testDatasetId.trim()) {
+        throw new Error('testDatasetId query parameter is required')
+      }
+      if (query.trainDatasetId !== undefined && typeof query.trainDatasetId !== 'string') {
+        throw new Error('trainDatasetId must be a string')
+      }
+      const limit = query.limit === undefined ? 50 : Number(query.limit)
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error('limit must be an integer between 1 and 200')
+      return getTrainingManager(requestProject(request).path).trend(
+        query.testDatasetId,
+        query.trainDatasetId || undefined,
+        limit,
+      )
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.get('/api/experiments/training/analysis/compare', async (request, reply) => {
+    try {
+      const query = request.query as { leftId?: unknown; rightId?: unknown }
+      if (typeof query.leftId !== 'string' || typeof query.rightId !== 'string') {
+        throw new Error('leftId and rightId query parameters are required')
+      }
+      return getTrainingManager(requestProject(request).path).compare(query.leftId, query.rightId)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.get('/api/experiments/training/:id', async (request, reply) => {
+    try {
+      return getTrainingManager(requestProject(request).path).get((request.params as { id: string }).id)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.get('/api/experiments/training/:id/cases', async (request, reply) => {
+    try {
+      return { items: getTrainingManager(requestProject(request).path).cases((request.params as { id: string }).id) }
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.get('/api/experiments/training/:id/experiences', async (request, reply) => {
+    try {
+      return { items: getTrainingManager(requestProject(request).path).experiences((request.params as { id: string }).id) }
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.get('/api/experiments/training/:id/variables', async (request, reply) => {
+    try {
+      return getTrainingManager(requestProject(request).path).variables((request.params as { id: string }).id)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.get('/api/experiments/training/:id/analysis', async (request, reply) => {
+    try {
+      return getTrainingManager(requestProject(request).path).analysis((request.params as { id: string }).id)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  for (const action of ['pause', 'resume', 'retry', 'cancel'] as const) {
+    app.post(`/api/experiments/training/:id/${action}`, async (request, reply) => {
+      try {
+        const manager = getTrainingManager(requestProject(request).path)
+        const run = manager[action]((request.params as { id: string }).id)
+        return reply.code(202).send(run)
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+      }
+    })
+  }
+  app.post('/api/experiments/training/:id/freeze', async (request, reply) => {
+    try {
+      return getTrainingManager(requestProject(request).path).freeze((request.params as { id: string }).id)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/experiments/training/:id/test', async (request, reply) => {
+    try {
+      const run = getTrainingManager(requestProject(request).path).startTest((request.params as { id: string }).id)
+      return reply.code(202).send(run)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/experiments/training/:id/promote', async (request, reply) => {
+    try {
+      const result = await getTrainingManager(requestProject(request).path)
+        .promote((request.params as { id: string }).id)
+      return reply.send(result)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.put('/api/experiments/training/:id/experiences/:experienceId', async (request, reply) => {
+    try {
+      const params = request.params as { id: string; experienceId: string }
+      const patches = (request.body as { patches?: unknown } | undefined)?.patches
+      if (!Array.isArray(patches)) throw new Error('patches must be an array')
+      return getTrainingManager(requestProject(request).path)
+        .updateExperience(params.id, params.experienceId, patches as VariableDiff[])
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  for (const action of ['replay', 'accept', 'reject'] as const) {
+    app.post(`/api/experiments/training/:id/experiences/:experienceId/${action}`, async (request, reply) => {
+      try {
+        const params = request.params as { id: string; experienceId: string }
+        const manager = getTrainingManager(requestProject(request).path)
+        const candidate = action === 'replay'
+          ? await manager.replayExperience(params.id, params.experienceId)
+          : action === 'accept'
+            ? await manager.acceptExperience(params.id, params.experienceId)
+            : manager.rejectExperience(params.id, params.experienceId)
+        return reply.code(action === 'replay' ? 202 : 200).send(candidate)
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+      }
+    })
+  }
   app.get('/api/experiments/:id', async (request, reply) => {
     try {
       return getExperimentManager(requestProject(request).path).get((request.params as { id: string }).id)
@@ -806,6 +984,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.addHook('onClose', async () => {
     for (const session of [...activeSessions.values()]) session.shutdown(true)
     for (const store of stores.values()) store.close()
+    await Promise.all([...trainingManagers.values()].map((manager) => manager.close()))
     await Promise.all([...experimentManagers.values()].map((manager) => manager.close()))
   })
 

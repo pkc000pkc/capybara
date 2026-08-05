@@ -76,8 +76,13 @@ function retryableStatus(statusCode: number): boolean {
   return statusCode === 408 || statusCode === 429 || statusCode >= 500
 }
 
+class RetryableLlmStreamError extends Error {
+  readonly retryableAfterEvent = true
+}
+
 function retryableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
+  if (error instanceof RetryableLlmStreamError) return true
   const code = 'code' in error ? String(error.code) : ''
   return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND'].includes(code)
     || /timed out|socket hang up/i.test(error.message)
@@ -241,7 +246,8 @@ async function postSseWithRetry(
       lastError = new Error(`LLM request failed with retryable status ${result.statusCode}`)
     } catch (error) {
       lastError = error
-      if (receivedEvent || !retryableError(error) || attempt === maxRetries) throw error
+      const retryableAfterEvent = error instanceof RetryableLlmStreamError && error.retryableAfterEvent
+      if ((receivedEvent && !retryableAfterEvent) || !retryableError(error) || attempt === maxRetries) throw error
     }
     await sleep(Math.min(1_000 * 2 ** attempt, 8_000), signal)
   }
@@ -270,6 +276,10 @@ interface OpenAiResponse {
 interface ResponsesApiResponse {
   model?: string
   status?: string
+  error?: {
+    code?: string
+    message?: string
+  }
   output_text?: string
   output?: Array<{
     type?: string
@@ -347,6 +357,22 @@ function textFromResponsesApi(payload: ResponsesApiResponse): string {
     .filter((item) => item.type === 'output_text' && item.text)
     .map((item) => item.text)
     .join('')
+}
+
+function responsesFailure(payload: ResponsesApiResponse): { code: string; message: string; retryable: boolean } | undefined {
+  if (payload.status !== 'failed' && !payload.error) return undefined
+  const code = payload.error?.code ?? 'response_failed'
+  return {
+    code,
+    message: payload.error?.message ?? 'LLM response failed',
+    retryable: [
+      'server_error',
+      'internal_server_error',
+      'server_is_overloaded',
+      'rate_limit_exceeded',
+      'temporarily_unavailable',
+    ].includes(code),
+  }
 }
 
 function parseArguments(value: string | undefined, toolName: string): unknown {
@@ -643,6 +669,8 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     }
 
     const payload = JSON.parse(response.text) as ResponsesApiResponse
+    const failed = responsesFailure(payload)
+    if (failed) throw new Error(`LLM response failed (${failed.code}): ${failed.message}`)
     return {
       provider: this.config.provider,
       model: payload.model ?? model,
@@ -713,6 +741,15 @@ export class OpenAiCompatibleProvider implements LlmProvider {
           responseModel = event.response.model ?? responseModel
           finishReason = event.response.status
           usage = usageFromResponsesApi(event.response.usage)
+        } else if (type === 'response.failed' && event.response) {
+          const failed = responsesFailure(event.response) ?? {
+            code: 'response_failed',
+            message: 'LLM response failed',
+            retryable: false,
+          }
+          const message = `LLM response failed (${failed.code}): ${failed.message}`
+          if (failed.retryable && !text && output.size === 0) throw new RetryableLlmStreamError(message)
+          throw new Error(message)
         }
       },
       request.signal,

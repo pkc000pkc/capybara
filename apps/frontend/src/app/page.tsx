@@ -1194,6 +1194,13 @@ function HomeContent() {
     ? snapshot.effectiveContexts.items.filter((item) => item.runId === snapshot.run.runId)
     : [];
 
+  useEffect(() => {
+    const query = new URL(window.location.href).searchParams;
+    if (!query.has("trainingRun")) return;
+    const timer = window.setTimeout(() => setActiveView("experiments"), 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   const canEditVariables = snapshot?.run.variablesEditable ?? false;
   const connectionLabel =
     runtime.connection === "connected"

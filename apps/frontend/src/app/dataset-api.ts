@@ -1,5 +1,30 @@
 export type DatasetStorageType = "jsonl" | "sqlite" | "huggingface";
 
+export type DatasetFieldMapping = {
+  id: string;
+  question: string;
+  thinking: string;
+  answer: string;
+  expectedTools: string;
+  metadata: string;
+};
+
+export type DatasetImportField = {
+  path: string;
+  type: "string" | "number" | "boolean" | "object" | "array" | "null";
+  examples: string[];
+};
+
+export type DatasetImportPreview = {
+  path: string;
+  sourceFile: string;
+  storage: DatasetStorageType;
+  sampleCount: number;
+  fields: DatasetImportField[];
+  samples: Array<{ index: number; values: Record<string, string> }>;
+  suggestedMapping: DatasetFieldMapping;
+};
+
 export type DatasetSummary = {
   id: string;
   name: string;
@@ -9,6 +34,7 @@ export type DatasetSummary = {
   version: number;
   tags: string[];
   scoringPrompt: string;
+  mapping?: DatasetFieldMapping;
   createdAt: string;
   updatedAt: string;
 };
@@ -62,8 +88,10 @@ export const datasetApi = {
     projectPath: string,
     input: { name: string; storage: DatasetStorageType; path: string; tags: string[]; scoringPrompt: string },
   ) => request<DatasetSummary>(projectPath, "", "POST", input),
-  import: (projectPath: string, path: string) =>
-    request<DatasetSummary>(projectPath, "/import", "POST", { path }),
+  previewImport: (projectPath: string, path: string) =>
+    request<DatasetImportPreview>(projectPath, "/import/preview", "POST", { path }),
+  import: (projectPath: string, path: string, mapping: DatasetFieldMapping) =>
+    request<DatasetSummary>(projectPath, "/import", "POST", { path, mapping }),
   update: (projectPath: string, id: string, input: { name: string; tags: string[]; scoringPrompt: string }) =>
     request<DatasetSummary>(projectPath, `/${encodeURIComponent(id)}`, "PUT", input),
   remove: (projectPath: string, id: string) =>

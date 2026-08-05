@@ -6,17 +6,20 @@ import {
   ChevronRight,
   Database,
   FlaskConical,
+  LineChart,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useI18n } from "../i18n";
 import DatasetWorkspace from "./dataset-workspace";
 import ExperimentRunAnalysis from "./experiment-run-analysis";
+import ExperimentTrainingAnalysisPreview from "./experiment-training-analysis-preview";
 import ExperimentTrainingWorkspace from "./experiment-training-workspace";
 import { WorkspaceNavigation } from "./workspace-ui";
 
 const EXPERIMENT_SECTIONS = [
   { id: "datasets", icon: Database },
   { id: "training", icon: BrainCircuit },
+  { id: "training-analysis", icon: LineChart },
   { id: "runs", icon: FlaskConical },
 ] as const;
 
@@ -37,6 +40,7 @@ function ExperimentNavigation({
   const label = (section: ExperimentSection) => {
     if (section === "datasets") return t("experiments.datasets");
     if (section === "training") return t("experiments.trainingValidation");
+    if (section === "training-analysis") return t("experiments.trainingAnalysis");
     return t("experiments.runAnalysis");
   };
 
@@ -76,6 +80,35 @@ export default function ExperimentsWorkspace({ projectPath }: { projectPath: str
   const [activeSection, setActiveSection] = useState<ExperimentSection>("datasets");
   const [collapsed, setCollapsed] = useState(false);
 
+  useEffect(() => {
+    const query = new URL(window.location.href).searchParams;
+    if (query.has("trainingAnalysisRun")) {
+      const timer = window.setTimeout(() => setActiveSection("training-analysis"), 0);
+      return () => window.clearTimeout(timer);
+    }
+    if (!query.has("trainingRun")) return;
+    const timer = window.setTimeout(() => setActiveSection("training"), 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const openTrainingAnalysis = (runId: string) => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("trainingRun");
+    url.searchParams.delete("trainingPhase");
+    url.searchParams.delete("trainingCase");
+    url.searchParams.set("trainingAnalysisRun", runId);
+    window.history.replaceState(window.history.state, "", url);
+    setActiveSection("training-analysis");
+  };
+
+  const openTrainingRun = (runId: string) => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("trainingAnalysisRun");
+    url.searchParams.set("trainingRun", runId);
+    window.history.replaceState(window.history.state, "", url);
+    setActiveSection("training");
+  };
+
   return (
     <div
       className="experiment-shell grid h-full min-h-[520px] min-w-[760px] overflow-hidden bg-[#dce5e7] transition-[grid-template-columns] duration-150 motion-reduce:transition-none"
@@ -96,7 +129,8 @@ export default function ExperimentsWorkspace({ projectPath }: { projectPath: str
         role="tabpanel"
       >
         {activeSection === "datasets" && <DatasetWorkspace projectPath={projectPath} />}
-        {activeSection === "training" && <ExperimentTrainingWorkspace projectPath={projectPath} />}
+        {activeSection === "training" && <ExperimentTrainingWorkspace onAnalyzeRun={openTrainingAnalysis} projectPath={projectPath} />}
+        {activeSection === "training-analysis" && <ExperimentTrainingAnalysisPreview onOpenTraining={openTrainingRun} projectPath={projectPath} />}
         {activeSection === "runs" && <ExperimentRunAnalysis projectPath={projectPath} />}
       </div>
     </div>

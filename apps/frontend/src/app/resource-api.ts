@@ -80,7 +80,7 @@ export type HookResourceDefinition = {
   description: string;
   entry: string;
   enabled: boolean;
-  checkpoint: "after_loop";
+  checkpoint: "after_loop" | "after_evaluation" | "after_replay";
   schedule: {
     priority: number;
     timeoutMs: number;

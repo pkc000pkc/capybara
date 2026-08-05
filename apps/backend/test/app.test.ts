@@ -245,6 +245,7 @@ test('empty project directories require confirmation and initialize a runnable p
         '.capybara/config.json',
         '.capybara/system-variables.json',
         'main.j2',
+        'agent.md',
         '.capybara/hooks/context-compression.ts',
         'tools/files/manifest.json',
         'tools/files/runner.mjs',
@@ -1570,6 +1571,7 @@ test('invalid model output is classified separately from transport failures', as
     )
     assert.equal(failed.payload.failure?.phase, 'model_output_validation')
     assert.equal(failed.payload.failure?.code, 'MODEL_OUTPUT_INVALID')
+    assert.equal(failed.payload.failure?.retryable, true)
     assert.equal(typeof failed.payload.failure?.responseArtifactId, 'string')
   }, { llm })
 })

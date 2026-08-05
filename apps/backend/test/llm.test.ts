@@ -215,6 +215,26 @@ test('Responses protocol streams text and function arguments from SSE', async ()
   })
 })
 
+test('Responses protocol retries an overloaded failed event before output starts', async () => {
+  let requestCount = 0
+  await withSseApi((_body, path, response) => {
+    assert.equal(path, '/v1/responses')
+    requestCount += 1
+    if (requestCount === 1) {
+      response.end('event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"Try again later."}}}\n\n')
+      return
+    }
+    response.end('event: response.completed\ndata: {"type":"response.completed","response":{"model":"test-model","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}\n\n')
+  }, async (baseUrl) => {
+    const service = createLlmService({
+      provider: 'custom', protocol: 'responses', baseUrl, model: 'test-model', maxRetries: 1,
+    })
+    const response = await service.stream({ messages: [{ role: 'user', content: 'reply' }] }, () => {})
+    assert.equal(response.text, 'done')
+  })
+  assert.equal(requestCount, 2)
+})
+
 test('Chat Completions protocol streams content and tool calls from SSE', async () => {
   await withSseApi((body, path, response) => {
     assert.equal(path, '/v1/chat/completions')

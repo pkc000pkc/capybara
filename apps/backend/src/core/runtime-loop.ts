@@ -2660,6 +2660,7 @@ export class RuntimeLoop extends Loop {
           'model_protocol',
           'MODEL_TOOL_ROUND_LIMIT',
           `model exceeded the maximum of ${this.maxToolRounds} tool rounds`,
+          true,
         )
       }
       this.toolRound += 1
@@ -2674,6 +2675,7 @@ export class RuntimeLoop extends Loop {
         'model_output_validation',
         'MODEL_OUTPUT_EMPTY',
         'LLM returned neither text nor tool calls',
+        true,
       )
     }
     let output: ModelOutput
@@ -2684,6 +2686,7 @@ export class RuntimeLoop extends Loop {
         'model_output_validation',
         'MODEL_OUTPUT_INVALID',
         error instanceof Error ? error.message : String(error),
+        true,
       )
     }
     step.detail = { ...step.detail, loopStatus: output.status }
@@ -2694,6 +2697,7 @@ export class RuntimeLoop extends Loop {
           'model_protocol',
           'MODEL_CONTINUATION_LIMIT',
           `model exceeded the maximum of ${this.maxToolRounds} continuation rounds`,
+          true,
         )
       }
       this.continuationRound += 1
@@ -3808,7 +3812,7 @@ export class RuntimeLoop extends Loop {
       messages: clone(this.llmMessages),
     }
     const hooks = this.hookRegistry.list()
-      .filter((hook) => hook.loadable && hook.enabled)
+      .filter((hook) => hook.loadable && hook.enabled && hook.checkpoint === 'after_loop')
       .sort((left, right) => right.schedule.priority - left.schedule.priority || left.name.localeCompare(right.name))
     const claimedPaths = new Set<string>()
     const controller = new AbortController()

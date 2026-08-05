@@ -474,7 +474,7 @@ export class ProjectResourceRegistry {
       description: hook.description,
       entry: this.relative(hook.entryFile),
       enabled: hook.enabled,
-      checkpoint: 'after_loop',
+      checkpoint: hook.checkpoint,
       schedule: structuredClone(hook.schedule),
       permissions: structuredClone(hook.permissions),
       triggerSummary: hook.triggerSummary,

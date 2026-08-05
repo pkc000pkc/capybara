@@ -1,5 +1,6 @@
 import type { HarnessActivation, HarnessType } from '#core/harnesses/types'
 import type { HookPermissions, HookSchedule } from '#core/hooks/types'
+import type { HookCheckpoint } from '#core/hooks/types'
 
 export type ResourceKind = 'tool' | 'skill' | 'harness' | 'hook'
 
@@ -85,7 +86,7 @@ export interface HookResourceDefinition {
   description: string
   entry: string
   enabled: boolean
-  checkpoint: 'after_loop'
+  checkpoint: HookCheckpoint
   schedule: HookSchedule
   permissions: HookPermissions
   triggerSummary: string

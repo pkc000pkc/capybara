@@ -49,10 +49,16 @@ export interface ExperimentManagerOptions {
   runtimeLoop?: Omit<RuntimeLoopOptions, 'projectDir' | 'workspaceDir' | 'initialState' | 'llm'>
 }
 
+export interface ExperimentExecutionOptions {
+  allowDirtyProject?: boolean
+  variableOverrides?: Record<string, string>
+}
+
 type ActiveExperiment = {
   controller: AbortController
   loops: Set<RuntimeLoop>
   llm: RuntimeLlm
+  variableOverrides?: Record<string, string>
   done?: Promise<void>
 }
 
@@ -197,7 +203,10 @@ export class ExperimentManager {
     this.providedLlm = options.llm
   }
 
-  async create(input: CreateExperimentInput): Promise<ExperimentRunDetail> {
+  async create(
+    input: CreateExperimentInput,
+    execution: ExperimentExecutionOptions = {},
+  ): Promise<ExperimentRunDetail> {
     const datasetId = requiredString(input.datasetId, 'datasetId')
     const dataset = this.datasets.get(datasetId)
     const adapter = ExperimentAdapterRunner.load(this.projectDir)
@@ -223,7 +232,7 @@ export class ExperimentManager {
     if (!git.gitAvailable || !git.initialized || !git.head?.projectTreeSha) {
       throw new Error('project must have a readable Git commit before starting an experiment')
     }
-    if (!git.clean) throw new Error('project must be clean before starting an experiment')
+    if (!git.clean && !execution.allowDirtyProject) throw new Error('project must be clean before starting an experiment')
     const llm = this.providedLlm ?? this.projectLlm()
     const config = llm.getConfig()
     const createdAt = new Date().toISOString()
@@ -305,6 +314,7 @@ export class ExperimentManager {
       controller: new AbortController(),
       loops: new Set<RuntimeLoop>(),
       llm,
+      ...(execution.variableOverrides ? { variableOverrides: { ...execution.variableOverrides } } : {}),
     }
     this.active.set(id, active)
     active.done = Promise.resolve().then(() => this.executeRun(run, cases, active))
@@ -317,6 +327,15 @@ export class ExperimentManager {
 
   get(id: string): ExperimentRunDetail {
     return this.store.getRun(id)
+  }
+
+  async waitForCompletion(id: string): Promise<ExperimentRunDetail> {
+    await this.active.get(id)?.done
+    return this.store.getRun(id)
+  }
+
+  runtimeLlm(): RuntimeLlm {
+    return this.providedLlm ?? this.projectLlm()
   }
 
   cases(id: string, options: { status?: ExperimentCaseStatus; offset?: number; limit?: number } = {}) {
@@ -475,6 +494,11 @@ export class ExperimentManager {
     const started = Date.now()
     this.store.startCase(item.id, startedAt)
     const workspaceDir = this.prepareWorkspace(run.id, item.id)
+    if (active.variableOverrides && Object.keys(active.variableOverrides).length > 0) {
+      await new ProjectResources(workspaceDir).updateSharedSystemVariables(
+        Object.entries(active.variableOverrides).map(([key, value]) => ({ key, value })),
+      )
+    }
     const loop = new RuntimeLoop({
       ...this.runtimeLoopOptions,
       projectDir: workspaceDir,

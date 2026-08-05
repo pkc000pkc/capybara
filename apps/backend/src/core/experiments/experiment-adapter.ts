@@ -182,7 +182,15 @@ export class ExperimentAdapterRunner {
       child.once('close', (code) => {
         if (settled) return
         if (code !== 0) {
-          finish(new Error(stderr.trim() || `experiment adapter ${phase} exited with code ${code}`))
+          let response: AdapterResponse | undefined
+          try {
+            response = JSON.parse(stdout) as AdapterResponse
+          } catch {}
+          finish(new Error(
+            response?.error
+              || stderr.trim()
+              || `experiment adapter ${phase} exited with code ${code}`,
+          ))
           return
         }
         let response: AdapterResponse

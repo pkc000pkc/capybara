@@ -5,6 +5,7 @@ import { loadLlmConfig } from '#util/llm/config'
 
 const SYSTEM_PROJECT_TEMPLATE_DIR = path.resolve(import.meta.dirname, '../../templates/project')
 const SYSTEM_PROJECT_TEMPLATE_FILES = [
+  'agent.md',
   '.capybara/hooks/context-compression.ts',
   'tools/files/manifest.json',
   'tools/files/runner.mjs',

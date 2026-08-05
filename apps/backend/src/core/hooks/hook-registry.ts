@@ -6,6 +6,7 @@ import ts from 'typescript'
 
 import type {
   HookDiagnostic,
+  HookCheckpoint,
   HookPermissions,
   HookSchedule,
   ProjectHookDefinition,
@@ -122,7 +123,7 @@ function summary(inputs: readonly string[]): string {
 function validateDefinition(
   value: ProjectHookDefinition,
   expectedName: string,
-): Pick<RegisteredHook, 'name' | 'description' | 'enabled' | 'schedule' | 'permissions'> {
+): Pick<RegisteredHook, 'name' | 'description' | 'enabled' | 'checkpoint' | 'schedule' | 'permissions'> {
   if (typeof value.name !== 'string' || !HOOK_NAME.test(value.name)) {
     throw new Error('Hook name must use lowercase letters, numbers, and single hyphens')
   }
@@ -131,12 +132,17 @@ function validateDefinition(
     throw new Error('Hook description must be a non-empty string')
   }
   if (typeof value.enabled !== 'boolean') throw new Error('Hook enabled must be a boolean')
+  const checkpoint = value.checkpoint ?? 'after_loop'
+  if (!(['after_loop', 'after_evaluation', 'after_replay'] satisfies HookCheckpoint[]).includes(checkpoint)) {
+    throw new Error('Hook checkpoint must be after_loop, after_evaluation, or after_replay')
+  }
   if (typeof value.trigger !== 'function') throw new Error('Hook trigger must be a function')
   if (typeof value.run !== 'function') throw new Error('Hook run must be a function')
   return {
     name: value.name,
     description: value.description.trim(),
     enabled: value.enabled,
+    checkpoint,
     schedule: validateSchedule(value.schedule),
     permissions: validatePermissions(value.permissions),
   }
@@ -214,7 +220,7 @@ export class HookRegistry {
       entryFile: file,
       source,
       revision: hash(source),
-      triggerSummary: summary(inputs),
+      triggerSummary: inputs.length ? summary(inputs) : validated.checkpoint,
       triggerInputs: inputs,
       diagnostics: [],
       loadable: true,
@@ -232,6 +238,7 @@ export class HookRegistry {
       source,
       revision: hash(source),
       enabled: false,
+      checkpoint: 'after_loop',
       schedule: { ...DEFAULT_SCHEDULE },
       permissions: {},
       triggerSummary: 'invalid',

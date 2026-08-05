@@ -5,6 +5,36 @@ import { DatabaseSync } from 'node:sqlite'
 
 export type DatasetStorageType = 'jsonl' | 'sqlite' | 'huggingface'
 
+export type DatasetFieldMapping = {
+  id: string
+  question: string
+  thinking: string
+  answer: string
+  expectedTools: string
+  metadata: string
+}
+
+export interface DatasetImportField {
+  path: string
+  type: 'string' | 'number' | 'boolean' | 'object' | 'array' | 'null'
+  examples: string[]
+}
+
+export interface DatasetImportSample {
+  index: number
+  values: Record<string, string>
+}
+
+export interface DatasetImportPreview {
+  path: string
+  sourceFile: string
+  storage: DatasetStorageType
+  sampleCount: number
+  fields: DatasetImportField[]
+  samples: DatasetImportSample[]
+  suggestedMapping: DatasetFieldMapping
+}
+
 export interface DatasetRecordMetadata {
   tags: string[]
   createdAt: string
@@ -30,6 +60,7 @@ export interface DatasetSummary {
   version: number
   tags: string[]
   scoringPrompt: string
+  mapping?: DatasetFieldMapping
   createdAt: string
   updatedAt: string
 }
@@ -64,8 +95,147 @@ type DatasetBackend = {
 
 const EMPTY_REGISTRY: DatasetRegistryFile = { version: 1, items: [] }
 
+const CANONICAL_MAPPING: DatasetFieldMapping = {
+  id: '/id',
+  question: '/question',
+  thinking: '/thinking',
+  answer: '/answer',
+  expectedTools: '/expectedTools',
+  metadata: '/metadata',
+}
+
+const FIELD_ALIASES: Record<keyof DatasetFieldMapping, string[]> = {
+  id: ['id', '_id', 'uuid', 'sample_id', 'sampleid', 'task_id', 'taskid', 'record_id', 'recordid'],
+  question: ['question', 'prompt', 'instruction', 'input', 'query', 'problem', 'user'],
+  thinking: ['thinking', 'reasoning', 'rationale', 'analysis', 'chain_of_thought', 'chainofthought', 'cot', 'solution'],
+  answer: ['answer', 'output', 'response', 'completion', 'target', 'label', 'chosen', 'final_answer', 'finalanswer'],
+  expectedTools: ['expectedtools', 'expected_tools', 'tools', 'tool_calls', 'toolcalls', 'expected_tool_calls'],
+  metadata: ['metadata', 'meta'],
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function jsonPointerSegments(pointer: string): string[] {
+  if (!pointer.startsWith('/')) throw new Error(`field mapping must be a JSON Pointer: ${pointer}`)
+  return pointer.slice(1).split('/').map((segment) => segment.replaceAll('~1', '/').replaceAll('~0', '~'))
+}
+
+function jsonPointer(source: unknown, pointer: string): unknown {
+  let current = source
+  for (const segment of jsonPointerSegments(pointer)) {
+    if (Array.isArray(current)) {
+      const index = Number(segment)
+      if (!Number.isInteger(index) || index < 0 || index >= current.length) return undefined
+      current = current[index]
+    } else if (isObject(current)) {
+      current = current[segment]
+    } else {
+      return undefined
+    }
+  }
+  return current
+}
+
+function setJsonPointer(target: Record<string, unknown>, pointer: string, value: unknown): void {
+  const segments = jsonPointerSegments(pointer)
+  let current: Record<string, unknown> | unknown[] = target
+  segments.forEach((segment, index) => {
+    const last = index === segments.length - 1
+    if (last) {
+      if (Array.isArray(current)) current[Number(segment)] = value
+      else current[segment] = value
+      return
+    }
+    const nextIsIndex = /^\d+$/.test(segments[index + 1] ?? '')
+    const existing = Array.isArray(current) ? current[Number(segment)] : current[segment]
+    if ((nextIsIndex && Array.isArray(existing)) || (!nextIsIndex && isObject(existing))) {
+      current = existing as Record<string, unknown> | unknown[]
+      return
+    }
+    const created: Record<string, unknown> | unknown[] = nextIsIndex ? [] : {}
+    if (Array.isArray(current)) current[Number(segment)] = created
+    else current[segment] = created
+    current = created
+  })
+}
+
+function valueType(value: unknown): DatasetImportField['type'] {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  if (isObject(value)) return 'object'
+  if (typeof value === 'number') return 'number'
+  if (typeof value === 'boolean') return 'boolean'
+  return 'string'
+}
+
+function displayValue(value: unknown): string {
+  if (value === undefined || value === null) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return JSON.stringify(value, null, 2)
+}
+
+function fieldPointer(parent: string, key: string): string {
+  const escaped = key.replaceAll('~', '~0').replaceAll('/', '~1')
+  return `${parent}/${escaped}`
+}
+
+function collectImportFields(samples: Array<Record<string, unknown>>): DatasetImportField[] {
+  const fields = new Map<string, { type: DatasetImportField['type']; examples: string[] }>()
+  const visit = (value: unknown, pointer: string, depth: number) => {
+    if (pointer) {
+      const current = fields.get(pointer) ?? { type: valueType(value), examples: [] }
+      const example = displayValue(value).trim()
+      if (example && !current.examples.includes(example) && current.examples.length < 3) current.examples.push(example)
+      fields.set(pointer, current)
+    }
+    if (depth >= 4) return
+    if (Array.isArray(value)) {
+      value.slice(0, 5).forEach((item, index) => visit(item, `${pointer}/${index}`, depth + 1))
+    } else if (isObject(value)) {
+      Object.entries(value).slice(0, 100).forEach(([key, item]) => visit(item, fieldPointer(pointer, key), depth + 1))
+    }
+  }
+  samples.forEach((sample) => visit(sample, '', 0))
+  return [...fields.entries()]
+    .map(([path, value]) => ({ path, type: value.type, examples: value.examples }))
+    .sort((left, right) => left.path.localeCompare(right.path))
+}
+
+function normalizedFieldName(pointer: string): string {
+  const segment = jsonPointerSegments(pointer).at(-1) ?? ''
+  return segment.toLowerCase().replaceAll(/[^a-z0-9]/g, '')
+}
+
+function suggestedMapping(fields: DatasetImportField[]): DatasetFieldMapping {
+  const find = (field: keyof DatasetFieldMapping): string | undefined => {
+    const aliases = new Set(FIELD_ALIASES[field].map((value) => value.replaceAll(/[^a-z0-9]/g, '')))
+    return fields.find((item) => aliases.has(normalizedFieldName(item.path)))?.path
+  }
+  const firstText = fields.find((item) => ['string', 'number', 'boolean'].includes(item.type))?.path
+  return {
+    id: find('id') ?? CANONICAL_MAPPING.id,
+    question: find('question') ?? firstText ?? CANONICAL_MAPPING.question,
+    thinking: find('thinking') ?? CANONICAL_MAPPING.thinking,
+    answer: find('answer') ?? CANONICAL_MAPPING.answer,
+    expectedTools: find('expectedTools') ?? CANONICAL_MAPPING.expectedTools,
+    metadata: find('metadata') ?? CANONICAL_MAPPING.metadata,
+  }
+}
+
+function normalizeFieldMapping(value: unknown, fallback: DatasetFieldMapping = CANONICAL_MAPPING): DatasetFieldMapping {
+  if (value === undefined) return { ...fallback }
+  if (!isObject(value)) throw new Error('mapping must be an object')
+  return Object.fromEntries((Object.keys(CANONICAL_MAPPING) as Array<keyof DatasetFieldMapping>).map((field) => {
+    const pointer = value[field] ?? fallback[field]
+    if (typeof pointer !== 'string' || !pointer.startsWith('/')) {
+      throw new Error(`mapping.${field} must be a JSON Pointer`)
+    }
+    jsonPointerSegments(pointer)
+    return [field, pointer]
+  })) as DatasetFieldMapping
 }
 
 function requiredString(value: unknown, field: string): string {
@@ -117,11 +287,12 @@ function stableImportedId(index: number, line: string): string {
   return `sample-${index + 1}-${createHash('sha256').update(line).digest('hex').slice(0, 8)}`
 }
 
-function readJsonLines(file: string): DatasetRecord[] {
+type JsonLineSource = { line: string; value: Record<string, unknown> }
+
+function readJsonLineSources(file: string): JsonLineSource[] {
   if (!fs.existsSync(file)) return []
   const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/)
-  const records: DatasetRecord[] = []
-  const ids = new Set<string>()
+  const sources: JsonLineSource[] = []
   lines.forEach((line, index) => {
     if (!line.trim()) return
     let parsed: unknown
@@ -131,7 +302,60 @@ function readJsonLines(file: string): DatasetRecord[] {
       throw new Error(`invalid JSONL at line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`)
     }
     if (!isObject(parsed)) throw new Error(`dataset line ${index + 1} must be a JSON object`)
-    const record = normalizeRecord(parsed, stableImportedId(index, line))
+    sources.push({ line, value: parsed })
+  })
+  return sources
+}
+
+function mappedExpectedTools(value: unknown): string[] {
+  if (Array.isArray(value)) return normalizeExpectedTools(value)
+  if (typeof value !== 'string' || !value.trim()) return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (Array.isArray(parsed)) return normalizeExpectedTools(parsed)
+  } catch {
+    // Plain strings are treated as comma- or newline-separated tool names.
+  }
+  return normalizeExpectedTools(value.split(/[,\n]/))
+}
+
+function mappedMetadata(value: unknown): Record<string, unknown> {
+  if (isObject(value)) return value
+  return value === undefined || value === null || value === '' ? {} : { source: value }
+}
+
+function mappedRecord(
+  source: Record<string, unknown>,
+  mapping: DatasetFieldMapping,
+  index: number,
+  line: string,
+): DatasetRecord {
+  return normalizeRecord({
+    id: displayValue(jsonPointer(source, mapping.id)),
+    question: displayValue(jsonPointer(source, mapping.question)),
+    thinking: displayValue(jsonPointer(source, mapping.thinking)),
+    answer: displayValue(jsonPointer(source, mapping.answer)),
+    expectedTools: mappedExpectedTools(jsonPointer(source, mapping.expectedTools)),
+    metadata: mappedMetadata(jsonPointer(source, mapping.metadata)),
+  }, stableImportedId(index, line))
+}
+
+function writeMappedRecord(source: Record<string, unknown>, record: DatasetRecord, mapping: DatasetFieldMapping): void {
+  setJsonPointer(source, mapping.id, record.id)
+  setJsonPointer(source, mapping.question, record.question)
+  setJsonPointer(source, mapping.thinking, record.thinking)
+  setJsonPointer(source, mapping.answer, record.answer)
+  setJsonPointer(source, mapping.expectedTools, record.expectedTools)
+  setJsonPointer(source, mapping.metadata, record.metadata)
+}
+
+function readJsonLines(file: string, mapping?: DatasetFieldMapping): DatasetRecord[] {
+  const records: DatasetRecord[] = []
+  const ids = new Set<string>()
+  readJsonLineSources(file).forEach((source, index) => {
+    const record = mapping
+      ? mappedRecord(source.value, mapping, index, source.line)
+      : normalizeRecord(source.value, stableImportedId(index, source.line))
     if (ids.has(record.id)) throw new Error(`duplicate dataset record id: ${record.id}`)
     ids.add(record.id)
     records.push(record)
@@ -149,18 +373,34 @@ function writeJsonLines(file: string, records: DatasetRecord[]): void {
   fs.renameSync(temporary, file)
 }
 
+function writeJsonLineSources(file: string, sources: Array<Record<string, unknown>>): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const content = sources.length > 0 ? `${sources.map((source) => JSON.stringify(source)).join('\n')}\n` : ''
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`
+  fs.writeFileSync(temporary, content, 'utf8')
+  fs.renameSync(temporary, file)
+}
+
 class JsonlDatasetBackend implements DatasetBackend {
-  constructor(readonly file: string) {}
+  constructor(readonly file: string, readonly mapping?: DatasetFieldMapping) {}
 
   count(): number {
-    return readJsonLines(this.file).length
+    return readJsonLines(this.file, this.mapping).length
   }
 
   list(): DatasetRecord[] {
-    return readJsonLines(this.file)
+    return readJsonLines(this.file, this.mapping)
   }
 
   create(record: DatasetRecord): void {
+    if (this.mapping) {
+      const sources = readJsonLineSources(this.file)
+      if (this.list().some((item) => item.id === record.id)) throw new Error(`dataset record already exists: ${record.id}`)
+      const source: Record<string, unknown> = {}
+      writeMappedRecord(source, record, this.mapping)
+      writeJsonLineSources(this.file, [...sources.map((item) => item.value), source])
+      return
+    }
     const records = this.list()
     if (records.some((item) => item.id === record.id)) throw new Error(`dataset record already exists: ${record.id}`)
     records.push(record)
@@ -168,6 +408,17 @@ class JsonlDatasetBackend implements DatasetBackend {
   }
 
   update(record: DatasetRecord): void {
+    if (this.mapping) {
+      const sources = readJsonLineSources(this.file)
+      const index = sources.findIndex((source, ordinal) =>
+        mappedRecord(source.value, this.mapping as DatasetFieldMapping, ordinal, source.line).id === record.id)
+      if (index < 0) throw new Error(`dataset record was not found: ${record.id}`)
+      const source = sources[index]
+      if (!source) throw new Error(`dataset record was not found: ${record.id}`)
+      writeMappedRecord(source.value, record, this.mapping)
+      writeJsonLineSources(this.file, sources.map((item) => item.value))
+      return
+    }
     const records = this.list()
     const index = records.findIndex((item) => item.id === record.id)
     if (index < 0) throw new Error(`dataset record was not found: ${record.id}`)
@@ -176,6 +427,14 @@ class JsonlDatasetBackend implements DatasetBackend {
   }
 
   delete(id: string): void {
+    if (this.mapping) {
+      const sources = readJsonLineSources(this.file)
+      const next = sources.filter((source, ordinal) =>
+        mappedRecord(source.value, this.mapping as DatasetFieldMapping, ordinal, source.line).id !== id)
+      if (next.length === sources.length) throw new Error(`dataset record was not found: ${id}`)
+      writeJsonLineSources(this.file, next.map((item) => item.value))
+      return
+    }
     const records = this.list()
     const next = records.filter((item) => item.id !== id)
     if (next.length === records.length) throw new Error(`dataset record was not found: ${id}`)
@@ -333,7 +592,11 @@ function huggingFaceDataFile(directory: string): string {
 function backendFor(reference: DatasetReference, projectDir: string): DatasetBackend {
   const target = resolveReferencePath(projectDir, reference.path)
   if (reference.storage === 'sqlite') return new SqliteDatasetBackend(target)
-  return new JsonlDatasetBackend(reference.storage === 'huggingface' ? huggingFaceDataFile(target) : target)
+  const mapping = reference.mapping ?? inferredMapping(target, reference.storage)
+  return new JsonlDatasetBackend(
+    reference.storage === 'huggingface' ? huggingFaceDataFile(target) : target,
+    mapping,
+  )
 }
 
 function resolveReferencePath(projectDir: string, value: string): string {
@@ -365,6 +628,58 @@ function defaultName(target: string): string {
   return path.basename(target, path.extname(target)).trim() || 'dataset'
 }
 
+function importSource(
+  target: string,
+  storage: DatasetStorageType,
+): { sourceFile: string; samples: Array<Record<string, unknown>>; sampleCount: number } {
+  if (storage === 'sqlite') {
+    const backend = new SqliteDatasetBackend(target)
+    try {
+      const records = backend.list()
+      return {
+        sourceFile: target,
+        samples: records.slice(0, 3).map((record) => ({ ...record })),
+        sampleCount: records.length,
+      }
+    } finally {
+      backend.close()
+    }
+  }
+  const sourceFile = storage === 'huggingface' ? huggingFaceDataFile(target) : target
+  const sources = readJsonLineSources(sourceFile)
+  return {
+    sourceFile,
+    samples: sources.slice(0, 3).map((source) => source.value),
+    sampleCount: sources.length,
+  }
+}
+
+function importPreview(target: string, storage: DatasetStorageType): DatasetImportPreview {
+  const source = importSource(target, storage)
+  const fields = collectImportFields(source.samples)
+  const samples = source.samples.map((sample, index) => ({
+    index,
+    values: Object.fromEntries(fields.map((field) => [field.path, displayValue(jsonPointer(sample, field.path))])),
+  }))
+  return {
+    path: target,
+    sourceFile: source.sourceFile,
+    storage,
+    sampleCount: source.sampleCount,
+    fields,
+    samples,
+    suggestedMapping: storage === 'sqlite' ? { ...CANONICAL_MAPPING } : suggestedMapping(fields),
+  }
+}
+
+function inferredMapping(target: string, storage: DatasetStorageType): DatasetFieldMapping {
+  if (storage === 'sqlite') return { ...CANONICAL_MAPPING }
+  const sourceFile = storage === 'huggingface' ? huggingFaceDataFile(target) : target
+  const sources = readJsonLineSources(sourceFile).slice(0, 3)
+  if (sources.length === 0) return { ...CANONICAL_MAPPING }
+  return suggestedMapping(collectImportFields(sources.map((source) => source.value)))
+}
+
 export class DatasetStore {
   readonly registryFile: string
 
@@ -377,7 +692,12 @@ export class DatasetStore {
     return this.readRegistry().items.map((reference) => {
       const backend = backendFor(reference, this.projectDir)
       try {
-        return { ...reference, path: resolveReferencePath(this.projectDir, reference.path), samples: backend.count() }
+        return {
+          ...reference,
+          ...(reference.mapping ? {} : { mapping: inferredMapping(resolveReferencePath(this.projectDir, reference.path), reference.storage) }),
+          path: resolveReferencePath(this.projectDir, reference.path),
+          samples: backend.count(),
+        }
       } finally {
         backend.close()
       }
@@ -388,7 +708,12 @@ export class DatasetStore {
     const reference = this.reference(id)
     const backend = backendFor(reference, this.projectDir)
     try {
-      return { ...reference, path: resolveReferencePath(this.projectDir, reference.path), samples: backend.count() }
+      return {
+        ...reference,
+        ...(reference.mapping ? {} : { mapping: inferredMapping(resolveReferencePath(this.projectDir, reference.path), reference.storage) }),
+        path: resolveReferencePath(this.projectDir, reference.path),
+        samples: backend.count(),
+      }
     } finally {
       backend.close()
     }
@@ -432,21 +757,31 @@ export class DatasetStore {
     return { ...reference, path: target, samples: 0 }
   }
 
-  import(input: { path?: unknown }): DatasetSummary {
+  previewImport(input: { path?: unknown }): DatasetImportPreview {
     const inputPath = requiredString(input.path, 'dataset path')
     const target = resolveReferencePath(this.projectDir, inputPath)
+    const storage = storageFromPath(target)
+    return importPreview(target, storage)
+  }
+
+  import(input: { path?: unknown; mapping?: unknown }): DatasetSummary {
+    const preview = this.previewImport(input)
+    const target = preview.path
     const registry = this.readRegistry()
     this.ensurePathAvailable(registry, target)
-    const storage = storageFromPath(target)
+    const mapping = preview.storage === 'sqlite'
+      ? { ...CANONICAL_MAPPING }
+      : normalizeFieldMapping(input.mapping, preview.suggestedMapping)
     const now = new Date().toISOString()
     const reference: DatasetReference = {
       id: randomUUID(),
       name: defaultName(target),
-      storage,
+      storage: preview.storage,
       path: portableReferencePath(this.projectDir, target),
       version: 1,
       tags: [],
       scoringPrompt: '',
+      mapping,
       createdAt: now,
       updatedAt: now,
     }
@@ -597,6 +932,7 @@ export class DatasetStore {
         return {
           ...item,
           scoringPrompt: typeof item.scoringPrompt === 'string' ? item.scoringPrompt : '',
+          ...(item.mapping === undefined ? {} : { mapping: normalizeFieldMapping(item.mapping) }),
         } as DatasetReference
       }),
     }

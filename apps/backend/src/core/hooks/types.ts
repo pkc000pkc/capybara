@@ -2,6 +2,7 @@ import type { JsonPatchOperation, JsonValue, RuntimeVariables } from '#protocol/
 import type { LlmMessage, LlmUsage } from '#util/llm'
 
 export type HookFailurePolicy = 'continue' | 'retry'
+export type HookCheckpoint = 'after_loop' | 'after_evaluation' | 'after_replay'
 
 export interface HookSchedule {
   priority: number
@@ -32,6 +33,7 @@ export interface HookStatusSnapshot {
 }
 
 export interface HookTriggerContext {
+  checkpoint: HookCheckpoint
   status: HookStatusSnapshot
   changed: ReadonlySet<string>
   variables: Readonly<RuntimeVariables>
@@ -39,6 +41,7 @@ export interface HookTriggerContext {
     runId: string
     iteration: number
   }
+  training?: HookTrainingContext
 }
 
 export interface HookRunContext extends HookTriggerContext {
@@ -56,12 +59,51 @@ export interface HookResult {
     value: JsonValue
   }>
   metadata?: JsonValue
+  experiences?: HookExperienceCandidate[]
+}
+
+export interface HookVariableDiff {
+  variableName: string
+  baseHash?: string
+  unifiedDiff: string
+}
+
+export interface HookExperienceCandidate {
+  summary: string
+  rationale: string
+  patches: HookVariableDiff[]
+}
+
+export interface HookTrainingCase {
+  id: string
+  sampleId: string
+  question: string
+  thinking: string
+  expectedAnswer: string
+  actualAnswer: string
+  expectedTools: string[]
+  actualTools: string[]
+}
+
+export interface HookTrainingContext {
+  runId: string
+  phase: 'training' | 'replay'
+  parameters: Record<string, string>
+  case: HookTrainingCase
+  evaluation: {
+    passed: boolean
+    score: number
+    rationale: string
+  }
+  priorResults?: Record<string, JsonValue>
+  candidate?: HookExperienceCandidate & { id: string }
 }
 
 export interface ProjectHookDefinition {
   name: string
   description: string
   enabled: boolean
+  checkpoint?: HookCheckpoint
   trigger(context: HookTriggerContext): boolean
   schedule: HookSchedule
   permissions: HookPermissions
@@ -82,6 +124,7 @@ export interface RegisteredHook {
   source: string
   revision: string
   enabled: boolean
+  checkpoint: HookCheckpoint
   schedule: HookSchedule
   permissions: HookPermissions
   triggerSummary: string
@@ -91,13 +134,14 @@ export interface RegisteredHook {
 }
 
 export interface HookFixture {
-  checkpoint: 'after_loop'
+  checkpoint: HookCheckpoint
   runId: string
   loopIteration: number
   status: HookStatusSnapshot
   changedVariables: string[]
   variables: RuntimeVariables
   messages: LlmMessage[]
+  training?: HookTrainingContext
 }
 
 export interface HookRunResult {

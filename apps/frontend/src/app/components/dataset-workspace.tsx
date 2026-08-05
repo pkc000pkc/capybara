@@ -1,7 +1,10 @@
 "use client";
 
 import {
+  AlertTriangle,
   ArrowLeft,
+  ArrowRight,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Database,
@@ -13,6 +16,7 @@ import {
   Pencil,
   Plus,
   Save,
+  ScanSearch,
   Trash2,
   Wrench,
   X,
@@ -28,6 +32,8 @@ import {
 } from "react";
 import {
   datasetApi,
+  type DatasetFieldMapping,
+  type DatasetImportPreview,
   type DatasetRecord,
   type DatasetStorageType,
   type DatasetSummary,
@@ -67,10 +73,11 @@ function ActionButton({
   );
 }
 
-function DatasetDialog({ children, onClose, title }: {
+function DatasetDialog({ children, onClose, title, wide = false }: {
   children: ReactNode;
   onClose: () => void;
   title: string;
+  wide?: boolean;
 }) {
   const { t } = useI18n();
   return (
@@ -78,7 +85,7 @@ function DatasetDialog({ children, onClose, title }: {
       <section
         aria-labelledby="dataset-dialog-title"
         aria-modal="true"
-        className="w-full max-w-lg border border-[#9fb3b5] bg-white shadow-[0_12px_32px_rgba(24,39,44,0.18)]"
+        className={`${wide ? "max-w-4xl" : "max-w-lg"} w-full border border-[#9fb3b5] bg-white shadow-[0_12px_32px_rgba(24,39,44,0.18)]`}
         role="dialog"
       >
         <header className="flex h-10 items-center justify-between border-b border-[#cbd8d9] bg-[#edf3f2] px-3">
@@ -244,47 +251,191 @@ function DatasetForm({
   );
 }
 
+const IMPORT_MAPPING_FIELDS: Array<keyof DatasetFieldMapping> = [
+  "id",
+  "question",
+  "thinking",
+  "answer",
+  "expectedTools",
+  "metadata",
+];
+
 function ImportForm({ onCancel, onSubmit, projectPath }: {
   onCancel: () => void;
-  onSubmit: (path: string) => Promise<void>;
+  onSubmit: (path: string, mapping: DatasetFieldMapping) => Promise<void>;
   projectPath: string;
 }) {
   const { t } = useI18n();
   const [path, setPath] = useState(projectPath);
+  const [preview, setPreview] = useState<DatasetImportPreview | null>(null);
+  const [mapping, setMapping] = useState<DatasetFieldMapping | null>(null);
+  const [sampleIndex, setSampleIndex] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+
+  const inspect = async () => {
     setSaving(true);
     setError(null);
     try {
-      await onSubmit(path.trim());
+      const result = await datasetApi.previewImport(projectPath, path.trim());
+      setPreview(result);
+      setMapping(result.suggestedMapping);
+      setSampleIndex(0);
+    } catch (reason) {
+      setPreview(null);
+      setMapping(null);
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!preview || !mapping) {
+      await inspect();
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await onSubmit(path.trim(), mapping);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setSaving(false);
     }
   };
+  const activeSample = preview?.samples[sampleIndex];
+  const mappedValue = (field: keyof DatasetFieldMapping) => {
+    const pointer = mapping?.[field];
+    return pointer ? activeSample?.values[pointer] ?? "" : "";
+  };
+  const mappedAnswerAvailable = Boolean(preview && mapping && preview.samples.some((sample) =>
+    (sample.values[mapping.answer] ?? "").trim()));
+  const mappingLabel = (field: keyof DatasetFieldMapping) => {
+    if (field === "id") return t("experiments.recordId");
+    if (field === "expectedTools") return t("experiments.expectedTools");
+    if (field === "metadata") return t("experiments.metadata");
+    return t(`experiments.${field}`);
+  };
+
   return (
-    <form className="grid gap-3 p-4" onSubmit={submit}>
-      <label className="grid gap-1 text-[10px] font-semibold text-[#526b70]">
-        {t("experiments.importPath")}
-        <input
-          autoFocus
-          className="h-8 border border-[#c6d4d4] bg-white px-2 font-mono text-[11px] font-normal text-[#294247] outline-none focus:border-[#0c766e] focus:ring-1 focus:ring-[#0c766e]"
-          onChange={(event) => setPath(event.target.value)}
-          required
-          value={path}
-        />
-      </label>
-      <p className="text-[10px] leading-4 text-[#718488]">{t("experiments.importPathHint")}</p>
-      {error && <p className="border-l-2 border-[#b14c4c] bg-[#f8eded] px-2 py-1.5 text-[10px] text-[#843d3d]">{error}</p>}
-      <div className="flex justify-end gap-2 border-t border-[#d8e2e2] pt-3">
-        <ActionButton onClick={onCancel}>{t("experiments.cancel")}</ActionButton>
-        <ActionButton disabled={saving || !path.trim()} primary type="submit">
-          {saving && <LoaderCircle aria-hidden="true" className="animate-spin" size={12} />}
-          {t("experiments.import")}
-        </ActionButton>
+    <form className="grid max-h-[calc(100vh-7rem)] min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]" onSubmit={submit}>
+      <div className="grid gap-1.5 border-b border-[#cbd8d9] bg-[#f8faf9] px-4 py-3">
+        <label className="grid gap-1 text-[10px] font-semibold text-[#526b70]">
+          {t("experiments.importPath")}
+          <span className="flex min-w-0 gap-2">
+            <input
+              autoFocus
+              className="h-8 min-w-0 flex-1 border border-[#c6d4d4] bg-white px-2 font-mono text-[11px] font-normal text-[#294247] outline-none focus:border-[#0c766e] focus:ring-1 focus:ring-[#0c766e]"
+              onChange={(event) => {
+                setPath(event.target.value);
+                setPreview(null);
+                setMapping(null);
+              }}
+              required
+              value={path}
+            />
+            <button
+              className="flex h-8 shrink-0 items-center gap-1.5 border border-[#9fb5b6] bg-white px-2.5 text-[10px] font-semibold text-[#49666b] outline-none hover:bg-[#edf3f2] focus-visible:ring-2 focus-visible:ring-[#0c766e] disabled:cursor-not-allowed disabled:text-[#9aa9ab]"
+              disabled={saving || !path.trim()}
+              onClick={() => void inspect()}
+              type="button"
+            >
+              {saving && !preview ? <LoaderCircle aria-hidden="true" className="animate-spin" size={12} /> : <ScanSearch aria-hidden="true" size={13} />}
+              {t("experiments.inspectFields")}
+            </button>
+          </span>
+        </label>
+        <span className="text-[9px] text-[#718488]">{t("experiments.importPathHint")}</span>
+        {preview && (
+          <div className="flex min-w-0 items-center gap-3 font-mono text-[9px] text-[#60777a]">
+            <span className="inline-flex items-center gap-1 text-[#287467]"><CheckCircle2 aria-hidden="true" size={11} />{preview.storage}</span>
+            <span>{t("experiments.detectedSamples", { count: preview.sampleCount })}</span>
+            <span className="truncate" title={preview.sourceFile}>{preview.sourceFile}</span>
+          </div>
+        )}
+      </div>
+
+      {preview && mapping ? (
+        <div className="minimal-scrollbar grid min-h-0 overflow-auto md:grid-cols-[minmax(380px,1.1fr)_minmax(280px,0.9fr)] md:divide-x md:divide-[#cbd8d9]">
+          <section className="min-w-0 bg-white">
+            <header className="flex h-8 items-center justify-between border-b border-[#d8e2e2] bg-[#edf3f2] px-3">
+              <span className="text-[9px] font-semibold uppercase text-[#60777a]">{t("experiments.fieldMapping")}</span>
+              <span className="font-mono text-[9px] text-[#829397]">JSON Pointer</span>
+            </header>
+            <div className="grid divide-y divide-[#e0e8e8]">
+              {IMPORT_MAPPING_FIELDS.map((field) => {
+                const selected = mapping[field];
+                const known = preview.fields.some((item) => item.path === selected);
+                return (
+                  <label className="grid min-h-12 grid-cols-[110px_18px_minmax(0,1fr)] items-center gap-2 px-3 py-2 text-[10px]" key={field}>
+                    <span className="font-semibold text-[#526b70]">{mappingLabel(field)}</span>
+                    <ArrowRight aria-hidden="true" className="text-[#8ba09f]" size={12} />
+                    <select
+                      aria-label={t("experiments.mapField", { field: mappingLabel(field) })}
+                      className="h-7 min-w-0 border border-[#c6d4d4] bg-white px-2 font-mono text-[10px] text-[#294247] outline-none focus:border-[#0c766e] focus:ring-1 focus:ring-[#0c766e]"
+                      onChange={(event) => setMapping((current) => current ? { ...current, [field]: event.target.value } : current)}
+                      value={selected}
+                    >
+                      {!known && <option value={selected}>{selected} · {t("experiments.newSourceField")}</option>}
+                      {preview.fields.map((item) => <option key={item.path} value={item.path}>{item.path} · {item.type}</option>)}
+                    </select>
+                  </label>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="min-w-0 border-t border-[#cbd8d9] bg-[#f8faf9] md:border-t-0">
+            <header className="flex h-8 items-center justify-between border-b border-[#d8e2e2] bg-[#edf3f2] px-3">
+              <span className="text-[9px] font-semibold uppercase text-[#60777a]">{t("experiments.mappedPreview")}</span>
+              {preview.samples.length > 1 && (
+                <select
+                  aria-label={t("experiments.previewSample")}
+                  className="h-6 border border-[#c6d4d4] bg-white px-1.5 font-mono text-[9px] text-[#526b70] outline-none focus:border-[#0c766e]"
+                  onChange={(event) => setSampleIndex(Number(event.target.value))}
+                  value={sampleIndex}
+                >
+                  {preview.samples.map((sample) => <option key={sample.index} value={sample.index}>{t("experiments.previewSampleNumber", { number: sample.index + 1 })}</option>)}
+                </select>
+              )}
+            </header>
+            {!mappedAnswerAvailable && (
+              <div className="flex items-start gap-2 border-b border-[#ead7a9] bg-[#fff8e8] px-3 py-2 text-[9px] leading-4 text-[#76551f]">
+                <AlertTriangle aria-hidden="true" className="mt-0.5 shrink-0" size={12} />
+                <span>{t("experiments.answerMappingEmpty")}</span>
+              </div>
+            )}
+            <div className="grid divide-y divide-[#d8e2e2]">
+              {(["question", "thinking", "answer"] as const).map((field) => (
+                <div className="grid min-h-24 grid-rows-[24px_minmax(72px,auto)]" key={field}>
+                  <div className="flex items-center justify-between bg-white px-3 text-[9px] font-semibold uppercase text-[#657b7f]">
+                    <span>{mappingLabel(field)}</span>
+                    <span className="font-mono font-normal text-[#91a0a2]">{mapping[field]}</span>
+                  </div>
+                  <pre className="minimal-scrollbar max-h-36 overflow-auto whitespace-pre-wrap break-words bg-[#f8faf9] px-3 py-2 font-mono text-[10px] leading-4 text-[#294247]">{mappedValue(field) || t("experiments.noMappedValue")}</pre>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      ) : (
+        <div className="grid min-h-56 place-items-center bg-white px-6 text-center text-[10px] text-[#718488]">
+          <span className="flex items-center gap-2"><ScanSearch aria-hidden="true" size={15} />{t("experiments.inspectBeforeImport")}</span>
+        </div>
+      )}
+
+      <div className="grid gap-2 border-t border-[#cbd8d9] bg-white px-4 py-3">
+        {error && <p className="border-l-2 border-[#b14c4c] bg-[#f8eded] px-2 py-1.5 text-[10px] text-[#843d3d]">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <ActionButton onClick={onCancel}>{t("experiments.cancel")}</ActionButton>
+          <ActionButton disabled={saving || !path.trim() || !preview || !mapping} primary type="submit">
+            {saving && preview && <LoaderCircle aria-hidden="true" className="animate-spin" size={12} />}
+            {t("experiments.import")}
+          </ActionButton>
+        </div>
       </div>
     </form>
   );
@@ -793,11 +944,11 @@ export default function DatasetWorkspace({ projectPath }: { projectPath: string 
         </DatasetDialog>
       )}
       {modal === "import" && (
-        <DatasetDialog onClose={() => setModal(null)} title={t("experiments.importDataset")}>
+        <DatasetDialog onClose={() => setModal(null)} title={t("experiments.importDataset")} wide>
           <ImportForm
             onCancel={() => setModal(null)}
-            onSubmit={async (path) => {
-              upsert(await datasetApi.import(projectPath, path));
+            onSubmit={async (path, mapping) => {
+              upsert(await datasetApi.import(projectPath, path, mapping));
               setModal(null);
             }}
             projectPath={projectPath}

@@ -104,6 +104,63 @@ test('dataset import registers a local path and normalizes missing record ids', 
   assert.equal(JSON.parse(fs.readFileSync(source, 'utf8').trim()).id, imported.id)
 })
 
+test('dataset import previews and persists source field mappings', (context) => {
+  const projectDir = temporaryProject()
+  const externalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-dataset-mapping-'))
+  context.after(() => {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+    fs.rmSync(externalDir, { recursive: true, force: true })
+  })
+  const source = path.join(externalDir, 'mapped.jsonl')
+  fs.writeFileSync(source, `${JSON.stringify({
+    sample_key: 'external-1',
+    payload: {
+      instruction: 'Mapped question',
+      reasoning: 'Mapped reasoning',
+    },
+    labels: { response: 'Mapped answer' },
+    tool_names: ['read_file'],
+    meta: { tags: ['mapped'] },
+    untouched: { owner: 'source-system' },
+  })}\n`, 'utf8')
+
+  const store = new DatasetStore(projectDir)
+  const preview = store.previewImport({ path: source })
+  assert.equal(preview.storage, 'jsonl')
+  assert.equal(preview.sampleCount, 1)
+  assert.equal(preview.suggestedMapping.question, '/payload/instruction')
+  assert.equal(preview.suggestedMapping.thinking, '/payload/reasoning')
+  assert.equal(preview.suggestedMapping.answer, '/labels/response')
+  assert.equal(preview.samples[0]?.values['/labels/response'], 'Mapped answer')
+
+  const mapping = {
+    id: '/sample_key',
+    question: '/payload/instruction',
+    thinking: '/payload/reasoning',
+    answer: '/labels/response',
+    expectedTools: '/tool_names',
+    metadata: '/meta',
+  }
+  const dataset = store.import({ path: source, mapping })
+  assert.deepEqual(dataset.mapping, mapping)
+  const imported = store.listRecords(dataset.id).items[0]
+  assert.ok(imported)
+  assert.equal(imported.id, 'external-1')
+  assert.equal(imported.question, 'Mapped question')
+  assert.equal(imported.thinking, 'Mapped reasoning')
+  assert.equal(imported.answer, 'Mapped answer')
+  assert.deepEqual(imported.expectedTools, ['read_file'])
+  assert.deepEqual(imported.metadata.tags, ['mapped'])
+
+  store.updateRecord(dataset.id, imported.id, { ...imported, answer: 'Edited mapped answer' })
+  const written = JSON.parse(fs.readFileSync(source, 'utf8').trim()) as {
+    labels: { response: string }
+    untouched: { owner: string }
+  }
+  assert.equal(written.labels.response, 'Edited mapped answer')
+  assert.equal(written.untouched.owner, 'source-system')
+})
+
 test('legacy registries and SQLite datasets gain empty evaluation defaults', (context) => {
   const projectDir = temporaryProject()
   context.after(() => fs.rmSync(projectDir, { recursive: true, force: true }))
@@ -205,6 +262,31 @@ test('dataset HTTP endpoints expose list, import, dataset and record CRUD', asyn
   const listResponse = await app.inject({ method: 'GET', url: `/api/datasets?${projectQuery}` })
   assert.equal(listResponse.statusCode, 200)
   assert.equal(listResponse.json().items[0].samples, 1)
+
+  const mappedPath = path.join(projectDir, 'datasets', 'http-mapped.jsonl')
+  fs.writeFileSync(mappedPath, `${JSON.stringify({ prompt: 'Mapped HTTP question', completion: 'Mapped HTTP answer' })}\n`)
+  const previewResponse = await app.inject({
+    method: 'POST',
+    url: `/api/datasets/import/preview?${projectQuery}`,
+    payload: { path: mappedPath },
+  })
+  assert.equal(previewResponse.statusCode, 200)
+  assert.equal(previewResponse.json().suggestedMapping.question, '/prompt')
+  assert.equal(previewResponse.json().suggestedMapping.answer, '/completion')
+
+  const importResponse = await app.inject({
+    method: 'POST',
+    url: `/api/datasets/import?${projectQuery}`,
+    payload: { path: mappedPath, mapping: previewResponse.json().suggestedMapping },
+  })
+  assert.equal(importResponse.statusCode, 201)
+  const mappedDataset = importResponse.json() as { id: string }
+  const mappedRecordsResponse = await app.inject({
+    method: 'GET',
+    url: `/api/datasets/${mappedDataset.id}/records?${projectQuery}`,
+  })
+  assert.equal(mappedRecordsResponse.statusCode, 200)
+  assert.equal(mappedRecordsResponse.json().items[0].answer, 'Mapped HTTP answer')
 
   assert.equal((await app.inject({
     method: 'DELETE',
