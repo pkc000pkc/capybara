@@ -1,0 +1,109 @@
+---
+import CapybaraMark from "../components/CapybaraMark.astro";
+import "../styles/global.css";
+import "../styles/blog.css";
+
+const base = import.meta.env.BASE_URL;
+const blogUrl = `${base}blog/`;
+const repositoryUrl = "https://github.com/pkc000pkc/capybara";
+const { frontmatter } = Astro.props;
+const published = frontmatter.published ?? "2026-08-08";
+const publishedDate = typeof published === "string" ? published.slice(0, 10) : published.toISOString().slice(0, 10);
+const title = `${frontmatter.title} | Capybara`;
+const description = frontmatter.description ?? "Notes from the Capybara project.";
+const canonical = Astro.site ? new URL(Astro.url.pathname, Astro.site) : Astro.url;
+const structuredData = {
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  headline: frontmatter.title,
+  description,
+  datePublished: publishedDate,
+  dateModified: publishedDate,
+  author: { "@type": "Organization", name: "Capybara" },
+  publisher: { "@type": "Organization", name: "Capybara" },
+  mainEntityOfPage: canonical.toString(),
+  isPartOf: { "@type": "Blog", name: "Capybara Blog" },
+};
+---
+
+<!doctype html>
+<html lang={frontmatter.lang ?? "en"}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="description" content={description} />
+    <meta name="robots" content="index, follow" />
+    <meta name="theme-color" content="#f7f9f8" />
+    <meta property="og:type" content="article" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:site_name" content="Capybara" />
+    <meta property="og:url" content={canonical} />
+    <meta property="article:published_time" content={publishedDate} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" type="image/svg+xml" href={`${base}favicon.svg`} />
+    <title>{title}</title>
+    <script is:inline type="application/ld+json" set:html={JSON.stringify(structuredData)} />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href={base} aria-label="Capybara home">
+          <CapybaraMark />
+          <span class="brand-name">Capybara</span>
+          <span class="brand-status">Blog</span>
+        </a>
+
+        <nav class="site-nav" aria-label="Primary navigation">
+          <a href={base}>Home</a>
+          <a class="nav-current" href={blogUrl} aria-current="page">Blog</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main-content" class="post-page">
+      <div class="post-shell">
+        <nav class="post-breadcrumb" aria-label="Breadcrumb">
+          <a href={blogUrl}>Blog</a><span aria-hidden="true">/</span><span>{frontmatter.category ?? "Notes"}</span>
+        </nav>
+
+        <article class="post-article">
+          <header class="post-header">
+            <div class="post-meta">
+              <span>{frontmatter.category ?? "Notes"}</span>
+              <time datetime={publishedDate}>{publishedDate}</time>
+              <span>{frontmatter.readTime ?? "8 min read"}</span>
+            </div>
+            <h1>{frontmatter.title}</h1>
+            {frontmatter.description && <p class="post-description">{frontmatter.description}</p>}
+          </header>
+
+          <div class="post-layout">
+            <div class="post-content prose">
+              <slot />
+            </div>
+            <aside class="post-outline" aria-label="Article information">
+              <p class="outline-label">About this note</p>
+              <p>This note records the method, evaluation evidence, and known limits at the time of publication.</p>
+              <a href={repositoryUrl}>View the source <span aria-hidden="true">↗</span></a>
+            </aside>
+          </div>
+        </article>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-inner">
+        <a class="brand footer-brand" href={base} aria-label="Capybara home">
+          <CapybaraMark />
+          <span class="brand-name">Capybara</span>
+        </a>
+        <p>Open-source infrastructure for trustworthy agent context.</p>
+        <p>Apache-2.0 · 2026</p>
+      </div>
+    </footer>
+  </body>
+</html>

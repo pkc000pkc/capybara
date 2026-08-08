@@ -61,12 +61,9 @@ const structuredData = {
         </a>
 
         <nav class="site-nav" aria-label="Primary navigation">
-          <a href="#workspace">Workspace</a>
-          <a href="#context-model">Context model</a>
-          <a href="#workflow">Workflow</a>
+          <a class="nav-current" href={base} aria-current="page">Home</a>
+          <a href={`${base}blog/`}>Blog</a>
         </nav>
-
-        <a class="header-link" href={repositoryUrl}>GitHub</a>
       </div>
     </header>
 
@@ -237,7 +234,10 @@ const structuredData = {
               <div><dt>Runtime</dt><dd>Local first</dd></div>
               <div><dt>Repository</dt><dd>Public on GitHub</dd></div>
             </dl>
-            <a class="text-link" href={repositoryUrl}>Explore the source <span aria-hidden="true">→</span></a>
+            <div class="open-source-links">
+              <a class="text-link" href={repositoryUrl}>Explore the source <span aria-hidden="true">→</span></a>
+              <a class="text-link" href={`${base}blog/`}>Read the field notes <span aria-hidden="true">→</span></a>
+            </div>
           </div>
         </div>
       </section>

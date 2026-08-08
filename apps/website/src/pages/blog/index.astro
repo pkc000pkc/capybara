@@ -1,0 +1,96 @@
+---
+import CapybaraMark from "../../components/CapybaraMark.astro";
+import "../../styles/global.css";
+import "../../styles/blog.css";
+
+const base = import.meta.env.BASE_URL;
+const blogUrl = `${base}blog/`;
+const articleUrl = `${blogUrl}appworld-closed-book-evaluation/`;
+const repositoryUrl = "https://github.com/pkc000pkc/capybara";
+const canonical = Astro.site ? new URL(Astro.url.pathname, Astro.site) : Astro.url;
+const title = "Blog | Capybara";
+const description = "Engineering notes, evaluation reports, and research on agent context.";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="description" content={description} />
+    <meta name="robots" content="index, follow" />
+    <meta name="theme-color" content="#f7f9f8" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:site_name" content="Capybara" />
+    <meta property="og:url" content={canonical} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" type="image/svg+xml" href={`${base}favicon.svg`} />
+    <title>{title}</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href={base} aria-label="Capybara home">
+          <CapybaraMark />
+          <span class="brand-name">Capybara</span>
+          <span class="brand-status">Blog</span>
+        </a>
+
+        <nav class="site-nav" aria-label="Primary navigation">
+          <a href={base}>Home</a>
+          <a class="nav-current" href={blogUrl} aria-current="page">Blog</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main-content" class="blog-index-main">
+      <div class="blog-index-shell">
+        <header class="blog-index-header">
+          <p class="blog-kicker">Capybara / Blog</p>
+          <h1>Engineering notes and research</h1>
+          <p>Methods, evaluation evidence, and open questions from the development of Capybara.</p>
+        </header>
+
+        <section aria-labelledby="posts-title">
+          <div class="posts-heading">
+            <h2 id="posts-title">All posts</h2>
+            <span>1 post</span>
+          </div>
+
+          <article class="post-list-item">
+            <div class="post-list-meta">
+              <span>Research / AppWorld</span>
+              <time datetime="2026-08-08">2026-08-08</time>
+            </div>
+            <div class="post-list-main">
+              <h3><a href={articleUrl}>Building Frozen Context for Closed-Book Agent Evaluation</a></h3>
+              <p>How execution evidence becomes a versioned context snapshot, and how that snapshot is evaluated without test-time learning.</p>
+            </div>
+            <a class="post-list-arrow" href={articleUrl} aria-label="Read Building Frozen Context for Closed-Book Agent Evaluation">→</a>
+          </article>
+        </section>
+
+        <div class="blog-index-footer">
+          <p>More notes will follow when the evidence and reproducible materials are ready.</p>
+          <a href={repositoryUrl}>View the project on GitHub <span aria-hidden="true">↗</span></a>
+        </div>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-inner">
+        <a class="brand footer-brand" href={base} aria-label="Capybara home">
+          <CapybaraMark />
+          <span class="brand-name">Capybara</span>
+        </a>
+        <p>Open-source infrastructure for trustworthy agent context.</p>
+        <p>Apache-2.0 · 2026</p>
+      </div>
+    </footer>
+  </body>
+</html>

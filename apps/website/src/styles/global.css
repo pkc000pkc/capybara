@@ -100,7 +100,7 @@ svg {
 .header-inner {
   display: grid;
   height: 100%;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
 }
 
@@ -171,6 +171,10 @@ svg {
 .site-nav a:hover,
 .header-link:hover {
   color: var(--teal);
+}
+
+.site-nav .nav-current {
+  color: var(--ink);
 }
 
 .header-link {
@@ -753,6 +757,12 @@ h1 {
   color: var(--teal);
 }
 
+.open-source-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 28px;
+}
+
 .site-footer {
   padding-block: 28px;
   border-top: 1px solid var(--night-line);
@@ -799,10 +809,6 @@ h1 {
 }
 
 @media (max-width: 900px) {
-  .site-nav {
-    display: none;
-  }
-
   .header-inner {
     grid-template-columns: minmax(0, 1fr) auto;
   }
@@ -914,6 +920,11 @@ h1 {
   .hero-actions {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .open-source-links {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .button {
