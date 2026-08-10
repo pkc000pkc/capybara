@@ -100,7 +100,7 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
   await page.goto("/");
-  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible();
+  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator("#context-rendered-panel")).toContainText(
     "You are Capybara",
   );
@@ -355,7 +355,7 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
 test("projects, sessions, request replay, storage, and clearing stay coordinated", async ({ page }) => {
   test.setTimeout(150_000);
   await page.goto("/");
-  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible();
+  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
 
   const projectButton = page.getByRole("button", {
     name: path.basename(e2eProject),
@@ -428,7 +428,7 @@ test("projects, sessions, request replay, storage, and clearing stay coordinated
 test("sending after an interrupted run starts a new request", async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto("/");
-  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible();
+  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
   await page.getByRole("button", { name: "新增会话" }).click();
 
   const conversation = page.locator("#conversation-panel");

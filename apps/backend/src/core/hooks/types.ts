@@ -1,4 +1,5 @@
 import type { JsonPatchOperation, JsonValue, RuntimeVariables } from '#protocol/runtime-protocol'
+import type { ExperimentReference } from '#core/experiments/types'
 import type { LlmMessage, LlmUsage } from '#util/llm'
 
 export type HookFailurePolicy = 'continue' | 'retry'
@@ -115,6 +116,10 @@ export interface HookTrainingContext {
     passed: boolean
     score: number
     rationale: string
+    source?: 'llm' | 'project'
+    metrics: Record<string, JsonValue>
+    details?: JsonValue
+    reference?: ExperimentReference
   }
   priorResults?: Record<string, JsonValue>
   candidate?: HookExperienceCandidate & { id: string }

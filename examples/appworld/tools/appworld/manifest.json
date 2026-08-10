@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "package": "appworld",
+  "runner": {
+    "type": "stdio",
+    "entry": "runner.mjs"
+  },
+  "tools": [
+    {
+      "name": "appworld_execute",
+      "description": "Execute Python code in the active AppWorld task environment and report both observable output and completion state.",
+      "permissions": [
+        "network:appworld"
+      ],
+      "sideEffects": "external",
+      "replay": "never",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 50000
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          },
+          "completed": {
+            "type": "boolean"
+          },
+          "responseEnvelope": {
+            "type": "string",
+            "description": "Exact response protocol reminder placed after every AppWorld result."
+          },
+          "nextResponse": {
+            "type": "object",
+            "description": "Exact structured response to copy once when the next action is a non-tool response; never repeat or concatenate it.",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "running"
+                ]
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "content"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "taskId",
+          "output",
+          "completed",
+          "responseEnvelope",
+          "nextResponse"
+        ],
+        "additionalProperties": false
+      },
+      "examples": [
+        {
+          "code": "print(apis.api_docs.show_app_descriptions())"
+        }
+      ]
+    }
+  ]
+}

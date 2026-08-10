@@ -8,15 +8,22 @@ import type { JsonObject, JsonValue } from '#protocol/runtime-protocol'
 import type {
   ExperimentAdapterEvaluation,
   ExperimentAdapterSnapshot,
+  ExperimentReference,
 } from '#core/experiments/types'
 
-export type ExperimentAdapterPhase = 'prepare' | 'evaluate' | 'cleanup' | 'aggregate'
+export type ExperimentAdapterPhase = 'prepare' | 'evaluate' | 'cleanup' | 'aggregate' | 'reference'
+
+export interface ExperimentReferenceResolution {
+  id: string
+  reference: ExperimentReference
+}
 
 interface ExperimentAdapterManifest {
   version: 1
   runner: {
     type: 'stdio'
     entry: string
+    files?: string[]
   }
   timeout_ms?: number
   phases?: ExperimentAdapterPhase[]
@@ -57,11 +64,17 @@ function manifestValue(value: unknown): ExperimentAdapterManifest {
   if (value.runner.type !== 'stdio' || typeof value.runner.entry !== 'string' || !value.runner.entry.trim()) {
     throw new Error('experiment adapter runner must use stdio with a non-empty entry')
   }
+  if (value.runner.files !== undefined && (
+    !Array.isArray(value.runner.files)
+    || value.runner.files.some((item) => typeof item !== 'string' || !item.trim())
+  )) {
+    throw new Error('experiment adapter runner files must be non-empty project-relative paths')
+  }
   const timeoutMs = value.timeout_ms ?? DEFAULT_TIMEOUT_MS
   if (!Number.isInteger(timeoutMs) || Number(timeoutMs) < 100 || Number(timeoutMs) > 60 * 60_000) {
     throw new Error('experiment adapter timeout_ms must be an integer between 100 and 3600000')
   }
-  const supported = new Set<ExperimentAdapterPhase>(['prepare', 'evaluate', 'cleanup', 'aggregate'])
+  const supported = new Set<ExperimentAdapterPhase>(['prepare', 'evaluate', 'cleanup', 'aggregate', 'reference'])
   const phases = value.phases ?? ['prepare', 'evaluate', 'cleanup']
   if (!Array.isArray(phases) || phases.some((item) => typeof item !== 'string' || !supported.has(item as ExperimentAdapterPhase))) {
     throw new Error('experiment adapter phases contains an unsupported phase')
@@ -70,10 +83,36 @@ function manifestValue(value: unknown): ExperimentAdapterManifest {
   if (!normalizedPhases.includes('evaluate')) throw new Error('experiment adapter must support evaluate')
   return {
     version: 1,
-    runner: { type: 'stdio', entry: value.runner.entry.trim() },
+    runner: {
+      type: 'stdio',
+      entry: value.runner.entry.trim(),
+      ...(value.runner.files === undefined
+        ? {}
+        : { files: [...new Set(value.runner.files.map((item) => item.trim()))] }),
+    },
     timeout_ms: Number(timeoutMs),
     phases: normalizedPhases,
   }
+}
+
+function referenceValue(value: unknown, field: string): ExperimentReference {
+  if (!isObject(value)) throw new Error(`${field} must be an object`)
+  if (!['text', 'state', 'unavailable'].includes(String(value.kind))) {
+    throw new Error(`${field}.kind is invalid`)
+  }
+  if (!['available', 'unavailable', 'load_failed'].includes(String(value.status))) {
+    throw new Error(`${field}.status is invalid`)
+  }
+  if (!isObject(value.source) || !['dataset', 'official_evaluator'].includes(String(value.source.type))) {
+    throw new Error(`${field}.source is invalid`)
+  }
+  if (!Array.isArray(value.requirements) || !Array.isArray(value.actualStateChanges) || !Array.isArray(value.failureTraces)) {
+    throw new Error(`${field} evidence collections must be arrays`)
+  }
+  if (typeof value.resolvedAt !== 'string' || !value.resolvedAt.trim()) {
+    throw new Error(`${field}.resolvedAt is required`)
+  }
+  return jsonValue(value, field) as unknown as ExperimentReference
 }
 
 export class ExperimentAdapterRunner {
@@ -102,14 +141,27 @@ export class ExperimentAdapterRunner {
     if (!inside(realProject, realEntry) || !fs.statSync(realEntry).isFile()) {
       throw new Error('experiment adapter entry must be a file inside the project')
     }
+    const dependencyFiles = (manifest.runner.files ?? []).map((file) => {
+      if (path.isAbsolute(file)) throw new Error('experiment adapter runner files must be project-relative')
+      const target = path.resolve(this.projectDir, file)
+      if (!inside(this.projectDir, target) || !fs.existsSync(target)) {
+        throw new Error(`experiment adapter runner file was not found inside the project: ${file}`)
+      }
+      const realTarget = fs.realpathSync(target)
+      if (!inside(realProject, realTarget) || !fs.statSync(realTarget).isFile()) {
+        throw new Error(`experiment adapter runner file must be a file inside the project: ${file}`)
+      }
+      return realTarget
+    })
     this.entryFile = realEntry
     this.timeoutMs = manifest.timeout_ms ?? DEFAULT_TIMEOUT_MS
     this.phases = manifest.phases ?? ['prepare', 'evaluate', 'cleanup']
-    this.revision = createHash('sha256')
-      .update(manifestSource)
-      .update('\0')
-      .update(fs.readFileSync(this.entryFile))
-      .digest('hex')
+    const revision = createHash('sha256').update(manifestSource).update('\0')
+    for (const file of [this.entryFile, ...dependencyFiles]) {
+      revision.update(path.relative(this.projectDir, file).replaceAll('\\', '/')).update('\0')
+      revision.update(fs.readFileSync(file)).update('\0')
+    }
+    this.revision = revision.digest('hex')
   }
 
   snapshot(): ExperimentAdapterSnapshot {
@@ -143,6 +195,7 @@ export class ExperimentAdapterRunner {
           ...process.env,
           CAPYBARA_PROJECT_DIR: this.projectDir,
           CAPYBARA_EXPERIMENT_PHASE: phase,
+          CAPYBARA_EXPERIMENT_ADAPTER_REVISION: this.revision,
         },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
@@ -237,6 +290,26 @@ export class ExperimentAdapterRunner {
       rationale: value.rationale.trim(),
       metrics: (value.metrics ?? {}) as JsonObject,
       ...(value.details === undefined ? {} : { details: jsonValue(value.details, 'experiment adapter details') }),
+      ...(value.reference === undefined ? {} : { reference: referenceValue(value.reference, 'experiment adapter reference') }),
     }
+  }
+
+  async references(payload: JsonObject, options: { signal?: AbortSignal } = {}): Promise<ExperimentReferenceResolution[]> {
+    const value = await this.invoke('reference', payload, options)
+    if (!isObject(value) || !Array.isArray(value.items)) {
+      throw new Error('experiment adapter reference result must contain an items array')
+    }
+    const ids = new Set<string>()
+    return value.items.map((entry, index) => {
+      if (!isObject(entry) || typeof entry.id !== 'string' || !entry.id.trim()) {
+        throw new Error(`experiment adapter reference items[${index}].id is required`)
+      }
+      if (ids.has(entry.id)) throw new Error(`experiment adapter reference repeats id: ${entry.id}`)
+      ids.add(entry.id)
+      return {
+        id: entry.id,
+        reference: referenceValue(entry.reference, `experiment adapter reference items[${index}].reference`),
+      }
+    })
   }
 }

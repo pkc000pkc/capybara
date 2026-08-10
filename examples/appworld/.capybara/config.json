@@ -1,0 +1,32 @@
+{
+  "main_template": "main.j2",
+  "max_messages": 80,
+  "max_tool_rounds": 60,
+  "tool_timeout_ms": 120000,
+  "llm": {
+    "model": "gpt-5.6-luna",
+    "base_url": "http://token.ai.longjitech.com/v1",
+    "protocol": "responses"
+  },
+  "context": {
+    "max_input_tokens": 64000,
+    "reserved_output_tokens": 6000
+  },
+  "tools": [
+    "tools/appworld/manifest.json"
+  ],
+  "skills": [
+    "skills/solve-appworld-tasks"
+  ],
+  "harnesses": [
+    "harnesses/tool/appworld/manifest.json"
+  ],
+  "harness_policy": {
+    "experience_top_k": 3,
+    "experience_threshold": 0.35,
+    "experience_auto_attach": true
+  },
+  "tool_permissions": [
+    "network:appworld"
+  ]
+}

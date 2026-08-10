@@ -1,0 +1,11 @@
+.venv/
+datasets/
+.capybara/secrets.json
+.capybara/sessions.sqlite*
+.capybara/experiments.sqlite*
+.capybara/worktrees/
+.capybara/appworld-case-state.json
+.capybara/appworld-server.log
+experiments/outputs/
+__pycache__/
+*.pyc

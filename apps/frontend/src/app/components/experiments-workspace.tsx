@@ -81,6 +81,20 @@ export default function ExperimentsWorkspace({ projectPath }: { projectPath: str
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
+    const mobile = window.matchMedia("(max-width: 767px)");
+    let timer: number | undefined;
+    const collapseForMobile = (event: MediaQueryListEvent) => {
+      if (event.matches) setCollapsed(true);
+    };
+    if (mobile.matches) timer = window.setTimeout(() => setCollapsed(true), 0);
+    mobile.addEventListener("change", collapseForMobile);
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      mobile.removeEventListener("change", collapseForMobile);
+    };
+  }, []);
+
+  useEffect(() => {
     const query = new URL(window.location.href).searchParams;
     if (query.has("trainingAnalysisRun")) {
       const timer = window.setTimeout(() => setActiveSection("training-analysis"), 0);
@@ -111,7 +125,7 @@ export default function ExperimentsWorkspace({ projectPath }: { projectPath: str
 
   return (
     <div
-      className="experiment-shell grid h-full min-h-[520px] min-w-[760px] overflow-hidden bg-[#dce5e7] transition-[grid-template-columns] duration-150 motion-reduce:transition-none"
+      className="experiment-shell grid h-full min-h-[520px] min-w-0 overflow-hidden bg-[#dce5e7] transition-[grid-template-columns] duration-150 motion-reduce:transition-none md:min-w-[760px]"
       data-experiment-section={activeSection}
       data-navigation-collapsed={collapsed ? "true" : "false"}
       style={{ gridTemplateColumns: collapsed ? "48px minmax(0, 1fr)" : "168px minmax(0, 1fr)" }}

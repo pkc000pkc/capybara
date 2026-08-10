@@ -85,11 +85,40 @@ test.beforeAll(async () => {
     INSERT INTO training_cases (
       id, run_id, phase, dataset_id, sample_id, ordinal, status, question, thinking,
       expected_answer, actual_answer, expected_tools_json, actual_tools_json,
-      tool_calls_json, usage_json, score, passed, rationale, experiment_run_id,
+      tool_calls_json, usage_json, score, passed, rationale, evaluation_json, experiment_run_id,
       experiment_case_id, failure_pause_handled, attempt, failure_json, created_at,
       started_at, completed_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, 'reference', 'answer', 'answer', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, NULL, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, 'reference', 'answer', 'answer', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, NULL, ?, ?, ?, ?)
   `);
+  const stateReference = (timestamp: string, taskId?: string) => ({
+    kind: "state",
+    status: "available",
+    source: { type: "official_evaluator", benchmark: "appworld", ...(taskId ? { taskId } : {}) },
+    requirements: [
+      { ordinal: 0, status: "passed", description: "receiver set matches" },
+      { ordinal: 1, status: "passed", description: "amount and note match" },
+    ],
+    expectedState: { public: { note: "expected note" }, private: { receiver_ids: [3, 7] } },
+    actualStateChanges: [{
+      application: "venmo",
+      model: "PaymentRequest",
+      records: 1,
+      added: 0,
+      updated: 1,
+      removed: 0,
+      recordChanges: [{
+        recordId: 42,
+        operation: "updated",
+        fields: [
+          { field: "note", before: "draft note", after: "expected note" },
+          { field: "password", before: "must-not-reach-ui", after: "must-not-reach-ui" },
+        ],
+      }],
+    }],
+    stateChangesStatus: "complete",
+    failureTraces: [],
+    resolvedAt: timestamp,
+  });
   const config = JSON.stringify({
     trainDatasetId,
     testDatasetId,
@@ -105,10 +134,12 @@ test.beforeAll(async () => {
   const seedRun = (id: string, name: string, timestamp: string, testScore: number, learned: boolean) => {
     const snapshotId = `${id}-snapshot`;
     insertRun.run(id, name, config, snapshotId, timestamp, timestamp, timestamp, timestamp);
-    const toolCalls = JSON.stringify([{ callId: `${id}-tool`, name: "appworld_execute", status: "completed", arguments: {}, startedAt: timestamp, completedAt: timestamp, durationMs: 18 }]);
+    const toolCalls = JSON.stringify([{ callId: `${id}-tool`, name: "appworld_execute", status: "completed", arguments: { code: "print('state')", access_token: "must-not-reach-ui" }, resultPreview: "token=must-not-reach-ui result=ok", startedAt: timestamp, completedAt: timestamp, durationMs: 18 }]);
     const usage = JSON.stringify({ inputTokens: 120, outputTokens: 30, totalTokens: 150, cacheReadTokens: 20 });
-    insertCase.run(`${id}-train`, id, "training", trainDatasetId, "training-e2e-case", 0, "training-e2e question", "[]", "[]", toolCalls, usage, 1, 1, "passed", timestamp, timestamp, timestamp, timestamp);
-    insertCase.run(`${id}-test`, id, "testing", testDatasetId, "testing-e2e-case", 0, "testing-e2e question", JSON.stringify(["appworld_execute"]), JSON.stringify(["appworld_execute"]), toolCalls, usage, testScore, Number(testScore > 0), testScore > 0 ? "passed" : "failed", timestamp, timestamp, timestamp, timestamp);
+    const textEvaluation = JSON.stringify({ source: "project", metrics: {}, reference: { kind: "text", status: "available", source: { type: "official_evaluator", benchmark: "fixture" }, displayValue: "Official E2E answer", value: "Official E2E answer", requirements: [], actualStateChanges: [], failureTraces: [], resolvedAt: timestamp } });
+    const stateEvaluation = JSON.stringify({ source: "project", metrics: { requirementCompletion: 100 }, reference: stateReference(timestamp, "testing-e2e-case") });
+    insertCase.run(`${id}-train`, id, "training", trainDatasetId, "training-e2e-case", 0, "training-e2e question", "[]", "[]", toolCalls, usage, 1, 1, "passed", textEvaluation, timestamp, timestamp, timestamp, timestamp);
+    insertCase.run(`${id}-test`, id, "testing", testDatasetId, "testing-e2e-case", 0, "testing-e2e question", JSON.stringify(["appworld_execute"]), JSON.stringify(["appworld_execute"]), toolCalls, usage, testScore, Number(testScore > 0), testScore > 0 ? "passed" : "failed", learned ? stateEvaluation : textEvaluation, timestamp, timestamp, timestamp, timestamp);
     database.prepare("INSERT INTO training_variable_baselines (run_id, variable_name, value) VALUES (?, 'agent_identity', 'baseline')").run(id);
     database.prepare("INSERT INTO training_snapshots (id, run_id, variables_json, content_hash, created_at) VALUES (?, ?, ?, ?, ?)").run(snapshotId, id, JSON.stringify({ agent_identity: learned ? "baseline\nlearned verification" : "baseline" }), `${id}-hash`, timestamp);
     database.prepare("INSERT INTO training_events (run_id, type, payload_json, created_at) VALUES (?, 'run.status', ?, ?)").run(id, JSON.stringify({ to: "completed" }), timestamp);
@@ -131,6 +162,17 @@ test.beforeAll(async () => {
   try {
     seedRun(analysisBaselineId, "AppWorld E2E baseline", "2026-08-04T08:00:00.000Z", 0, false);
     seedRun(analysisCandidateId, "AppWorld E2E candidate", "2026-08-05T08:00:00.000Z", 1, true);
+    const timestamp = "2026-08-05T08:00:00.000Z";
+    const toolCalls = JSON.stringify([{ callId: `${analysisCandidateId}-tool`, name: "appworld_execute", status: "completed", arguments: { code: "print('state')", password: "must-not-reach-ui" }, resultPreview: `access_token=must-not-reach-ui result=${"x".repeat(800)}`, startedAt: timestamp, completedAt: timestamp, durationMs: 18 }]);
+    const usage = JSON.stringify({ inputTokens: 120, outputTokens: 30, totalTokens: 150, cacheReadTokens: 20 });
+    const textEvaluation = JSON.stringify({ source: "project", metrics: {}, reference: { kind: "text", status: "available", source: { type: "official_evaluator", benchmark: "fixture" }, displayValue: "Official E2E answer", value: "Official E2E answer", requirements: [], actualStateChanges: [], failureTraces: [], resolvedAt: timestamp } });
+    const stateEvaluation = JSON.stringify({ source: "project", metrics: { requirementCompletion: 100 }, reference: stateReference(timestamp) });
+    const failedEvaluation = JSON.stringify({ source: "project", metrics: {}, reference: { kind: "unavailable", status: "load_failed", source: { type: "official_evaluator", benchmark: "appworld" }, requirements: [], actualStateChanges: [], failureTraces: [], error: "fixture answer.json is malformed", resolvedAt: timestamp } });
+    for (let index = 1; index <= 13; index += 1) {
+      const evaluation = index === 1 ? textEvaluation : index === 3 ? failedEvaluation : stateEvaluation;
+      insertCase.run(`${analysisCandidateId}-test-${index}`, analysisCandidateId, "testing", testDatasetId, `testing-e2e-case-${index}`, index, `Testing E2E question ${index} with enough detail to identify the selected case in the result inspector.`, JSON.stringify(["appworld_execute"]), JSON.stringify(["appworld_execute"]), toolCalls, usage, 1, 1, "passed", evaluation, timestamp, timestamp, timestamp, timestamp);
+    }
+    database.prepare("UPDATE training_cases SET status = 'queued', score = NULL, passed = NULL, completed_at = NULL WHERE id = ?").run(`${analysisCandidateId}-test-2`);
   } finally {
     database.close();
   }
@@ -178,7 +220,7 @@ test("training workspace loads real datasets, Hooks, and enforced limits", async
   await expect(workspace.getByLabel("训练历史")).toHaveValue("");
   await expect(workspace.getByRole("option", { name: "新建训练" })).toBeAttached();
   await expect(workspace.getByRole("button", { name: "开始训练" })).toBeEnabled();
-  await expect(page.locator("#experiment-training-phase-training")).toContainText("0 / 10");
+  await expect(page.locator("#experiment-training-phase-training")).toContainText("0 / 1");
   await expect(page.locator("#experiment-training-phase-freeze")).toBeDisabled();
   await expect(page.locator("#experiment-training-phase-testing")).toBeDisabled();
   await expect(workspace.getByLabel("实验名称")).toHaveValue("training-e2e -> testing-e2e");
@@ -186,8 +228,10 @@ test("training workspace loads real datasets, Hooks, and enforced limits", async
   await expect(workspace.getByLabel("实验名称")).toHaveValue("AppWorld 纠错学习基线");
   await expect(workspace.getByLabel("训练分片")).toHaveValue(/.+/);
   await expect(workspace.getByLabel("测试分片")).toHaveValue(/.+/);
-  await expect(workspace.getByLabel("训练上限")).toHaveValue("10");
-  await expect(workspace.getByLabel("测试上限")).toHaveValue("5");
+  await expect(workspace.getByLabel("训练上限", { exact: true })).toHaveValue("1");
+  await expect(workspace.getByLabel("测试上限", { exact: true })).toHaveValue("1");
+  await expect(workspace.getByLabel("训练上限 全量")).toBeChecked();
+  await expect(workspace.getByLabel("测试上限 全量")).toBeChecked();
   const learningMode = workspace.getByRole("radiogroup", { name: "学习模式" });
   await expect(learningMode.getByRole("radio", { name: "人工审核" })).toBeChecked();
   await learningMode.getByRole("radio", { name: "人工编写" }).click();
@@ -202,7 +246,7 @@ test("training workspace loads real datasets, Hooks, and enforced limits", async
   await reviewScope.getByRole("radio", { name: "仅失败经验" }).click();
   await expect(workspace.getByLabel("失败时暂停，等待处理后继续")).toBeChecked();
   await workspace.getByRole("button", { name: "配置经验提取参数" }).click();
-  await expect(workspace.getByText("新颖度阈值", { exact: true })).toBeVisible();
+  await expect(workspace.getByText("该 Hook 没有可配置参数", { exact: true })).toBeVisible();
   await expect(workspace.getByLabel("经验提取 Hook")).toHaveValue("experience-extractor");
 
   await page.evaluate(() => {
@@ -212,6 +256,69 @@ test("training workspace loads real datasets, Hooks, and enforced limits", async
   await expect(page.locator("#app-experiments-tab")).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#experiment-training-tab")).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#experiment-training-workspace")).toBeVisible();
+  expect(pageErrors).toEqual([]);
+});
+
+test("training case results paginate and distinguish text, state, locked, and failed references", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.goto(`/?trainingRun=${analysisCandidateId}&trainingPhase=testing&trainingCase=${analysisCandidateId}-test-13`);
+  await page.locator("#app-experiments-tab").click();
+  await page.locator("#experiment-training-tab").click();
+  const workspace = page.locator("#experiment-training-workspace");
+  const inspector = page.locator("#testing-case-inspector");
+  await expect(workspace.getByLabel("训练历史")).toHaveValue(analysisCandidateId);
+  await expect(workspace.getByText("第 2 / 2 页", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("testing-e2e-case-13", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("Testing E2E question 13 with enough detail to identify the selected case in the result inspector.", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("正式得分: 1 / 1", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("要求完成度: 2 / 2", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("状态评估", { exact: true })).toBeVisible();
+  const expectedState = inspector.locator("details").filter({ hasText: "期望状态" }).first();
+  await expectedState.locator("summary").click();
+  await expect(expectedState.locator("pre")).toContainText('"receiver_ids"');
+  await expect(inspector.getByText("venmo.PaymentRequest", { exact: true })).toBeVisible();
+  await inspector.getByText("venmo.PaymentRequest", { exact: true }).click();
+  await expect(inspector.getByText("记录 #42", { exact: true })).toBeVisible();
+  await inspector.getByText("记录 #42", { exact: true }).click();
+  await expect(inspector.getByText("draft note", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("expected note", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("[REDACTED]", { exact: true })).toHaveCount(2);
+  const argumentsDetail = inspector.getByText("入参", { exact: true }).locator("..");
+  await argumentsDetail.getByText("入参", { exact: true }).click();
+  await expect(argumentsDetail).toContainText("[REDACTED]");
+  const resultDetail = inspector.getByText("结果", { exact: true }).locator("..");
+  await resultDetail.getByText("结果", { exact: true }).click();
+  await expect(resultDetail.locator("pre")).toContainText("xxxxxxxx");
+  expect(await inspector.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await expect(inspector).not.toContainText("must-not-reach-ui");
+
+  await workspace.getByRole("button", { name: "上一页" }).click();
+  await workspace.getByText("testing-e2e-case-3", { exact: true }).click();
+  await expect(inspector.getByText("官方参照读取失败", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("fixture answer.json is malformed", { exact: true })).toBeVisible();
+  await workspace.getByText("testing-e2e-case-1", { exact: true }).click();
+  await expect(inspector.getByText("Official E2E answer", { exact: true })).toBeVisible();
+  await workspace.getByText("testing-e2e-case-2", { exact: true }).click();
+  await expect(inspector.getByText("当前案例评分完成后显示正确答案。", { exact: true })).toBeVisible();
+  await workspace.getByText("testing-e2e-case-4", { exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator(".experiment-shell")).toHaveAttribute("data-navigation-collapsed", "true");
+  await inspector.scrollIntoViewIfNeeded();
+  await expect(inspector.getByText("状态评估", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  const mobileBounds = await inspector.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const ancestors = [];
+    let current: Element | null = element;
+    while (current && ancestors.length < 7) {
+      const currentBounds = current.getBoundingClientRect();
+      ancestors.push({ id: current.id, className: current.getAttribute("class") ?? "", width: currentBounds.width, minWidth: getComputedStyle(current).minWidth, columns: getComputedStyle(current).gridTemplateColumns });
+      current = current.parentElement;
+    }
+    return { left: bounds.left, right: bounds.right, width: bounds.width, viewport: window.innerWidth, mobile: matchMedia("(max-width: 767px)").matches, ancestors, withinViewport: bounds.left >= 0 && bounds.right <= window.innerWidth };
+  });
+  expect(mobileBounds.withinViewport, JSON.stringify(mobileBounds)).toBe(true);
   expect(pageErrors).toEqual([]);
 });
 

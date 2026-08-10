@@ -58,12 +58,66 @@ export interface ExperimentAdapterSnapshot {
   entry: string
   revision: string
   timeoutMs: number
-  phases: Array<'prepare' | 'evaluate' | 'cleanup' | 'aggregate'>
+  phases: Array<'prepare' | 'evaluate' | 'cleanup' | 'aggregate' | 'reference'>
 }
 
 export type ExperimentEvaluatorSnapshot =
   | { type: 'llm' }
   | ExperimentAdapterSnapshot
+
+export interface ExperimentReferenceRequirement {
+  ordinal: number
+  status: 'passed' | 'failed' | 'unknown'
+  description: string
+  label?: string
+  trace?: string
+}
+
+export interface ExperimentStateChange {
+  application: string
+  model: string
+  records: number
+  added: number
+  updated: number
+  removed: number
+  recordChanges?: ExperimentStateRecordChange[]
+  truncatedRecords?: number
+}
+
+export interface ExperimentStateFieldChange {
+  field: string
+  before?: JsonValue
+  after?: JsonValue
+}
+
+export interface ExperimentStateRecordChange {
+  recordId?: JsonValue
+  operation: 'added' | 'updated' | 'removed'
+  fields: ExperimentStateFieldChange[]
+  truncatedFields?: number
+}
+
+export interface ExperimentReference {
+  kind: 'text' | 'state' | 'unavailable'
+  status: 'available' | 'unavailable' | 'load_failed'
+  source: {
+    type: 'dataset' | 'official_evaluator'
+    benchmark?: string
+    taskId?: string
+    resolverRevision?: string
+    artifacts?: string[]
+  }
+  displayValue?: string
+  value?: JsonValue
+  requirements: ExperimentReferenceRequirement[]
+  expectedState?: JsonValue
+  actualStateChanges: ExperimentStateChange[]
+  stateChangesStatus?: 'complete' | 'summary_only' | 'unavailable'
+  stateChangesError?: string
+  failureTraces: string[]
+  error?: string
+  resolvedAt: string
+}
 
 export interface ExperimentAdapterEvaluation {
   score: number
@@ -71,6 +125,7 @@ export interface ExperimentAdapterEvaluation {
   rationale: string
   metrics: JsonObject
   details?: JsonValue
+  reference?: ExperimentReference
 }
 
 export interface ExperimentFailure {
@@ -196,6 +251,7 @@ export interface ExperimentCaseDetail extends ExperimentCaseSummary {
     source: 'llm' | 'project'
     metrics: JsonObject
     details?: JsonValue
+    reference?: ExperimentReference
   }
   toolCalls: ExperimentToolCall[]
   trace: ExperimentTrace | null

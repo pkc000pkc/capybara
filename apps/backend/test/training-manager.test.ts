@@ -31,7 +31,7 @@ export default defineHook({
     const before = variables.builtin.prompts.agent_identity;
     return { experiences: [{
       summary: "Persist a replayed rule",
-      rationale: "Integration test with " + training.case.toolCalls.length + " tool calls",
+      rationale: "Integration test with " + training.case.toolCalls.length + " tool calls and " + training.evaluation.reference.kind + " reference",
       patches: [{
         variableName: "agent_identity",
         unifiedDiff: [
@@ -158,15 +158,17 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     "let input = '';",
     'for await (const chunk of process.stdin) input += chunk;',
     'const request = JSON.parse(input);',
-    "process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { score: 1, passed: true, rationale: 'passed', metrics: {} } }));",
+    "process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { score: 1, passed: true, rationale: 'passed', metrics: {}, reference: { kind: 'text', status: 'available', source: { type: 'official_evaluator', benchmark: 'fixture' }, displayValue: 'done', value: 'done', requirements: [], actualStateChanges: [], failureTraces: [], resolvedAt: request.startedAt } } }));",
     '',
   ].join('\n'))
   const datasets = new DatasetStore(projectDir)
   const train = datasets.create({ name: 'train', storage: 'jsonl', path: 'datasets/train.jsonl', tags: ['train'], scoringPrompt: '' })
   const heldOut = datasets.create({ name: 'test', storage: 'jsonl', path: 'datasets/test.jsonl', tags: ['test'], scoringPrompt: '' })
+  const challenge = datasets.create({ name: 'challenge', storage: 'jsonl', path: 'datasets/challenge.jsonl', tags: ['test_challenge'], scoringPrompt: '' })
   datasets.createRecord(train.id, { question: 'training question', thinking: 'reference thinking', answer: '' })
   datasets.createRecord(train.id, { question: 'second training question', thinking: 'reference thinking', answer: '' })
   datasets.createRecord(heldOut.id, { question: 'held-out question', thinking: 'reference thinking', answer: '' })
+  datasets.createRecord(challenge.id, { question: 'challenge question', thinking: 'reference thinking', answer: '' })
   git(projectDir, 'init', '--initial-branch=main')
   git(projectDir, 'config', 'user.name', 'Capybara Test')
   git(projectDir, 'config', 'user.email', 'capybara@example.invalid')
@@ -199,9 +201,11 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     const trainedCases = training.cases(created.id)
     const trainingCase = trainedCases.find((item) => item.phase === 'training')
     const heldOutBeforeTest = trainedCases.find((item) => item.phase === 'testing')
-    assert.equal(trainingCase?.referenceAvailable, true)
-    assert.equal(trainingCase?.expectedAnswer, 'done')
-    assert.equal(heldOutBeforeTest?.referenceAvailable, false)
+    assert.equal(trainingCase?.reference.status, 'available')
+    assert.equal(trainingCase?.reference.kind, 'text')
+    assert.equal(trainingCase?.evaluation?.reference?.displayValue, 'done')
+    assert.equal(trainingCase?.expectedAnswer, '')
+    assert.equal(heldOutBeforeTest?.reference.status, 'locked')
     assert.equal(heldOutBeforeTest?.expectedAnswer, '')
     assert.deepEqual(heldOutBeforeTest?.expectedTools, [])
     const learnedVariable = training.variables(created.id).items.find((item) => item.name === 'agent_identity')
@@ -211,19 +215,53 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     assert.equal(learnedVariable?.changed, true)
     assert.equal(learnedVariable?.sourceCaseIds.length, 1)
     assert.equal(training.list().some((item) => item.id === created.id), true)
+    assert.match(training.experiences(created.id)[0]?.rationale ?? '', /text reference/)
 
     const snapshot = training.freeze(created.id)
     assert.match(snapshot.variables.agent_identity ?? '', /learned replay rule/)
-    assert.equal(training.cases(created.id).find((item) => item.phase === 'testing')?.referenceAvailable, false)
+    assert.equal(training.cases(created.id).find((item) => item.phase === 'testing')?.reference.status, 'locked')
+    const repeatedEvaluation = training.createSnapshotEvaluation(created.id, {
+      name: 'Repeat held-out from frozen snapshot',
+      testDatasetId: heldOut.id,
+      testLimit: 1,
+    })
+    assert.equal(repeatedEvaluation.status, 'ready_for_test')
+    assert.equal(repeatedEvaluation.snapshotId, snapshot.id)
+    assert.equal(repeatedEvaluation.config.testDatasetId, heldOut.id)
+    assert.equal(repeatedEvaluation.config.snapshotSourceRunId, created.id)
     training.startTest(created.id)
     const completed = await waitFor(training, created.id, ['completed', 'failed'])
     assert.equal(completed.status, 'completed', completed.failure?.message ?? 'held-out test did not complete')
     assert.deepEqual(completed.progress.testing, { total: 1, completed: 1 })
     const heldOutAfterTest = training.cases(created.id).find((item) => item.phase === 'testing')
-    assert.equal(heldOutAfterTest?.referenceAvailable, true)
-    assert.equal(heldOutAfterTest?.expectedAnswer, 'done')
+    assert.equal(heldOutAfterTest?.reference.status, 'available')
+    assert.equal(heldOutAfterTest?.reference.kind, 'text')
+    assert.equal(heldOutAfterTest?.expectedAnswer, '')
     assert.match(training.variables(created.id).items.find((item) => item.name === 'agent_identity')?.snapshotValue ?? '', /learned replay rule/)
     assert.equal(resources.readSystemVariables().variables.find((item) => item.key === 'agent_identity')?.value, initialAgentIdentity)
+    const snapshotEvaluation = training.createSnapshotEvaluation(created.id, {
+      name: 'Challenge from frozen snapshot',
+      testDatasetId: challenge.id,
+      testLimit: 1,
+    })
+    assert.equal(snapshotEvaluation.status, 'ready_for_test')
+    assert.equal(snapshotEvaluation.snapshotId, snapshot.id)
+    assert.equal(snapshotEvaluation.config.evaluationOnly, true)
+    assert.equal(snapshotEvaluation.config.snapshotSourceRunId, created.id)
+    assert.deepEqual(snapshotEvaluation.progress.training, { total: 0, completed: 0 })
+    assert.deepEqual(snapshotEvaluation.progress.testing, { total: 1, completed: 0 })
+    assert.deepEqual(training.store.getSnapshot(snapshotEvaluation.id), snapshot)
+    training.startTest(snapshotEvaluation.id)
+    const evaluatedSnapshot = await waitFor(training, snapshotEvaluation.id, ['completed', 'failed'])
+    assert.equal(evaluatedSnapshot.status, 'completed', evaluatedSnapshot.failure?.message ?? 'snapshot evaluation did not complete')
+    assert.ok(evaluatedSnapshot.startedAt)
+    assert.equal(evaluatedSnapshot.snapshotId, snapshot.id)
+    assert.deepEqual(evaluatedSnapshot.progress.testing, { total: 1, completed: 1 })
+    training.startTest(repeatedEvaluation.id)
+    const repeatedSnapshot = await waitFor(training, repeatedEvaluation.id, ['completed', 'failed'])
+    assert.equal(repeatedSnapshot.status, 'completed', repeatedSnapshot.failure?.message ?? 'repeated snapshot evaluation did not complete')
+    assert.equal(repeatedSnapshot.snapshotId, snapshot.id)
+    await assert.rejects(() => training.promote(snapshotEvaluation.id), /evaluation-only runs cannot promote/)
     const promoted = await training.promote(created.id)
     assert.match(promoted.variables.agent_identity ?? '', /learned replay rule/)
     assert.match(resources.readSystemVariables().variables.find((item) => item.key === 'agent_identity')?.value ?? '', /learned replay rule/)
@@ -287,6 +325,101 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     assert.equal(pendingComparison.cases.find((item) => item.sampleId === heldOutAfterTest?.sampleId)?.status, 'pending')
     const diff = createTrainingVariableDiff('agent_identity', 'before', 'after')
     assert.equal(applyUnifiedDiff('before', diff), 'after')
+  } finally {
+    await training.close()
+    await experiments.close()
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  }
+})
+
+test('historical references hydrate without changing scores and release per completed case', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-training-reference-'))
+  initializeProjectDirectory(projectDir)
+  fs.mkdirSync(path.join(projectDir, '.capybara', 'hooks'), { recursive: true })
+  fs.writeFileSync(path.join(projectDir, '.capybara', 'hooks', 'empty-extractor.ts'), EMPTY_EXPERIENCE_HOOK)
+  fs.mkdirSync(path.join(projectDir, 'experiments'), { recursive: true })
+  fs.writeFileSync(path.join(projectDir, '.capybara', 'experiment-adapter.json'), `${JSON.stringify({
+    version: 1,
+    runner: { type: 'stdio', entry: 'experiments/reference-adapter.mjs' },
+    phases: ['evaluate', 'reference'],
+  }, null, 2)}\n`)
+  fs.writeFileSync(path.join(projectDir, 'experiments', 'reference-adapter.mjs'), [
+    "let input = '';",
+    'for await (const chunk of process.stdin) input += chunk;',
+    'const request = JSON.parse(input);',
+    "const reference = { kind: 'state', status: 'available', source: { type: 'official_evaluator', benchmark: 'fixture', resolverRevision: process.env.CAPYBARA_EXPERIMENT_ADAPTER_REVISION }, requirements: [{ ordinal: 0, status: 'failed', description: 'expected state transition' }], expectedState: { expected: true }, actualStateChanges: [{ application: 'fixture', model: 'Record', records: 1, added: 0, updated: 1, removed: 0, recordChanges: [{ recordId: 9, operation: 'updated', fields: [{ field: 'value', before: false, after: true }] }] }], stateChangesStatus: 'complete', failureTraces: ['expected true, received false'], resolvedAt: request.startedAt };",
+    "const result = request.phase === 'reference' ? { items: request.payload.cases.map((item) => ({ id: item.id, reference })) } : { score: 0, passed: false, rationale: 'official failure', metrics: { passedRequirements: 0, failedRequirements: 1 }, details: { legacy: true } };",
+    'process.stdout.write(JSON.stringify({ id: request.id, ok: true, result }));',
+    '',
+  ].join('\n'))
+  const datasets = new DatasetStore(projectDir)
+  const train = datasets.create({ name: 'train', storage: 'jsonl', path: 'datasets/train.jsonl', tags: ['train'], scoringPrompt: '' })
+  const heldOut = datasets.create({ name: 'test', storage: 'jsonl', path: 'datasets/test.jsonl', tags: ['test'], scoringPrompt: '' })
+  datasets.createRecord(train.id, { question: 'historical training question', thinking: '', answer: '' })
+  datasets.createRecord(heldOut.id, { question: 'held-out one', thinking: '', answer: '' })
+  datasets.createRecord(heldOut.id, { question: 'held-out two', thinking: '', answer: '' })
+  git(projectDir, 'init', '--initial-branch=main')
+  git(projectDir, 'config', 'user.name', 'Capybara Test')
+  git(projectDir, 'config', 'user.email', 'capybara@example.invalid')
+  git(projectDir, 'add', '.')
+  git(projectDir, 'commit', '-m', 'fixture')
+  const experiments = new ExperimentManager(projectDir, { llm: llm(), runtimeLoop: { stepDelayMs: 0, streamDelayMs: 0 } })
+  const training = new TrainingManager(projectDir, experiments)
+  try {
+    const run = training.create({
+      trainDatasetId: train.id,
+      testDatasetId: heldOut.id,
+      trainLimit: 1,
+      testLimit: 2,
+      learningMode: 'auto',
+      reviewScope: 'failed',
+      pauseOnFailure: false,
+      experienceExtractorHook: { hookId: 'empty-extractor', parameters: {} },
+      timeoutMs: 10_000,
+    })
+    const ready = await waitFor(training, run.id, ['ready_to_freeze', 'failed'])
+    assert.equal(ready.status, 'ready_to_freeze', ready.failure?.message ?? 'training did not finish')
+    const before = training.cases(run.id).find((item) => item.phase === 'training')
+    assert.equal(before?.score, 0)
+    assert.equal(before?.reference.status, 'unavailable')
+    await training.hydrateReferences(run.id)
+    const hydrated = training.cases(run.id).find((item) => item.phase === 'training')
+    assert.equal(hydrated?.score, 0)
+    assert.equal(hydrated?.evaluation?.metrics.failedRequirements, 1)
+    assert.ok(hydrated && hydrated.reference.status !== 'locked')
+    assert.equal(hydrated.reference.kind, 'state')
+    assert.deepEqual(hydrated.reference.expectedState, { expected: true })
+    assert.deepEqual(hydrated.reference.actualStateChanges[0]?.recordChanges?.[0]?.fields[0], {
+      field: 'value', before: false, after: true,
+    })
+
+    const heldOutCases = training.store.listCases(run.id, 'testing')
+    const completedCase = heldOutCases[0]
+    const lockedCase = heldOutCases[1]
+    assert.ok(completedCase && lockedCase)
+    training.store.recordEvaluation(completedCase.id, {
+      experimentCaseId: 'manual-evaluated-case',
+      actualAnswer: 'done',
+      actualTools: [],
+      toolCalls: [],
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0 },
+      score: 1,
+      passed: true,
+      rationale: 'passed',
+      evaluation: {
+        source: 'project',
+        metrics: {},
+        reference: {
+          kind: 'text', status: 'available', source: { type: 'official_evaluator' },
+          displayValue: 'official', value: 'official', requirements: [], actualStateChanges: [],
+          failureTraces: [], resolvedAt: new Date().toISOString(),
+        },
+      },
+    })
+    training.store.setCaseStatus(completedCase.id, 'completed')
+    const testingViews = training.cases(run.id).filter((item) => item.phase === 'testing')
+    assert.equal(testingViews.find((item) => item.id === completedCase.id)?.reference.status, 'available')
+    assert.equal(testingViews.find((item) => item.id === lockedCase.id)?.reference.status, 'locked')
   } finally {
     await training.close()
     await experiments.close()

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "runner": {
+    "type": "stdio",
+    "entry": "experiments/appworld-adapter.mjs",
+    "files": [
+      "scripts/extract_state_diff.py"
+    ]
+  },
+  "timeout_ms": 600000,
+  "phases": [
+    "prepare",
+    "evaluate",
+    "cleanup",
+    "aggregate",
+    "reference"
+  ],
+  "benchmark": {
+    "name": "appworld",
+    "distribution": "pypi:appworld==0.1.3.post1",
+    "package_version": "0.1.3.post1",
+    "data_version": "0.1.0",
+    "documentation_audit_revision": "a072b7a"
+  }
+}

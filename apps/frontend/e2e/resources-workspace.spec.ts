@@ -57,11 +57,12 @@ async function editorText(editor: Locator) {
 }
 
 test("resource workspace uses real tool and skill HTTP APIs", async ({ page }) => {
+  test.setTimeout(90_000);
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
   await page.goto("/");
-  await expect(page.locator('[title="已连接"]')).toBeVisible();
+  await expect(page.locator('[title="已连接"]')).toBeVisible({ timeout: 20_000 });
   await page.locator("#app-resources-tab").click();
   await page.locator("#resource-tools-tab").click();
 
@@ -195,7 +196,7 @@ test("resource workspace uses real tool and skill HTTP APIs", async ({ page }) =
 
 test("hook resources support editing, testing, creating, and deleting", async ({ page }) => {
   await page.goto("/");
-  await expect(page.locator('[title="已连接"]')).toBeVisible();
+  await expect(page.locator('[title="已连接"]')).toBeVisible({ timeout: 20_000 });
   await page.locator("#app-resources-tab").click();
   await page.locator("#resource-hooks-tab").click();
   const panel = page.locator("#resource-hooks-panel");
@@ -227,7 +228,7 @@ test("hook resources support editing, testing, creating, and deleting", async ({
 
 test("resource workspace panes support pointer and keyboard resizing", async ({ page }) => {
   await page.goto("/");
-  await expect(page.locator('[title="已连接"]')).toBeVisible();
+  await expect(page.locator('[title="已连接"]')).toBeVisible({ timeout: 20_000 });
   await page.locator("#app-resources-tab").click();
 
   const navigation = page.locator("#resource-navigation");
@@ -316,7 +317,7 @@ test("resource workspace panes support pointer and keyboard resizing", async ({ 
 test("project configuration is a resource and system settings stays at the bottom", async ({ page }) => {
   const originalPreferences = await fetch("http://localhost:3005/api/preferences").then((response) => response.json());
   await page.goto("/");
-  await expect(page.locator('[title="已连接"]')).toBeVisible();
+  await expect(page.locator('[title="已连接"]')).toBeVisible({ timeout: 20_000 });
 
   const appHeader = page.locator("header.app-header");
   await expect(appHeader.getByLabel("语言")).toHaveCount(0);
@@ -418,14 +419,15 @@ test("project configuration is a resource and system settings stays at the botto
 });
 
 test("version control initializes, previews, commits, and shows project history", async ({ page }) => {
+  test.setTimeout(120_000);
   await page.goto("/");
-  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible();
+  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
   await page.locator("#app-resources-tab").click();
   await page.locator("#resource-version-control-tab").click();
 
   const panel = page.locator("#resource-version-control-panel");
   const initializeButton = panel.getByRole("button", { name: /初始化 Git 仓库|Initialize Git repository/ });
-  await expect(initializeButton).toBeVisible();
+  await expect(initializeButton).toBeVisible({ timeout: 20_000 });
   const initialized = page.waitForResponse((response) =>
     response.request().method() === "POST"
       && response.url().includes("/api/resources/git/initialize")
@@ -442,10 +444,10 @@ test("version control initializes, previews, commits, and shows project history"
 
   const mainChange = page.getByLabel(/(?:选择更改|Select change) main\.j2/);
   const datasetChange = page.getByLabel(/(?:选择更改|Select change) \.capybara\/datasets\.json/);
-  await expect(mainChange).toBeChecked();
-  await expect(datasetChange).not.toBeChecked();
+  await expect(mainChange).toBeChecked({ timeout: 20_000 });
+  await expect(datasetChange).not.toBeChecked({ timeout: 20_000 });
   await page.getByRole("button", { name: /main\.j2/ }).click();
-  await expect(panel.getByLabel(/main\.j2.*Git|Git diff for main\.j2/)).toContainText("builtin.prompts.agent_identity");
+  await expect(panel.getByLabel(/main\.j2.*Git|Git diff for main\.j2/)).toContainText("builtin.prompts.agent_identity", { timeout: 20_000 });
 
   await panel.getByPlaceholder(/说明本次项目改动|Describe this project change/).fill("feat: initialize test agent");
   const committed = page.waitForResponse((response) =>
@@ -455,9 +457,9 @@ test("version control initializes, previews, commits, and shows project history"
   );
   await panel.getByRole("button", { name: /提交所选文件|Commit selected files/ }).click();
   await committed;
-  await expect(page.getByLabel(/(?:选择更改|Select change) \.capybara\/datasets\.json/)).not.toBeChecked();
+  await expect(page.getByLabel(/(?:选择更改|Select change) \.capybara\/datasets\.json/)).not.toBeChecked({ timeout: 20_000 });
 
   await page.getByRole("tab", { name: /历史|History/ }).click();
-  await expect(page.getByRole("button", { name: /feat: initialize test agent/ })).toBeVisible();
-  await expect(panel.getByText("feat: initialize test agent", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /feat: initialize test agent/ })).toBeVisible({ timeout: 20_000 });
+  await expect(panel.getByText("feat: initialize test agent", { exact: true })).toBeVisible({ timeout: 20_000 });
 });

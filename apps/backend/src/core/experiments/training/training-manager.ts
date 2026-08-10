@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
 
 import { DatasetStore, type DatasetRecord } from '#core/datasets/dataset-store'
+import { ExperimentAdapterRunner } from '#core/experiments/experiment-adapter'
 import { ExperimentManager } from '#core/experiments/experiment-manager'
-import type { ExperimentCaseDetail, ExperimentFailure } from '#core/experiments/types'
+import { redactReferenceForPresentation, redactToolCallsForPresentation } from '#core/experiments/presentation'
+import type { ExperimentCaseDetail, ExperimentFailure, ExperimentReference } from '#core/experiments/types'
 import { LearningHookRunner } from '#core/experiments/training/learning-hook-runner'
 import {
   aggregateTrainingCases,
@@ -15,6 +17,7 @@ import { TrainingStore } from '#core/experiments/training/training-store'
 import {
   MAX_TEST_CASES,
   MAX_TRAINING_CASES,
+  type CreateSnapshotEvaluationInput,
   type CreateTrainingInput,
   type ExperienceCandidate,
   type TestSnapshot,
@@ -38,6 +41,7 @@ import {
 import type { HookExperienceCandidate, HookTrainingContext } from '#core/hooks/types'
 import { HookRegistry } from '#core/hooks/hook-registry'
 import { ProjectResources } from '#core/project-resources'
+import type { JsonObject } from '#protocol/runtime-protocol'
 
 const DEFAULT_TIMEOUT_MS = 15 * 60_000
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'testing'])
@@ -80,6 +84,51 @@ function failure(error: unknown, code = 'TRAINING_FAILED'): ExperimentFailure {
   return { code, message: error instanceof Error ? error.message : String(error) }
 }
 
+function referenceForCase(item: TrainingCase, released: boolean): TrainingCaseView['reference'] {
+  if (!released) return { status: 'locked' }
+  if (item.evaluation?.reference) return item.evaluation.reference
+  const expected = item.expectedAnswer.trim()
+  if (expected) {
+    return {
+      kind: 'text',
+      status: 'available',
+      source: { type: 'dataset' },
+      displayValue: expected,
+      value: expected,
+      requirements: [],
+      actualStateChanges: [],
+      failureTraces: [],
+      resolvedAt: item.completedAt ?? item.updatedAt,
+    }
+  }
+  return {
+    kind: 'unavailable',
+    status: 'unavailable',
+    source: { type: item.evaluation?.source === 'project' ? 'official_evaluator' : 'dataset' },
+    requirements: [],
+    actualStateChanges: [],
+    failureTraces: [],
+    resolvedAt: item.completedAt ?? item.updatedAt,
+  }
+}
+
+function failedReference(item: TrainingCase, revision: string, error: unknown): ExperimentReference {
+  void item
+  return {
+    kind: 'unavailable',
+    status: 'load_failed',
+    source: {
+      type: 'official_evaluator',
+      resolverRevision: revision,
+    },
+    requirements: [],
+    actualStateChanges: [],
+    failureTraces: [],
+    error: error instanceof Error ? error.message : String(error),
+    resolvedAt: new Date().toISOString(),
+  }
+}
+
 export class TrainingManager {
   readonly store: TrainingStore
   private readonly datasets: DatasetStore
@@ -87,6 +136,7 @@ export class TrainingManager {
   private readonly snapshots: SnapshotService
   private readonly active = new Map<string, Promise<void>>()
   private readonly activeChildren = new Map<string, string>()
+  private readonly referenceHydrations = new Map<string, Promise<void>>()
   private stopped = false
 
   constructor(
@@ -176,6 +226,53 @@ export class TrainingManager {
     return run
   }
 
+  createSnapshotEvaluation(sourceRunId: string, input: CreateSnapshotEvaluationInput): TrainingRun {
+    const sourceRun = this.store.getRun(requiredString(sourceRunId, 'sourceRunId'))
+    if (['queued', 'running', 'testing'].includes(sourceRun.status)) {
+      throw new Error('pause the active source run before reusing its frozen snapshot')
+    }
+    const snapshot = this.store.getSnapshot(sourceRun.id)
+    if (!snapshot) throw new Error('source training run does not have a frozen snapshot')
+    const testDatasetId = requiredString(input.testDatasetId, 'testDatasetId')
+    const testDataset = this.datasets.get(testDatasetId)
+    const testLimit = boundedInteger(input.testLimit, MAX_TEST_CASES, MAX_TEST_CASES, 'testLimit')
+    const limited = Math.min(testLimit, testDataset.samples)
+    if (limited === 0) throw new Error('testing dataset must not be empty')
+    const createdAt = new Date().toISOString()
+    const id = randomUUID()
+    const config: TrainingConfig = {
+      ...sourceRun.config,
+      testDatasetId,
+      trainLimit: 0,
+      testLimit: limited,
+      variableSource: 'run',
+      variableSourceRunId: sourceRun.id,
+      evaluationOnly: true,
+      snapshotSourceRunId: sourceRun.id,
+      concurrency: 1,
+    }
+    const cases = this.records(testDatasetId, limited).map((record, ordinal) =>
+      this.trainingCase(id, 'testing', testDatasetId, record, ordinal, createdAt))
+    const run = this.store.createRun({
+      id,
+      name: typeof input.name === 'string' && input.name.trim()
+        ? input.name.trim()
+        : `${sourceRun.name} -> ${testDataset.name}`,
+      status: 'ready_for_test',
+      config,
+      snapshotId: snapshot.id,
+      createdAt,
+      updatedAt: createdAt,
+    }, cases, snapshot.variables)
+    this.store.recordEvent(id, 'snapshot.reused', {
+      sourceRunId: sourceRun.id,
+      snapshotId: snapshot.id,
+      contentHash: snapshot.contentHash,
+      testDatasetId,
+    })
+    return run
+  }
+
   list(limit?: number): TrainingRun[] {
     return this.store.listRuns(limit)
   }
@@ -185,21 +282,30 @@ export class TrainingManager {
   }
 
   cases(id: string): TrainingCaseView[] {
-    const run = this.store.getRun(id)
-    const testingReferencesAvailable = ['completed', 'failed', 'cancelled'].includes(run.status)
+    this.store.getRun(id)
     return this.store.listCases(id).map((item) => {
-      const referenceAvailable = item.phase === 'training'
+      const released = item.phase === 'training'
         ? !['queued', 'running'].includes(item.status)
-        : testingReferencesAvailable
+        : ['completed', 'error'].includes(item.status)
       return {
         ...item,
-        expectedAnswer: referenceAvailable
-          ? item.expectedAnswer.trim() || (item.passed ? item.actualAnswer : '')
-          : '',
-        expectedTools: referenceAvailable ? item.expectedTools : [],
-        referenceAvailable,
+        toolCalls: redactToolCallsForPresentation(item.toolCalls),
+        expectedAnswer: released ? item.expectedAnswer : '',
+        expectedTools: released ? item.expectedTools : [],
+        reference: (() => {
+          const reference = referenceForCase(item, released)
+          return reference.status === 'locked' ? reference : redactReferenceForPresentation(reference)
+        })(),
       }
     })
+  }
+
+  async hydrateReferences(id: string): Promise<void> {
+    const current = this.referenceHydrations.get(id)
+    if (current) return current
+    const task = this.hydrateMissingReferences(id).finally(() => this.referenceHydrations.delete(id))
+    this.referenceHydrations.set(id, task)
+    return task
   }
 
   experiences(id: string): ExperienceCandidate[] {
@@ -453,6 +559,7 @@ export class TrainingManager {
 
   async promote(id: string): Promise<{ variables: Record<string, string>; contentHash: string }> {
     const run = this.store.getRun(id)
+    if (run.config.evaluationOnly) throw new Error('evaluation-only runs cannot promote variables')
     if (!['ready_to_freeze', 'ready_for_test', 'completed'].includes(run.status)) {
       throw new Error('training must finish before promoting variables')
     }
@@ -649,6 +756,7 @@ export class TrainingManager {
           ...(detail.score === undefined ? {} : { score: detail.score }),
           ...(detail.passed === undefined ? {} : { passed: detail.passed }),
           ...(detail.rationale ? { rationale: detail.rationale } : {}),
+          ...(detail.evaluation ? { evaluation: detail.evaluation } : {}),
           ...(detail.failure ? { failure: detail.failure } : {}),
         })
       }
@@ -826,6 +934,10 @@ export class TrainingManager {
         passed: item.passed === true,
         score: item.score ?? 0,
         rationale: item.rationale ?? item.failure?.message ?? '',
+        ...(item.evaluation?.source ? { source: item.evaluation.source } : {}),
+        metrics: item.evaluation?.metrics ?? {},
+        ...(item.evaluation?.details === undefined ? {} : { details: item.evaluation.details }),
+        ...(item.evaluation?.reference === undefined ? {} : { reference: item.evaluation.reference }),
       },
       ...(candidate ? { candidate } : {}),
     }
@@ -862,8 +974,66 @@ export class TrainingManager {
     }
   }
 
+  private async hydrateMissingReferences(id: string): Promise<void> {
+    this.store.getRun(id)
+    const adapter = ExperimentAdapterRunner.load(this.projectDir)
+    if (!adapter?.supports('reference')) return
+    const unresolved = this.store.listCases(id).flatMap((item) => {
+      if (!item.experimentRunId || !item.experimentCaseId || ['queued', 'running'].includes(item.status)) return []
+      let detail: ExperimentCaseDetail
+      try {
+        detail = this.experiments.case(item.experimentRunId, item.experimentCaseId)
+      } catch {
+        return []
+      }
+      if (detail.evaluation?.reference?.source.resolverRevision === adapter.revision) {
+        this.store.updateCaseEvaluation(item.id, detail.evaluation)
+        return []
+      }
+      if (detail.evaluation?.source !== 'project') return []
+      return [{ item, detail }]
+    })
+    for (let offset = 0; offset < unresolved.length; offset += 25) {
+      const batch = unresolved.slice(offset, offset + 25)
+      let references = new Map<string, ExperimentReference>()
+      try {
+        const resolved = await adapter.references({
+          run: { id },
+          cases: batch.map(({ item, detail }) => ({
+            id: item.id,
+            experimentRunId: item.experimentRunId,
+            experimentCaseId: item.experimentCaseId,
+            sampleId: item.sampleId,
+            metadata: detail.metadata,
+            evaluation: detail.evaluation ?? null,
+            completedAt: item.completedAt ?? null,
+          })),
+        } as JsonObject)
+        references = new Map(resolved.map((entry) => [entry.id, entry.reference]))
+      } catch (error) {
+        references = new Map(batch.map(({ item }) => [item.id, failedReference(item, adapter.revision, error)]))
+      }
+      for (const { item, detail } of batch) {
+        const reference = references.get(item.id)
+          ?? failedReference(item, adapter.revision, 'reference adapter did not return this case')
+        const evaluation = { ...(detail.evaluation ?? { source: 'project' as const, metrics: {} }), reference }
+        this.experiments.updateCaseEvaluation(item.experimentRunId ?? '', item.experimentCaseId ?? '', evaluation)
+        this.store.updateCaseEvaluation(item.id, evaluation)
+      }
+    }
+  }
+
   private records(datasetId: string, limit: number): DatasetRecord[] {
-    return this.datasets.listRecords(datasetId, { offset: 0, limit }).items
+    const records: DatasetRecord[] = []
+    while (records.length < limit) {
+      const page = this.datasets.listRecords(datasetId, {
+        offset: records.length,
+        limit: Math.min(200, limit - records.length),
+      })
+      records.push(...page.items)
+      if (page.items.length === 0 || records.length >= page.total) break
+    }
+    return records.slice(0, limit)
   }
 
   private assertHook(value: TrainingHookBinding, checkpoint: 'after_evaluation'): TrainingHookBinding {

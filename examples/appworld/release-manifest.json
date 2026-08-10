@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "releaseTag": "appworld-official-2026-08-08",
+  "method": "kecaipan capybara",
+  "model": "gpt-5.6-luna",
+  "protocol": "responses",
+  "appworld": {
+    "packageVersion": "0.1.3.post1",
+    "dataVersion": "0.1.0",
+    "pythonVersion": "3.11"
+  },
+  "training": {
+    "runId": "95499983-44ab-4668-aa2e-85a6dcb832e3",
+    "cases": 90,
+    "passed": 77,
+    "candidates": 90,
+    "appliedCandidates": 78,
+    "rejectedCandidates": 12
+  },
+  "snapshot": {
+    "id": "8b079f77-a53d-4c97-b604-cbcc4f8e908f",
+    "contentHash": "e3cf569d95da883386afdecec73bfc1af9e326b561157f4db711fb519afb0d22",
+    "originalProjectCommit": "7eb5cc03204bb84954f4ba5d48bbee5d9da71a3f",
+    "originalProjectTree": "6185c08f7a60cb0122199d8ab9e85686934e3773",
+    "adapterRevision": "ada6059a459c0495d245164990afac52daaa98e4daaf8137fb94f866b2a43d22"
+  },
+  "publishedVariables": {
+    "execution_policy": "92ce36d8b820db22f291ce750773a38b8fdac75e5002376af201928556cee1b5",
+    "appworld_run_experience": "35bba3d878f371fc6d1f7c71b51c5d49c90d90f7a362da6abc697b8e52ab612b",
+    "appworld_project_experience": "c75867f0d7e61416128325063daf6ba127f2e682f3c9bdd1e83d11baec43b802"
+  },
+  "evaluation": {
+    "test_normal": {
+      "runId": "a5981169-0fb9-4afa-be59-a56c640ad9a2",
+      "tasks": 168,
+      "passed": 143,
+      "taskGoalCompletion": 85.1,
+      "scenarioGoalCompletion": 73.2,
+      "interactions": 9.34
+    },
+    "test_challenge": {
+      "runId": "8d8bc3d8-a0d5-4dd3-9497-1d134ba0f9e7",
+      "tasks": 417,
+      "passed": 306,
+      "taskGoalCompletion": 73.4,
+      "scenarioGoalCompletion": 52.5,
+      "interactions": 11.17
+    }
+  },
+  "officialSubmission": {
+    "pullRequest": "https://github.com/StonyBrookNLP/appworld-leaderboard/pull/15",
+    "workflowRun": "https://github.com/StonyBrookNLP/appworld-leaderboard/actions/runs/31241103997",
+    "experimentPrefix": "kecaipan_capybara_gpt56luna_20260808",
+    "normalBundleSha256": "8e97de871ccf041c7614c59028c9cf1bb62d83af018546553d9617027f76c3e5",
+    "challengeBundleSha256": "4d3e7e7babbc935a29213e7beccc6a2550d201de60bc86911dab5334b586b2de"
+  },
+  "publicBoundary": {
+    "caseEvidencePublished": false,
+    "datasetsPublished": false,
+    "groundTruthPublished": false,
+    "experimentArtifactsPublished": false,
+    "credentialsPublished": false
+  }
+}

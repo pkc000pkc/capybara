@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "appworld-dev-d1-tasks-1",
+      "name": "AppWorld dev task smoke",
+      "storage": "huggingface",
+      "path": "datasets/appworld-dev-d1-tasks-1",
+      "version": 1,
+      "tags": [
+        "appworld",
+        "dev",
+        "state-evaluated",
+        "smoke-only"
+      ],
+      "scoringPrompt": "",
+      "createdAt": "2026-07-30T13:40:19.737908Z",
+      "updatedAt": "2026-07-30T13:40:19.737908Z"
+    },
+    {
+      "id": "appworld-dev-d1-scenarios-1",
+      "name": "AppWorld dev complete scenarios",
+      "storage": "huggingface",
+      "path": "datasets/appworld-dev-d1-scenarios-1",
+      "version": 1,
+      "tags": [
+        "appworld",
+        "dev",
+        "state-evaluated",
+        "scenario-complete"
+      ],
+      "scoringPrompt": "",
+      "createdAt": "2026-07-30T13:41:53.860522Z",
+      "updatedAt": "2026-07-30T13:41:53.860522Z"
+    },
+    {
+      "id": "appworld-train-all-scenarios",
+      "name": "AppWorld train complete scenarios all",
+      "storage": "huggingface",
+      "path": "datasets/appworld-train-all-scenarios",
+      "version": 1,
+      "tags": [
+        "appworld",
+        "train",
+        "training-context",
+        "state-evaluated",
+        "scenario-complete"
+      ],
+      "scoringPrompt": "",
+      "createdAt": "2026-07-31T01:35:17.953205Z",
+      "updatedAt": "2026-07-31T01:35:17.953205Z"
+    },
+    {
+      "id": "appworld-test-normal-all-scenarios",
+      "name": "AppWorld test-normal complete scenarios all",
+      "storage": "huggingface",
+      "path": "datasets/appworld-test-normal-all-scenarios",
+      "version": 1,
+      "tags": [
+        "appworld",
+        "test_normal",
+        "closed-book-eval",
+        "state-evaluated",
+        "scenario-complete"
+      ],
+      "scoringPrompt": "",
+      "createdAt": "2026-07-31T01:35:24.848979Z",
+      "updatedAt": "2026-07-31T01:35:24.848979Z"
+    },
+    {
+      "id": "appworld-test-challenge-all-scenarios",
+      "name": "AppWorld test-challenge complete scenarios all",
+      "storage": "huggingface",
+      "path": "datasets/appworld-test-challenge-all-scenarios",
+      "version": 1,
+      "tags": [
+        "appworld",
+        "test_challenge",
+        "closed-book-eval",
+        "state-evaluated",
+        "scenario-complete"
+      ],
+      "scoringPrompt": "",
+      "createdAt": "2026-07-31T01:35:37.071518Z",
+      "updatedAt": "2026-07-31T01:35:37.071518Z"
+    }
+  ]
+}

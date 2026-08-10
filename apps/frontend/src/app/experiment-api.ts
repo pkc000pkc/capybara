@@ -10,7 +10,7 @@ export type ExperimentEvaluator =
       entry: string;
       revision: string;
       timeoutMs: number;
-      phases: Array<"prepare" | "evaluate" | "cleanup" | "aggregate">;
+      phases: Array<"prepare" | "evaluate" | "cleanup" | "aggregate" | "reference">;
     };
 
 export type ExperimentUsage = {
@@ -127,6 +127,60 @@ export type ExperimentToolCall = {
   durationMs?: number;
 };
 
+export type ExperimentReferenceRequirement = {
+  ordinal: number;
+  status: "passed" | "failed" | "unknown";
+  description: string;
+  label?: string;
+  trace?: string;
+};
+
+export type ExperimentStateChange = {
+  application: string;
+  model: string;
+  records: number;
+  added: number;
+  updated: number;
+  removed: number;
+  recordChanges?: ExperimentStateRecordChange[];
+  truncatedRecords?: number;
+};
+
+export type ExperimentStateFieldChange = {
+  field: string;
+  before?: unknown;
+  after?: unknown;
+};
+
+export type ExperimentStateRecordChange = {
+  recordId?: unknown;
+  operation: "added" | "updated" | "removed";
+  fields: ExperimentStateFieldChange[];
+  truncatedFields?: number;
+};
+
+export type ExperimentReference = {
+  kind: "text" | "state" | "unavailable";
+  status: "available" | "unavailable" | "load_failed";
+  source: {
+    type: "dataset" | "official_evaluator";
+    benchmark?: string;
+    taskId?: string;
+    resolverRevision?: string;
+    artifacts?: string[];
+  };
+  displayValue?: string;
+  value?: unknown;
+  requirements: ExperimentReferenceRequirement[];
+  expectedState?: unknown;
+  actualStateChanges: ExperimentStateChange[];
+  stateChangesStatus?: "complete" | "summary_only" | "unavailable";
+  stateChangesError?: string;
+  failureTraces: string[];
+  error?: string;
+  resolvedAt: string;
+};
+
 export type ExperimentCaseDetail = ExperimentCase & {
   question: string;
   thinking: string;
@@ -137,6 +191,7 @@ export type ExperimentCaseDetail = ExperimentCase & {
     source: "llm" | "project";
     metrics: Record<string, unknown>;
     details?: unknown;
+    reference?: ExperimentReference;
   };
   toolCalls: ExperimentToolCall[];
   trace: null | {
@@ -224,6 +279,8 @@ export type TrainingRun = {
     pauseOnFailure: boolean;
     variableSource: TrainingVariableSource;
     variableSourceRunId?: string;
+    evaluationOnly?: boolean;
+    snapshotSourceRunId?: string;
     correctionHook?: TrainingHookBinding;
     experienceExtractorHook: TrainingHookBinding;
     timeoutMs: number;
@@ -257,7 +314,7 @@ export type TrainingCase = {
   question: string;
   thinking: string;
   expectedAnswer: string;
-  referenceAvailable: boolean;
+  reference: ExperimentReference | { status: "locked" };
   actualAnswer: string;
   expectedTools: string[];
   actualTools: string[];
@@ -266,6 +323,12 @@ export type TrainingCase = {
   score?: number;
   passed?: boolean;
   rationale?: string;
+  evaluation?: {
+    source: "llm" | "project";
+    metrics: Record<string, unknown>;
+    details?: unknown;
+    reference?: ExperimentReference;
+  };
   experimentRunId?: string;
   experimentCaseId?: string;
   failurePauseHandled: boolean;
@@ -451,6 +514,12 @@ export type CreateTrainingInput = {
   timeoutMs?: number;
 };
 
+export type CreateSnapshotEvaluationInput = {
+  name?: string;
+  testDatasetId: string;
+  testLimit: number;
+};
+
 function apiUrl(path: string, projectPath: string): string {
   const configured = process.env.NEXT_PUBLIC_RUNTIME_HTTP_URL?.replace(/\/$/, "");
   const base = configured ?? `${window.location.protocol}//${window.location.hostname}:3005`;
@@ -570,6 +639,8 @@ export const experimentApi = {
       request<TestSnapshot>(projectPath, `/training/${encodeURIComponent(id)}/freeze`, "POST", {}),
     startTest: (projectPath: string, id: string) =>
       request<TrainingRun>(projectPath, `/training/${encodeURIComponent(id)}/test`, "POST", {}),
+    createSnapshotEvaluation: (projectPath: string, id: string, input: CreateSnapshotEvaluationInput) =>
+      request<TrainingRun>(projectPath, `/training/${encodeURIComponent(id)}/snapshot-evaluations`, "POST", input),
     promote: (projectPath: string, id: string) =>
       request<{ variables: Record<string, string>; contentHash: string }>(projectPath, `/training/${encodeURIComponent(id)}/promote`, "POST", {}),
     updateExperience: (projectPath: string, id: string, experienceId: string, patches: VariableDiff[]) =>

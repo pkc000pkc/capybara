@@ -7,8 +7,9 @@ import type WebSocket from 'ws'
 import { AgentSession } from '#core/agent-session'
 import { DatasetStore } from '#core/datasets/dataset-store'
 import { ExperimentManager, type CreateExperimentInput } from '#core/experiments/experiment-manager'
+import { experimentCaseForPresentation } from '#core/experiments/presentation'
 import { TrainingManager } from '#core/experiments/training/training-manager'
-import type { CreateTrainingInput, VariableDiff } from '#core/experiments/training/training-types'
+import type { CreateSnapshotEvaluationInput, CreateTrainingInput, VariableDiff } from '#core/experiments/training/training-types'
 import type { ExperimentCaseStatus, ExperimentStatus } from '#core/experiments/types'
 import { ProjectGitService } from '#core/project-git'
 import {
@@ -543,7 +544,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   })
   app.get('/api/experiments/training/:id/cases', async (request, reply) => {
     try {
-      return { items: getTrainingManager(requestProject(request).path).cases((request.params as { id: string }).id) }
+      const manager = getTrainingManager(requestProject(request).path)
+      const id = (request.params as { id: string }).id
+      void manager.hydrateReferences(id).catch(() => undefined)
+      return { items: manager.cases(id) }
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
@@ -591,6 +595,17 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     try {
       const run = getTrainingManager(requestProject(request).path).startTest((request.params as { id: string }).id)
       return reply.code(202).send(run)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/experiments/training/:id/snapshot-evaluations', async (request, reply) => {
+    try {
+      const run = getTrainingManager(requestProject(request).path).createSnapshotEvaluation(
+        (request.params as { id: string }).id,
+        (request.body ?? {}) as CreateSnapshotEvaluationInput,
+      )
+      return reply.code(201).send(run)
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
@@ -682,7 +697,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.get('/api/experiments/:id/cases/:caseId', async (request, reply) => {
     try {
       const params = request.params as { id: string; caseId: string }
-      return getExperimentManager(requestProject(request).path).case(params.id, params.caseId)
+      return experimentCaseForPresentation(
+        getExperimentManager(requestProject(request).path).case(params.id, params.caseId),
+      )
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }

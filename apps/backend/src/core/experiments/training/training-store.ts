@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-import type { ExperimentFailure, ExperimentToolCall, ExperimentUsage } from '#core/experiments/types'
+import type { ExperimentCaseDetail, ExperimentFailure, ExperimentToolCall, ExperimentUsage } from '#core/experiments/types'
 import type {
   ExperienceCandidate,
   ExperienceStatus,
@@ -57,6 +57,7 @@ type CaseRow = {
   score: number | null
   passed: number | null
   rationale: string | null
+  evaluation_json: string | null
   experiment_run_id: string | null
   experiment_case_id: string | null
   failure_pause_handled: number
@@ -130,6 +131,7 @@ export class TrainingStore {
         score REAL,
         passed INTEGER,
         rationale TEXT,
+        evaluation_json TEXT,
         experiment_run_id TEXT,
         experiment_case_id TEXT,
         failure_pause_handled INTEGER NOT NULL DEFAULT 0,
@@ -211,6 +213,10 @@ export class TrainingStore {
       CREATE INDEX IF NOT EXISTS training_cases_run_phase_ordinal ON training_cases(run_id, phase, ordinal);
       CREATE INDEX IF NOT EXISTS experiences_run_status ON experience_candidates(run_id, status, created_at);
     `)
+    const caseColumns = new Set((this.database.prepare('PRAGMA table_info(training_cases)').all() as Array<{ name: string }>).map((column) => column.name))
+    if (!caseColumns.has('evaluation_json')) {
+      this.database.exec('ALTER TABLE training_cases ADD COLUMN evaluation_json TEXT')
+    }
     this.recoverInterrupted()
   }
 
@@ -243,10 +249,10 @@ export class TrainingStore {
         INSERT INTO training_cases (
           id, run_id, phase, dataset_id, sample_id, ordinal, status, question, thinking,
           expected_answer, actual_answer, expected_tools_json, actual_tools_json,
-          tool_calls_json, usage_json, score, passed, rationale, experiment_run_id,
+          tool_calls_json, usage_json, score, passed, rationale, evaluation_json, experiment_run_id,
           experiment_case_id, failure_pause_handled, attempt, failure_json, created_at,
           started_at, completed_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       for (const item of cases) {
         insertCase.run(
@@ -255,6 +261,7 @@ export class TrainingStore {
           JSON.stringify(item.expectedTools), JSON.stringify(item.actualTools),
           JSON.stringify(item.toolCalls), JSON.stringify(item.usage), item.score ?? null,
           item.passed === undefined ? null : Number(item.passed), item.rationale ?? null,
+          item.evaluation ? JSON.stringify(item.evaluation) : null,
           item.experimentRunId ?? null, item.experimentCaseId ?? null,
           Number(item.failurePauseHandled), item.attempt,
           item.failure ? JSON.stringify(item.failure) : null, item.createdAt,
@@ -312,7 +319,7 @@ export class TrainingStore {
   ): void {
     const now = new Date().toISOString()
     const current = this.getRun(id)
-    const startedAt = current.startedAt ?? (status === 'running' ? now : null)
+    const startedAt = current.startedAt ?? (['running', 'testing'].includes(status) ? now : null)
     const completedAt = ['completed', 'failed', 'cancelled'].includes(status) ? now : null
     this.database.prepare(`
       UPDATE training_runs
@@ -369,20 +376,29 @@ export class TrainingStore {
     score?: number
     passed?: boolean
     rationale?: string
+    evaluation?: ExperimentCaseDetail['evaluation']
     failure?: ExperimentFailure
   }): void {
     const now = new Date().toISOString()
     this.database.prepare(`
       UPDATE training_cases SET status = ?, experiment_case_id = ?, actual_answer = ?,
         actual_tools_json = ?, tool_calls_json = ?, usage_json = ?, score = ?, passed = ?,
-        rationale = ?, failure_json = ?, completed_at = ?, updated_at = ? WHERE id = ?
+        rationale = ?, evaluation_json = ?, failure_json = ?, completed_at = ?, updated_at = ? WHERE id = ?
     `).run(
       value.failure ? 'error' : 'evaluated', value.experimentCaseId, value.actualAnswer,
       JSON.stringify(value.actualTools), JSON.stringify(value.toolCalls), JSON.stringify(value.usage),
       value.score ?? null, value.passed === undefined ? null : Number(value.passed),
-      value.rationale ?? null, value.failure ? JSON.stringify(value.failure) : null,
+      value.rationale ?? null, value.evaluation ? JSON.stringify(value.evaluation) : null,
+      value.failure ? JSON.stringify(value.failure) : null,
       now, now, id,
     )
+  }
+
+  updateCaseEvaluation(id: string, evaluation: NonNullable<ExperimentCaseDetail['evaluation']>): void {
+    const changes = this.database.prepare(`
+      UPDATE training_cases SET evaluation_json = ?, updated_at = ? WHERE id = ?
+    `).run(JSON.stringify(evaluation), new Date().toISOString(), id)
+    if (changes.changes === 0) throw new Error(`training case was not found: ${id}`)
   }
 
   setCaseStatus(id: string, status: TrainingCaseStatus): void {
@@ -511,7 +527,9 @@ export class TrainingStore {
   }
 
   getSnapshot(runId: string): TestSnapshot | undefined {
-    const row = this.database.prepare('SELECT * FROM training_snapshots WHERE run_id = ?').get(runId) as {
+    const run = this.getRun(runId)
+    if (!run.snapshotId) return undefined
+    const row = this.database.prepare('SELECT * FROM training_snapshots WHERE id = ?').get(run.snapshotId) as {
       id: string
       run_id: string
       variables_json: string
@@ -690,6 +708,9 @@ export class TrainingStore {
       ...(row.score === null ? {} : { score: row.score }),
       ...(row.passed === null ? {} : { passed: Boolean(row.passed) }),
       ...(row.rationale ? { rationale: row.rationale } : {}),
+      ...(row.evaluation_json
+        ? { evaluation: parseJson<NonNullable<ExperimentCaseDetail['evaluation']>>(row.evaluation_json, { source: 'project', metrics: {} }) }
+        : {}),
       ...(row.experiment_run_id ? { experimentRunId: row.experiment_run_id } : {}),
       ...(row.experiment_case_id ? { experimentCaseId: row.experiment_case_id } : {}),
       failurePauseHandled: Boolean(row.failure_pause_handled),

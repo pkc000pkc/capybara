@@ -8,6 +8,7 @@ import { test } from 'node:test'
 
 import { buildApp } from '#app'
 import { DatasetStore } from '#core/datasets/dataset-store'
+import { ExperimentAdapterRunner } from '#core/experiments/experiment-adapter'
 import type { ExperimentRunDetail } from '#core/experiments/types'
 import type { RuntimeLlm } from '#core/runtime-loop'
 import type { LlmChatRequest, LlmChatResponse, LlmToolCall } from '#util/llm'
@@ -135,6 +136,17 @@ if (request.phase === 'prepare') {
     rationale: 'Project evaluator accepted the persisted environment state.',
     metrics: { passed_tests: 3, failed_tests: 1, difficulty: 2 },
     details: { task_id: request.payload.case.metadata.public.task_id },
+    reference: {
+      kind: 'text',
+      status: 'available',
+      source: { type: 'official_evaluator', benchmark: 'fixture', taskId: request.payload.case.metadata.public.task_id },
+      displayValue: 'Official fixture answer',
+      value: 'Official fixture answer',
+      requirements: [{ ordinal: 0, status: 'passed', description: 'fixture requirement' }],
+      actualStateChanges: [],
+      failureTraces: [],
+      resolvedAt: request.startedAt,
+    },
   }
 } else if (request.phase === 'aggregate') {
   result = {
@@ -145,9 +157,40 @@ if (request.phase === 'prepare') {
 } else {
   result = { cleaned: true }
 }
+
 process.stdout.write(JSON.stringify({ id: request.id, ok: true, result }))
 `, 'utf8')
 }
+
+test('experiment adapter revision includes declared helper files and reaches the adapter process', async (context) => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-adapter-revision-'))
+  context.after(() => fs.rmSync(projectDir, { recursive: true, force: true }))
+  const manifestFile = path.join(projectDir, '.capybara', 'experiment-adapter.json')
+  const entryFile = path.join(projectDir, 'experiments', 'adapter.mjs')
+  const helperFile = path.join(projectDir, 'scripts', 'helper.txt')
+  fs.mkdirSync(path.dirname(manifestFile), { recursive: true })
+  fs.mkdirSync(path.dirname(entryFile), { recursive: true })
+  fs.mkdirSync(path.dirname(helperFile), { recursive: true })
+  fs.writeFileSync(manifestFile, JSON.stringify({
+    version: 1,
+    runner: { type: 'stdio', entry: 'experiments/adapter.mjs', files: ['scripts/helper.txt'] },
+    phases: ['evaluate'],
+  }))
+  fs.writeFileSync(entryFile, [
+    "let input = '';",
+    'for await (const chunk of process.stdin) input += chunk;',
+    'const request = JSON.parse(input);',
+    "const revision = process.env.CAPYBARA_EXPERIMENT_ADAPTER_REVISION;",
+    "process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { score: 1, passed: true, rationale: 'passed', metrics: {}, reference: { kind: 'text', status: 'available', source: { type: 'official_evaluator', resolverRevision: revision }, displayValue: 'done', value: 'done', requirements: [], actualStateChanges: [], failureTraces: [], resolvedAt: request.startedAt } } }));",
+  ].join('\n'))
+  fs.writeFileSync(helperFile, 'first')
+  const first = new ExperimentAdapterRunner(projectDir)
+  const evaluation = await first.evaluate({})
+  assert.equal(evaluation.reference?.source.resolverRevision, first.revision)
+  fs.writeFileSync(helperFile, 'second')
+  const second = new ExperimentAdapterRunner(projectDir)
+  assert.notEqual(second.revision, first.revision)
+})
 
 async function waitForRun(
   app: Awaited<ReturnType<typeof buildApp>>,
@@ -449,6 +492,8 @@ test('project experiment adapters own case lifecycle, deterministic evaluation, 
   assert.equal(detail.metadata.private.evaluator_secret, 'must-not-leak')
   assert.equal(detail.evaluation.source, 'project')
   assert.equal(detail.evaluation.metrics.passed_tests, 3)
+  assert.equal(detail.evaluation.reference.kind, 'text')
+  assert.equal(detail.evaluation.reference.displayValue, 'Official fixture answer')
   assert.equal(detail.trace.adapter.prepare.taskId, 'scenario_1')
   assert.equal(detail.trace.adapter.evaluation.details.task_id, 'scenario_1')
   assert.equal(detail.trace.scoring, undefined)

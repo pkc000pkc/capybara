@@ -346,6 +346,14 @@ export class ExperimentManager {
     return this.store.getCase(id, caseId)
   }
 
+  updateCaseEvaluation(
+    id: string,
+    caseId: string,
+    evaluation: NonNullable<ExperimentCaseDetail['evaluation']>,
+  ): void {
+    this.store.updateCaseEvaluation(id, caseId, evaluation)
+  }
+
   tools(id: string) {
     this.store.getRun(id)
     return this.store.toolAggregates(id)
@@ -696,6 +704,7 @@ export class ExperimentManager {
             source: 'project',
             metrics: evaluation.metrics,
             ...(evaluation.details === undefined ? {} : { details: evaluation.details }),
+            ...(evaluation.reference === undefined ? {} : { reference: evaluation.reference }),
           },
           trace,
           completedAt: new Date().toISOString(),

@@ -498,6 +498,17 @@ export class ExperimentStore {
     return caseDetail(row)
   }
 
+  updateCaseEvaluation(
+    runId: string,
+    caseId: string,
+    evaluation: NonNullable<ExperimentCaseDetail['evaluation']>,
+  ): void {
+    const changes = this.database.prepare(`
+      UPDATE experiment_cases SET evaluation_json = ? WHERE run_id = ? AND id = ?
+    `).run(JSON.stringify(evaluation), runId, caseId)
+    if (changes.changes === 0) throw new Error(`experiment case was not found: ${caseId}`)
+  }
+
   startRun(id: string, startedAt: string): void {
     const result = this.database.prepare(`
       UPDATE experiment_runs SET status = 'running', started_at = ?, updated_at = ?

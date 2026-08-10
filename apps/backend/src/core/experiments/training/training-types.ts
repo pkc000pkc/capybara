@@ -1,13 +1,15 @@
 import type {
   ExperimentEvaluatorSnapshot,
+  ExperimentCaseDetail,
   ExperimentFailure,
+  ExperimentReference,
   ExperimentRunSummary,
   ExperimentToolCall,
   ExperimentUsage,
 } from '#core/experiments/types'
 
-export const MAX_TRAINING_CASES = 10
-export const MAX_TEST_CASES = 5
+export const MAX_TRAINING_CASES = 10_000
+export const MAX_TEST_CASES = 10_000
 
 export type TrainingLearningMode = 'review' | 'author' | 'auto'
 export type TrainingReviewScope = 'all' | 'failed'
@@ -62,6 +64,8 @@ export interface TrainingConfig {
   pauseOnFailure: boolean
   variableSource: TrainingVariableSource
   variableSourceRunId?: string
+  evaluationOnly?: boolean
+  snapshotSourceRunId?: string
   correctionHook?: TrainingHookBinding
   experienceExtractorHook: TrainingHookBinding
   timeoutMs: number
@@ -82,6 +86,12 @@ export interface CreateTrainingInput {
   correctionHook?: unknown
   experienceExtractorHook?: unknown
   timeoutMs?: unknown
+}
+
+export interface CreateSnapshotEvaluationInput {
+  name?: unknown
+  testDatasetId?: unknown
+  testLimit?: unknown
 }
 
 export interface TrainingProgress {
@@ -127,6 +137,7 @@ export interface TrainingCase {
   score?: number
   passed?: boolean
   rationale?: string
+  evaluation?: ExperimentCaseDetail['evaluation']
   experimentRunId?: string
   experimentCaseId?: string
   failurePauseHandled: boolean
@@ -139,7 +150,7 @@ export interface TrainingCase {
 }
 
 export interface TrainingCaseView extends TrainingCase {
-  referenceAvailable: boolean
+  reference: ExperimentReference | { status: 'locked' }
 }
 
 export interface VariableDiff {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "AppWorld Task Solver"
+  short_description: "Solve AppWorld tasks through controlled API execution"
+  default_prompt: "Use $solve-appworld-tasks to solve this AppWorld task and verify completion."

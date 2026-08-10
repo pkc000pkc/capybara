@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "package": "appworld-guidance",
+  "harnesses": [
+    {
+      "name": "appworld-runtime",
+      "description": "Operational guidance for stateful AppWorld API tasks.",
+      "type": "tool",
+      "entry": "runtime.j2",
+      "priority": 100,
+      "activation": {
+        "tools": [
+          "appworld_execute"
+        ]
+      },
+      "inputs": [
+        "user_message"
+      ],
+      "requiredTools": [
+        "appworld_execute"
+      ],
+      "examples": [
+        {
+          "request": "Complete a task by calling AppWorld APIs and verify the final state."
+        }
+      ]
+    }
+  ]
+}
