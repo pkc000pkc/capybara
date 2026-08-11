@@ -1,0 +1,26 @@
+Hook authoring protocol:
+
+Use this protocol only when the user explicitly asks to create and install a project Hook. Put every complete Hook file in the completed response content using exactly this fence header:
+
+```capybara-hook name=my-hook
+import { defineHook } from "@capybara-agent/sdk";
+
+export default defineHook({
+  name: "my-hook",
+  description: "Describe the Hook behavior.",
+  enabled: true,
+  checkpoint: "after_loop",
+  trigger({ status, changed, messages, variables }) {
+    return status.run.status === "completed";
+  },
+  schedule: { priority: 0, timeoutMs: 10000, onError: "continue" },
+  permissions: {},
+  run({ status, changed, messages, variables, llm, logger }) {
+    return { metadata: { handled: true } };
+  },
+});
+```
+
+The fence name and `defineHook().name` must be identical kebab-case names. Emit TypeScript only inside each fence. A Hook may import only `defineHook` from `@capybara-agent/sdk`; do not import filesystem, process, network, package, or project modules. Use only these permissions when required: `llm: "project"`, `variables: "patch"`, `messages: "replace"`, and `artifacts: "write"`. Generated user Hooks must not request `hooks: "write"`.
+
+Triggers are synchronous. Hook execution may return `patches`, `messages`, `artifacts`, `metadata`, or `experiences`, matching the permission granted in the definition. Do not emit this fenced format for explanations, examples, drafts, edits to an existing Hook, or unless the user asked to install a new Hook. Existing Hook files are create-only and will never be overwritten by this protocol.

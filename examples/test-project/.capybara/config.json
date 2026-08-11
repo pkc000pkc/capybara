@@ -21,7 +21,8 @@
   "harnesses": [
     "harnesses/model/gpt/manifest.json",
     "harnesses/tool/filesystem/manifest.json",
-    "harnesses/experience/document-analysis/manifest.json"
+    "harnesses/experience/document-analysis/manifest.json",
+    "harnesses/experience/variable-injection/manifest.json"
   ],
   "harness_policy": {
     "experience_top_k": 3,

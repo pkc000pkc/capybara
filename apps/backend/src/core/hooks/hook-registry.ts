@@ -93,13 +93,14 @@ function validateSchedule(value: unknown): HookSchedule {
 function validatePermissions(value: unknown): HookPermissions {
   if (value === undefined) return {}
   if (!isObject(value)) throw new Error('permissions must be an object')
-  const allowed = new Set(['llm', 'variables', 'messages', 'artifacts'])
+  const allowed = new Set(['llm', 'variables', 'messages', 'artifacts', 'hooks'])
   const unknown = Object.keys(value).find((key) => !allowed.has(key))
   if (unknown) throw new Error(`unsupported Hook permission: ${unknown}`)
   if (value.llm !== undefined && value.llm !== 'project') throw new Error('permissions.llm must be project')
   if (value.variables !== undefined && value.variables !== 'patch') throw new Error('permissions.variables must be patch')
   if (value.messages !== undefined && value.messages !== 'replace') throw new Error('permissions.messages must be replace')
   if (value.artifacts !== undefined && value.artifacts !== 'write') throw new Error('permissions.artifacts must be write')
+  if (value.hooks !== undefined && value.hooks !== 'write') throw new Error('permissions.hooks must be write')
   return value as HookPermissions
 }
 
@@ -200,22 +201,72 @@ function validateDefinition(
 }
 
 export class HookRegistry {
+  readonly systemHooksDir: string
+  readonly projectHooksDir: string
   readonly hooksDir: string
+  private cachedSystemHooks?: RegisteredHook[]
+  private cachedProjectHooks?: RegisteredHook[]
+  private cachedHooks?: RegisteredHook[]
 
   constructor(readonly projectDir: string) {
-    this.hooksDir = path.join(path.resolve(projectDir), '.capybara', 'hooks')
+    const root = path.resolve(projectDir)
+    this.systemHooksDir = path.join(root, '.capybara', 'hooks')
+    this.projectHooksDir = path.join(root, 'hooks')
+    this.hooksDir = this.projectHooksDir
   }
 
   list(): RegisteredHook[] {
-    if (!fs.existsSync(this.hooksDir)) return []
-    return fs.readdirSync(this.hooksDir, { withFileTypes: true })
+    if (this.cachedHooks) return [...this.cachedHooks]
+    const systemHooks = this.listSystem()
+    const systemNames = new Set(systemHooks.map((hook) => hook.id))
+    this.cachedHooks = [
+      ...systemHooks,
+      ...this.listProject().filter((hook) => !systemNames.has(hook.id)),
+    ]
+    return [...this.cachedHooks]
+  }
+
+  listSystem(): RegisteredHook[] {
+    this.cachedSystemHooks ??= this.inspectDirectory(this.systemHooksDir)
+    return [...this.cachedSystemHooks]
+  }
+
+  listProject(): RegisteredHook[] {
+    if (this.cachedProjectHooks) return [...this.cachedProjectHooks]
+    const systemNames = new Set(this.listSystem().map((hook) => hook.id))
+    this.cachedProjectHooks = this.inspectDirectory(this.projectHooksDir).map((hook) => (
+      systemNames.has(hook.id)
+        ? this.invalid(
+            hook.entryFile,
+            hook.source,
+            `User Hook name conflicts with system Hook: ${hook.name}`,
+          )
+        : hook
+    ))
+    return [...this.cachedProjectHooks]
+  }
+
+  reload(): RegisteredHook[] {
+    this.cachedSystemHooks = undefined
+    this.cachedProjectHooks = undefined
+    this.cachedHooks = undefined
+    return this.list()
+  }
+
+  private inspectDirectory(directory: string): RegisteredHook[] {
+    if (!fs.existsSync(directory)) return []
+    return fs.readdirSync(directory, { withFileTypes: true })
       .filter((entry) => entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts') && !entry.name.startsWith('.'))
       .sort((left, right) => left.name.localeCompare(right.name))
-      .map((entry) => this.inspect(path.join(this.hooksDir, entry.name)))
+      .map((entry) => this.inspect(path.join(directory, entry.name)))
   }
 
   get(id: string): RegisteredHook | undefined {
     return this.list().find((hook) => hook.id === id)
+  }
+
+  getProject(id: string): RegisteredHook | undefined {
+    return this.listProject().find((hook) => hook.id === id)
   }
 
   validateContent(name: string, source: string): RegisteredHook {
@@ -225,26 +276,63 @@ export class HookRegistry {
   }
 
   create(name: string, source: string): RegisteredHook {
-    const hook = this.validateContent(name, source)
+    return this.createMany([{ name, source }])[0] as RegisteredHook
+  }
+
+  createMany(files: readonly { name: string; source: string }[]): RegisteredHook[] {
+    if (files.length === 0) return []
+    this.reload()
+    const names = new Set<string>()
+    const systemNames = new Set(this.listSystem().map((hook) => hook.id))
+    const projectNames = new Set(this.listProject().map((hook) => hook.id))
+    const validated = files.map(({ name, source }) => {
+      if (names.has(name)) throw new Error(`Duplicate generated Hook name: ${name}`)
+      names.add(name)
+      if (systemNames.has(name)) throw new Error(`User Hook name conflicts with system Hook: ${name}`)
+      if (projectNames.has(name)) throw new Error(`Hook resource already exists: ${name}`)
+      return this.validateContent(name, source)
+    })
+    const created: string[] = []
     fs.mkdirSync(this.hooksDir, { recursive: true })
-    fs.writeFileSync(hook.entryFile, source, { encoding: 'utf8', flag: 'wx' })
-    return hook
+    try {
+      for (const [index, hook] of validated.entries()) {
+        fs.writeFileSync(hook.entryFile, files[index]?.source ?? '', {
+          encoding: 'utf8',
+          flag: 'wx',
+        })
+        created.push(hook.entryFile)
+      }
+    } catch (error) {
+      for (const file of created.reverse()) fs.rmSync(file, { force: true })
+      this.reload()
+      throw error
+    }
+    const installed = this.reload()
+    return validated.map((hook) => (
+      installed.find((candidate) => candidate.id === hook.id && candidate.entryFile === hook.entryFile)
+      ?? hook
+    ))
   }
 
   save(id: string, source: string, revision: string): RegisteredHook {
-    const current = this.get(id)
+    const current = this.getProject(id)
     if (!current) throw new Error('Hook resource was not found')
     if (current.revision !== revision) throw new Error('HOOK_REVISION_CONFLICT')
+    if (this.listSystem().some((hook) => hook.id === current.name)) {
+      throw new Error(`User Hook name conflicts with system Hook: ${current.name}`)
+    }
     const next = this.validateContent(current.name, source)
     fs.writeFileSync(current.entryFile, source, 'utf8')
+    this.reload()
     return next
   }
 
   remove(id: string, revision: string): void {
-    const current = this.get(id)
+    const current = this.getProject(id)
     if (!current) throw new Error('Hook resource was not found')
     if (current.revision !== revision) throw new Error('HOOK_REVISION_CONFLICT')
     fs.unlinkSync(current.entryFile)
+    this.reload()
   }
 
   private inspect(file: string): RegisteredHook {
@@ -264,6 +352,9 @@ export class HookRegistry {
     const compiled = compileHookSource(source, file)
     const definition = loadDefinition(compiled, file)
     const validated = validateDefinition(definition, expectedName)
+    if (validated.permissions.hooks && path.dirname(file) !== this.systemHooksDir) {
+      throw new Error('hooks:write permission is reserved for system Hooks')
+    }
     const inputs = triggerInputs(source)
     return {
       id: validated.name,

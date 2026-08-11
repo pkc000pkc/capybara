@@ -286,6 +286,7 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
   await expect(page.getByRole("button", { name: "保存", exact: true })).toBeDisabled();
 
   await page.locator("#context-harnesses-tab").click();
+  await page.getByRole("option", { name: "gpt-runtime", exact: true }).click();
   await expect(page.getByLabel("Harness 渲染内容")).toContainText(/structured completion status/);
   await page.getByRole("button", { name: "挂载 Harness" }).first().click();
   const harnessPicker = page.getByRole("dialog", { name: "添加 Harness 到上下文" });
@@ -450,4 +451,53 @@ test("sending after an interrupted run starts a new request", async ({ page }) =
   await expect(conversation.locator("article").last()).not.toContainText("正在生成", {
     timeout: 60_000,
   });
+});
+
+test("model failures remain visible in the conversation after reload", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/");
+  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
+  await page.getByRole("button", { name: "新增会话" }).click();
+
+  await page.getByLabel("输入消息").fill("E2E_FORCE_MODEL_ERROR");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  const failure = page.locator("[data-chat-failure]");
+  await expect(failure).toBeVisible({ timeout: 30_000 });
+  await expect(failure).toContainText("运行失败");
+  await expect(failure).toContainText("模型传输");
+  await expect(failure).toContainText("MODEL_TRANSPORT_ERROR");
+  await expect(failure).toContainText("E2E forced model transport failure");
+  await expect(page.locator('[data-run-status="failed"]')).toBeVisible();
+
+  await page.reload();
+  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator("[data-chat-failure]")).toContainText(
+    "E2E forced model transport failure",
+  );
+});
+
+test("model retry progress is visible until the request recovers", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/");
+  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
+  await page.getByRole("button", { name: "新增会话" }).click();
+
+  await page.getByLabel("输入消息").fill("E2E_RETRY_THEN_SUCCEED");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  const retry = page.locator("[data-model-retry]");
+  await expect(retry).toBeVisible({ timeout: 20_000 });
+  await expect(retry).toContainText("2/4");
+  await expect(retry).toContainText("HTTP 503");
+  await expect(page.locator("[data-model-retry-summary]")).toContainText("2/4");
+
+  const conversation = page.locator("#conversation-panel");
+  await expect(conversation).toContainText(
+    "Deterministic local response for the Capybara end-to-end test.",
+    { timeout: 30_000 },
+  );
+  await expect(retry).toHaveCount(0);
+  await expect(page.locator("[data-model-retry-summary]")).toHaveCount(0);
+  await expect(page.locator('[data-run-status="completed"]')).toBeVisible();
 });

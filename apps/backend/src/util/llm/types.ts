@@ -32,6 +32,17 @@ export interface LlmUsage {
   cacheReadTokens?: number
 }
 
+export interface LlmRetryNotification {
+  phase: 'waiting' | 'attempting'
+  attempt: number
+  maxAttempts: number
+  delayMs: number
+  reason: string
+  statusCode?: number
+}
+
+export type LlmRetryHandler = (notification: LlmRetryNotification) => void
+
 export interface LlmChatRequest {
   messages: LlmMessage[]
   model?: string
@@ -40,6 +51,7 @@ export interface LlmChatRequest {
   responseFormat?: 'text' | 'json'
   tools?: LlmToolDefinition[]
   signal?: AbortSignal
+  onRetry?: LlmRetryHandler
 }
 
 export interface LlmChatResponse {

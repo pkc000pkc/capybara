@@ -163,13 +163,20 @@ test("resource workspace uses real tool and skill HTTP APIs", async ({ page }) =
   await expect(page.getByLabel("测试输出")).toContainText(/"type": "experience"/);
 
   await page.locator("#resource-system-variables-tab").click();
+  const systemVariablesPanel = page.locator("#resource-system-variables-panel");
+  await page.getByRole("button", { name: /template_level_1/ }).click();
+  await expect(systemVariablesPanel.getByLabel("变量类型")).toHaveValue("prompt_template");
+  await expect(systemVariablesPanel.locator('[data-language="jinja2"]')).toContainText(
+    "builtin.prompts.template_level_2",
+  );
   await page.getByRole("button", { name: /resource_loading.*只读/ }).click();
   await expect(page.getByLabel("变量名")).toBeDisabled();
+  await expect(systemVariablesPanel.getByLabel("变量类型")).toBeDisabled();
   await expect(page.getByLabel("预设提示词")).toHaveAttribute("contenteditable", "false");
   await expect(page.getByRole("button", { name: "删除系统变量" })).toHaveCount(0);
 
-  const systemVariablesPanel = page.locator("#resource-system-variables-panel");
   await page.getByRole("button", { name: "添加系统变量" }).click();
+  await expect(systemVariablesPanel.getByLabel("变量类型")).toHaveValue("text");
   await expect(systemVariablesPanel.getByLabel("作用域")).toHaveValue("session");
   await systemVariablesPanel.getByLabel("变量名").fill("e2e_shared_prompt");
   await systemVariablesPanel.getByLabel("作用域").selectOption("project");
@@ -200,30 +207,29 @@ test("hook resources support editing, testing, creating, and deleting", async ({
   await page.locator("#app-resources-tab").click();
   await page.locator("#resource-hooks-tab").click();
   const panel = page.locator("#resource-hooks-panel");
-  await expect(page.getByRole("button", { name: /context-compression/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /context-compression/ })).toHaveCount(0);
 
+  await page.getByRole("button", { name: "新建 Hook" }).click();
+  await page.getByLabel("Hook 名称").fill("e2e-hook");
+  await page.getByRole("button", { name: "创建 Hook" }).click();
+  await expect.poll(() => fs.existsSync(path.join(resourceProject, "hooks", "e2e-hook.ts"))).toBe(true);
+  await panel.getByRole("tab", { name: "函数" }).click();
   const editor = panel.getByLabel("Hook 函数编辑器");
-  const source = fs.readFileSync(
-    path.resolve(process.cwd(), "../../examples/test-project/.capybara/hooks/context-compression.ts"),
-    "utf8",
-  );
-  await editor.fill(source.replace("Summarize older LLM messages", "Summarize prior LLM messages"));
+  await expect(editor).toContainText('name: "e2e-hook"');
+  await editor.fill((await editorText(editor)).replace(
+    'description: "Run project logic after each completed Loop.",',
+    'description: "E2E user Hook.",',
+  ));
   await panel.getByRole("button", { name: "保存草稿" }).click();
   await expect(panel.getByRole("button", { name: "保存草稿" })).toBeDisabled();
 
   await panel.getByRole("tab", { name: "测试" }).click();
   await panel.getByRole("button", { name: "运行 Hook" }).click();
   await expect(panel.getByLabel("执行结果")).toContainText('"matched": true');
-  await expect(panel.getByLabel("执行结果")).toContainText("no older messages");
-
-  await page.getByRole("button", { name: "新建 Hook" }).click();
-  await page.getByLabel("Hook 名称").fill("e2e-hook");
-  await page.getByRole("button", { name: "创建 Hook" }).click();
-  await panel.getByRole("tab", { name: "函数" }).click();
-  await expect(panel.getByLabel("Hook 函数编辑器")).toContainText('name: "e2e-hook"');
   page.once("dialog", (dialog) => dialog.accept());
   await panel.getByRole("button", { name: "删除 Hook" }).click();
   await expect(page.getByRole("button", { name: /e2e-hook/ })).toHaveCount(0);
+  await expect.poll(() => fs.existsSync(path.join(resourceProject, "hooks", "e2e-hook.ts"))).toBe(false);
 });
 
 test("resource workspace panes support pointer and keyboard resizing", async ({ page }) => {

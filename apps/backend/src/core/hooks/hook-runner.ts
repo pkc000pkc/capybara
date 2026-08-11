@@ -61,6 +61,7 @@ function log(level, message, data) {
       runId: workerData.runId,
       iteration: workerData.fixture.loopIteration,
     },
+    messages: workerData.fixture.messages,
     ...(workerData.fixture.training ? { training: workerData.fixture.training } : {}),
   };
   const matched = hook.enabled === true && hook.trigger(triggerContext);
@@ -84,7 +85,6 @@ function log(level, message, data) {
   const controller = new AbortController();
   const result = await hook.run({
     ...triggerContext,
-    messages: workerData.fixture.messages,
     llm,
     signal: controller.signal,
     logger,

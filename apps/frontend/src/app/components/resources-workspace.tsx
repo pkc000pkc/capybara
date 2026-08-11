@@ -51,6 +51,7 @@ export type ResourceSection =
   | "memory";
 type SystemVariableDefinition = {
   key: string;
+  type: "text" | "prompt_template";
   label: string;
   description: string;
   value: string;
@@ -330,12 +331,25 @@ function SystemVariableDetails({
             {t("resources.variableDescription")}
             <input className={fieldClass} disabled={variable.readonly} onChange={(event) => onChange({ description: event.target.value })} value={variable.description} />
           </label>
+          <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
+            {t("resources.variableType")}
+            <select
+              className={fieldClass}
+              disabled={variable.readonly}
+              onChange={(event) => onChange({ type: event.target.value as SystemVariableDefinition["type"] })}
+              value={variable.type}
+            >
+              <option value="text">{t("resources.variableTypeText")}</option>
+              <option value="prompt_template">{t("resources.variableTypePromptTemplate")}</option>
+            </select>
+          </label>
           <div className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
             <span>{t("resources.variableValue")}</span>
             <CodeSurface
               ariaLabel={t("resources.variableValue")}
               className="h-56 border border-[#c6d4d4]"
-              language="Markdown"
+              key={`${variable.type}:${variable.readonly ? "readonly" : "editable"}`}
+              language={variable.type === "prompt_template" ? "Jinja2" : "Markdown"}
               lineNumbers={false}
               lineWrapping
               onChange={(value) => onChange({ value })}
@@ -757,6 +771,7 @@ export default function ResourcesWorkspace({
     while (systemVariables.some((variable) => variable.key === `prompt_${suffix}`)) suffix += 1;
     setSystemVariables((current) => [...current, {
       key: `prompt_${suffix}`,
+      type: "text",
       label: `Prompt ${suffix}`,
       description: "",
       value: "",

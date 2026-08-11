@@ -88,6 +88,42 @@
       "value": "Use concise, implementation-focused responses.",
       "required": false,
       "readonly": false
+    },
+    {
+      "key": "template_parameter",
+      "type": "text",
+      "label": "Nested template parameter",
+      "description": "Leaf text used by the multi-level prompt_template test.",
+      "value": "leaf-value",
+      "required": false,
+      "readonly": false
+    },
+    {
+      "key": "template_level_3",
+      "type": "prompt_template",
+      "label": "Nested template level 3",
+      "description": "Third level of the multi-level prompt_template test.",
+      "value": "level3({{ builtin.prompts.template_parameter }})",
+      "required": false,
+      "readonly": false
+    },
+    {
+      "key": "template_level_2",
+      "type": "prompt_template",
+      "label": "Nested template level 2",
+      "description": "Second level of the multi-level prompt_template test.",
+      "value": "level2({{ builtin.prompts.template_level_3 }})",
+      "required": false,
+      "readonly": false
+    },
+    {
+      "key": "template_level_1",
+      "type": "prompt_template",
+      "label": "Nested template level 1",
+      "description": "Root of the multi-level prompt_template test.",
+      "value": "level1({{ builtin.prompts.template_level_2 }})",
+      "required": false,
+      "readonly": false
     }
   ]
 }

@@ -200,6 +200,10 @@ function upsertMessage(
   return messages.map((item) => (item.id === message.id ? message : item));
 }
 
+function failureMessage(failure: { code: string; message: string }): string {
+  return `${failure.code}: ${failure.message}`;
+}
+
 function applyEvent(store: RuntimeStore, event: ServerEvent): RuntimeStore {
   if (event.type === "session.attached") {
     return {
@@ -214,7 +218,9 @@ function applyEvent(store: RuntimeStore, event: ServerEvent): RuntimeStore {
     return {
       ...store,
       connection: "connected",
-      error: null,
+      error: event.payload.run.failure
+        ? failureMessage(event.payload.run.failure)
+        : null,
       lastSequence: event.sequence,
       sessionId: event.sessionId,
       snapshot: clone(event.payload),
@@ -241,6 +247,14 @@ function applyEvent(store: RuntimeStore, event: ServerEvent): RuntimeStore {
       };
     case "run.state.changed":
       next = { ...snapshot, run: clone(event.payload) };
+      if (event.payload.failure) {
+        return {
+          ...store,
+          error: failureMessage(event.payload.failure),
+          lastSequence: event.sequence,
+          snapshot: next,
+        };
+      }
       break;
     case "run.trace.started":
       return {
@@ -428,12 +442,21 @@ function applyEvent(store: RuntimeStore, event: ServerEvent): RuntimeStore {
           revision: snapshot.conversation.revision + 1,
           messages: snapshot.conversation.messages.map((message) =>
             message.id === event.payload.messageId
-              ? { ...message, status: "failed" as const }
+              ? {
+                  ...message,
+                  status: "failed" as const,
+                  failure: clone(event.payload.failure),
+                }
               : message,
           ),
         },
       };
-      break;
+      return {
+        ...store,
+        error: failureMessage(event.payload.failure),
+        lastSequence: event.sequence,
+        snapshot: next,
+      };
     case "variables.updated":
       next = {
         ...snapshot,

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AlertCircle,
   Check,
   ChevronDown,
   Database,
@@ -11,6 +12,7 @@ import {
   FolderX,
   PencilLine,
   Plus,
+  RefreshCw,
   Square,
   Trash2,
   X,
@@ -540,14 +542,28 @@ function ConversationPanel({
               {t("chat.welcome")}
             </div>
           </article>
-          {messages?.map((message) =>
-            message.role === "user" ? (
+          {messages?.map((message) => {
+            if (message.role === "user") {
+              return (
               <article className="flex justify-end" key={message.id}>
                 <div className="max-w-[82%] rounded-lg bg-[#e8f2f0] px-4 py-3 text-sm leading-6 text-[#19383d]">
                   {message.content.map((part) => part.text).join("\n")}
                 </div>
               </article>
-            ) : (
+              );
+            }
+
+            const content = message.content.map((part) => part.text).join("\n");
+            const failure = message.failure ?? (
+              snapshot && message.requestId === snapshot.run.runId
+                ? snapshot.run.failure
+                : undefined
+            );
+            const modelRetry = message.status === "streaming" &&
+              snapshot && message.requestId === snapshot.run.runId
+              ? snapshot.run.modelRetry
+              : undefined;
+            return (
               <article className="min-w-0" key={message.id}>
                 <button
                   aria-label={message.requestId
@@ -577,28 +593,92 @@ function ConversationPanel({
                   )}
                 </button>
 
-                <details className="group mb-4 border-l-2 border-[#9bbdb9] pl-3">
-                  <summary className="cursor-pointer select-none text-xs font-medium text-[#587176] outline-none focus-visible:ring-2 focus-visible:ring-[#0c766e] focus-visible:ring-offset-2">
-                    {t("chat.thinking")}
-                    {message.status === "streaming" && (
-                      <span className="motion-safe:animate-pulse"> ...</span>
-                    )}
-                  </summary>
-                  <p className="mt-2 text-xs leading-5 text-[#65797d]">
-                    {message.thinkingSummary || t("chat.pendingThinking")}
-                  </p>
-                </details>
+                {(message.status !== "failed" || message.thinkingSummary) && (
+                  <details className="group mb-4 border-l-2 border-[#9bbdb9] pl-3">
+                    <summary className="cursor-pointer select-none text-xs font-medium text-[#587176] outline-none focus-visible:ring-2 focus-visible:ring-[#0c766e] focus-visible:ring-offset-2">
+                      {t("chat.thinking")}
+                      {message.status === "streaming" && (
+                        <span className="motion-safe:animate-pulse"> ...</span>
+                      )}
+                    </summary>
+                    <p className="mt-2 text-xs leading-5 text-[#65797d]">
+                      {message.thinkingSummary || t("chat.pendingThinking")}
+                    </p>
+                  </details>
+                )}
+
+                {modelRetry && (
+                  <div
+                    className="mb-3 flex min-w-0 items-start gap-2 border-l-2 border-[#c28a2f] bg-[#fff8e7] px-3 py-2 text-[#6d4a16]"
+                    data-model-retry
+                    role="status"
+                  >
+                    <RefreshCw
+                      aria-hidden="true"
+                      className={`mt-0.5 shrink-0 ${modelRetry.phase === "attempting" ? "motion-safe:animate-spin" : ""}`}
+                      size={13}
+                    />
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-semibold leading-4">
+                        {modelRetry.phase === "waiting"
+                          ? t("chat.retryWaiting", {
+                              attempt: modelRetry.attempt,
+                              maxAttempts: modelRetry.maxAttempts,
+                              delay: (modelRetry.delayMs / 1_000).toFixed(1),
+                            })
+                          : t("chat.retryAttempting", {
+                              attempt: modelRetry.attempt,
+                              maxAttempts: modelRetry.maxAttempts,
+                            })}
+                      </p>
+                      <p className="break-words font-mono text-[9px] leading-4 text-[#80602e]">
+                        {modelRetry.reason}
+                      </p>
+                    </div>
+                  </div>
+                )}
 
                 {message.status === "streaming" &&
-                !message.content.map((part) => part.text).join("") ? (
+                !content ? (
                   <p className="text-sm text-[#65797d]">
                     {t("chat.generating")}
                   </p>
-                ) : (
+                ) : content ? (
                   <MarkdownContent
-                    source={message.content.map((part) => part.text).join("\n")}
+                    source={content}
                     variant="conversation"
                   />
+                ) : null}
+                {message.status === "failed" && (
+                  <div
+                    className="mt-3 border-l-2 border-[#b44747] bg-[#fff1f1] px-3 py-2.5 text-[#702f2f]"
+                    data-chat-failure
+                    role="alert"
+                  >
+                    <div className="flex min-w-0 items-center gap-1.5 text-[10px] font-semibold">
+                      <AlertCircle aria-hidden="true" className="shrink-0" size={13} />
+                      <span>{t("chat.failureTitle")}</span>
+                      {failure && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span>
+                            {t(`debug.failure.phase.${failure.phase}` as Parameters<typeof t>[0])}
+                          </span>
+                          <code className="ml-auto shrink-0 font-mono text-[9px] font-normal">
+                            {failure.code}
+                          </code>
+                        </>
+                      )}
+                    </div>
+                    <p className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-4">
+                      {failure?.message ?? t("chat.failureUnknown")}
+                    </p>
+                    {failure && (
+                      <p className="mt-1 text-[9px] text-[#8b5555]">
+                        {failure.retryable ? t("chat.failureRetryable") : t("chat.failureNotRetryable")}
+                      </p>
+                    )}
+                  </div>
                 )}
                 {message.status === "streaming" && (
                   <button
@@ -612,8 +692,8 @@ function ConversationPanel({
                   </button>
                 )}
               </article>
-            ),
-          )}
+            );
+          })}
           <div ref={messageEndRef} />
         </div>
       </div>

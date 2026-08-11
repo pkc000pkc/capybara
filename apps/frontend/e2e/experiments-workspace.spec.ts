@@ -38,7 +38,7 @@ test.beforeAll(async () => {
     "",
   ].join("\n"), "utf8");
   fs.mkdirSync(path.join(e2eProject, ".capybara", "hooks"), { recursive: true });
-  fs.writeFileSync(path.join(e2eProject, ".capybara", "hooks", "experience-extractor.ts"), [
+  fs.writeFileSync(path.join(e2eProject, "hooks", "experience-extractor.ts"), [
     'import { defineHook } from "@capybara-agent/sdk";',
     "export default defineHook({",
     '  name: "experience-extractor",',

@@ -247,6 +247,10 @@ test('empty project directories require confirmation and initialize a runnable p
         'main.j2',
         'agent.md',
         '.capybara/hooks/context-compression.ts',
+        '.capybara/hooks/hook-authoring.ts',
+        '.capybara/harnesses/hook-authoring/manifest.json',
+        '.capybara/harnesses/hook-authoring/hook-authoring.j2',
+        'hooks/.gitkeep',
         'tools/files/manifest.json',
         'tools/files/runner.mjs',
         '.gitignore',
@@ -270,6 +274,7 @@ test('empty project directories require confirmation and initialize a runnable p
       })
       assert.equal(catalog.statusCode, 200)
       const fileTools = catalog.json().items.find((item: any) => item.package === 'project-files')
+      assert.equal(catalog.json().items.some((item: any) => item.kind === 'hook'), false)
       assert.deepEqual(fileTools.tools.map((tool: any) => tool.name), [
         'read_file',
         'list_files',
@@ -306,6 +311,11 @@ export default defineHook({
       const createdHookModule = createdHook.json<any>()
       assert.equal(createdHookModule.hooks[0].checkpoint, 'after_loop')
       assert.equal(createdHookModule.hooks[0].triggerSummary, 'status')
+      assert.equal(createdHookModule.source, 'hooks/audit-snapshot.ts')
+      assert.equal(
+        fs.existsSync(path.join(projectDir, 'hooks', 'audit-snapshot.ts')),
+        true,
+      )
 
       const savedHook = await app.inject({
         method: 'PUT',
@@ -349,8 +359,12 @@ export default defineHook({
       })
       assert.equal(deletedHook.statusCode, 200)
       assert.equal(
-        fs.existsSync(path.join(projectDir, '.capybara', 'hooks', 'audit-snapshot.ts')),
+        fs.existsSync(path.join(projectDir, 'hooks', 'audit-snapshot.ts')),
         false,
+      )
+      assert.equal(
+        fs.existsSync(path.join(projectDir, '.capybara', 'hooks', 'context-compression.ts')),
+        true,
       )
 
       const toolInvocation = await app.inject({
@@ -472,9 +486,15 @@ test('runtime connection publishes a complete snapshot and rejects malformed com
         'run_command',
       ],
     )
-    assert.equal(snapshot.payload.harnesses.items.length, 0)
+    assert.deepEqual(
+      snapshot.payload.harnesses.items.map((item) => item.id),
+      ['capybara-system:hook-authoring'],
+    )
     assert.match(snapshot.payload.template.source, /for harness in harnesses/)
-    assert.deepEqual(snapshot.payload.variables.value.harnesses, [])
+    assert.deepEqual(
+      snapshot.payload.variables.value.harnesses.map((item) => item.id),
+      ['capybara-system:hook-authoring'],
+    )
     assert.equal(snapshot.payload.timeline.steps.length, 4)
     assert.equal(snapshot.payload.renderResult?.messages[0]?.role, 'system')
     assert.match(
@@ -595,6 +615,10 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
       snapshot.payload.variables.value.builtin.prompts.agent_identity ?? '',
       /Capybara/,
     )
+    assert.equal(
+      snapshot.payload.variables.value.builtin.prompts.template_level_1,
+      'level1(level2(level3(leaf-value)))',
+    )
     const systemVariablesResponse = await app.inject({
       method: 'GET',
       url: '/api/resources/system-variables',
@@ -624,6 +648,7 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
     )
     assert.deepEqual(sysMessageDefinition, {
       key: 'sys_message',
+      type: 'text',
       label: 'LLM messages',
       description: 'Runtime-managed complete LLM message list exposed as builtin.sys_message.',
       value: '',
@@ -1514,6 +1539,61 @@ test('starting another run replaces current trace data', async () => {
   })
 })
 
+test('model retry progress is published and cleared after success', async () => {
+  const llm = fakeLlm(async (request) => {
+    request.onRetry?.({
+      phase: 'waiting',
+      attempt: 2,
+      maxAttempts: 4,
+      delayMs: 1_000,
+      reason: 'HTTP 503 Service Unavailable',
+      statusCode: 503,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    request.onRetry?.({
+      phase: 'attempting',
+      attempt: 2,
+      maxAttempts: 4,
+      delayMs: 0,
+      reason: 'HTTP 503 Service Unavailable',
+      statusCode: 503,
+    })
+    return {
+      provider: 'custom',
+      model: 'test-model',
+      text: JSON.stringify({ status: 'completed', content: 'Recovered after retry.' }),
+      finishReason: 'stop',
+      raw: {},
+    }
+  })
+
+  await withRuntime(async (client) => {
+    const start = client.events.length
+    client.send('chat.message.send', {
+      clientMessageId: 'retry-progress-message',
+      content: [{ type: 'text', text: 'Retry the model request' }],
+      autoStart: true,
+    })
+    const completed = await client.waitFor(
+      'run.state.changed',
+      (event) => event.payload.status === 'completed',
+      start,
+    )
+    const retryStates = client.events.slice(start).filter(
+      (event): event is EventOf<'run.state.changed'> =>
+        event.type === 'run.state.changed' && event.payload.modelRetry !== undefined,
+    )
+    assert.deepEqual(retryStates.map((event) => event.payload.modelRetry?.phase), [
+      'waiting',
+      'attempting',
+    ])
+    assert.equal(retryStates[0]?.payload.modelRetry?.attempt, 2)
+    assert.equal(retryStates[0]?.payload.modelRetry?.maxAttempts, 4)
+    assert.equal(retryStates[0]?.payload.modelRetry?.statusCode, 503)
+    assert.equal(completed.payload.modelRetry, undefined)
+  }, { llm })
+})
+
 test('model failures preserve phase, message, and request artifact links', async () => {
   const llm = fakeLlm(async () => {
     throw new Error('LLM request timed out')
@@ -1537,6 +1617,16 @@ test('model failures preserve phase, message, and request artifact links', async
     assert.equal(typeof failed.payload.failure?.requestArtifactId, 'string')
     assert.equal(typeof failed.payload.failure?.errorArtifactId, 'string')
 
+    const assistantFailed = client.events
+      .slice(start)
+      .find(
+        (event): event is EventOf<'chat.assistant.failed'> =>
+          event.type === 'chat.assistant.failed',
+      )
+    assert.deepEqual(assistantFailed?.payload.failure, failed.payload.failure)
+    assert.equal(assistantFailed?.payload.code, failed.payload.failure?.code)
+    assert.equal(assistantFailed?.payload.message, failed.payload.failure?.message)
+
     const failedStep = client.events
       .slice(start)
       .filter(
@@ -1549,6 +1639,19 @@ test('model failures preserve phase, message, and request artifact links', async
       (failedStep?.detail?.error as { phase?: string } | undefined)?.phase,
       'model_transport',
     )
+
+    const snapshotIndex = client.events.length
+    const snapshotId = client.send('runtime.snapshot.get', {})
+    const snapshot = await client.waitFor(
+      'runtime.snapshot',
+      (event) => event.correlationId === snapshotId,
+      snapshotIndex,
+    )
+    const failedAssistant = snapshot.payload.conversation.messages.find(
+      (message) => message.id === assistantFailed?.payload.messageId,
+    )
+    assert.equal(failedAssistant?.status, 'failed')
+    assert.deepEqual(failedAssistant?.failure, failed.payload.failure)
   }, { llm })
 })
 
@@ -1628,8 +1731,11 @@ test('attaching a tool automatically binds and renders its harness', async () =>
       (event) => event.payload.items.length === 1,
       start,
     )
-    assert.equal(harnesses.payload.items.length, 1)
-    assert.equal(harnesses.payload.items[0]?.bindings[0]?.source, 'tool')
+    const fileHarness = harnesses.payload.items.find(
+      (item) => item.id === 'filesystem-guidance:file-inspection',
+    )
+    assert.equal(harnesses.payload.items.length, 2)
+    assert.equal(fileHarness?.bindings[0]?.source, 'tool')
     assert.equal(tools.payload.items.length, 1)
     assert.equal(requests.length, 2)
   }, { llm })
@@ -1677,6 +1783,88 @@ test('model and matching experience harnesses bind automatically', async () => {
     )
     assert.match(experienceHarness?.content ?? '', /planned work/)
   }, { llm })
+})
+
+test('test-project harness injects runtime variables and rerenders after variable changes', async () => {
+  await withRuntime(async (client) => {
+    const modeIndex = client.events.length
+    client.send('run.mode.set', { mode: 'step' })
+    await client.waitFor(
+      'run.state.changed',
+      (event) => event.payload.mode === 'step' && event.payload.variablesEditable,
+      modeIndex,
+    )
+
+    const messageIndex = client.events.length
+    client.send('chat.message.send', {
+      clientMessageId: 'harness-variable-probe-message',
+      content: [{ type: 'text', text: 'harness variable probe' }],
+      autoStart: false,
+    })
+    const attached = await client.waitFor(
+      'runtime.harnesses.updated',
+      (event) => event.payload.items.some(
+        (item) => item.id === 'variable-injection:runtime-variable-probe'
+          && item.content.includes('user_message=harness variable probe'),
+      ),
+      messageIndex,
+    )
+    const initialHarness = attached.payload.items.find(
+      (item) => item.id === 'variable-injection:runtime-variable-probe',
+    )
+    assert.match(initialHarness?.content ?? '', /request=harness variable probe/)
+    assert.match(initialHarness?.content ?? '', /context_marker=missing/)
+
+    const snapshotIndex = client.events.length
+    const snapshotId = client.send('runtime.snapshot.get', {})
+    const snapshot = await client.waitFor(
+      'runtime.snapshot',
+      (event) => event.correlationId === snapshotId,
+      snapshotIndex,
+    )
+    const variableIndex = client.events.length
+    client.send('variables.apply', {
+      baseRevision: snapshot.payload.variables.revision,
+      patch: [
+        { op: 'replace', path: '/task/title', value: 'runtime-task-updated' },
+        { op: 'add', path: '/context/harness_probe', value: 'runtime-context-updated' },
+        { op: 'add', path: '/context/harness_count', value: 7 },
+        { op: 'add', path: '/context/harness_enabled', value: false },
+        { op: 'add', path: '/context/harness_items', value: ['runtime-a', 'runtime-b'] },
+        { op: 'add', path: '/context/harness_meta', value: { source: 'runtime' } },
+        { op: 'add', path: '/context/harness_empty', value: null },
+      ],
+    })
+    const updated = await client.waitFor(
+      'runtime.harnesses.updated',
+      (event) => event.payload.items.some(
+        (item) => item.id === 'variable-injection:runtime-variable-probe'
+          && item.content.includes('task_title=runtime-task-updated')
+          && item.content.includes('context_marker=runtime-context-updated')
+          && item.content.includes('count=7')
+          && item.content.includes('enabled=false')
+          && item.content.includes('items=runtime-a,runtime-b')
+          && item.content.includes('meta_source=runtime')
+          && item.content.includes('empty=null'),
+      ),
+      variableIndex,
+    )
+    const rendered = await client.waitFor(
+      'render.result.updated',
+      (event) => event.payload.messages[0]?.content.includes('context_marker=runtime-context-updated') ?? false,
+      variableIndex,
+    )
+    const updatedHarness = updated.payload.items.find(
+      (item) => item.id === 'variable-injection:runtime-variable-probe',
+    )
+    assert.match(updatedHarness?.content ?? '', /user_message=harness variable probe/)
+    assert.match(updatedHarness?.content ?? '', /count=7/)
+    assert.match(updatedHarness?.content ?? '', /enabled=false/)
+    assert.match(updatedHarness?.content ?? '', /items=runtime-a,runtime-b/)
+    assert.match(updatedHarness?.content ?? '', /meta_source=runtime/)
+    assert.match(updatedHarness?.content ?? '', /empty=null/)
+    assert.match(rendered.payload.messages[0]?.content ?? '', /task_title=runtime-task-updated/)
+  })
 })
 
 test('runtime continues on running status and exits only on completed status', async () => {

@@ -147,7 +147,7 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
       : variable),
   })
   fs.mkdirSync(path.join(projectDir, '.capybara', 'hooks'), { recursive: true })
-  fs.writeFileSync(path.join(projectDir, '.capybara', 'hooks', 'experience-extractor.ts'), EXPERIENCE_HOOK)
+  fs.writeFileSync(path.join(projectDir, 'hooks', 'experience-extractor.ts'), EXPERIENCE_HOOK)
   fs.mkdirSync(path.join(projectDir, 'experiments'), { recursive: true })
   fs.writeFileSync(path.join(projectDir, '.capybara', 'experiment-adapter.json'), `${JSON.stringify({
     version: 1,

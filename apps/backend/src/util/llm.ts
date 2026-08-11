@@ -15,6 +15,8 @@ export type {
   LlmMessage,
   LlmProtocol,
   LlmProviderName,
+  LlmRetryHandler,
+  LlmRetryNotification,
   LlmRole,
   LlmToolCall,
   LlmToolDefinition,

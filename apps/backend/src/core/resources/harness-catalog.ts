@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import path from 'node:path'
 
 import { HarnessRegistry } from '#core/harnesses/harness-registry'
 import type { HarnessActivation, HarnessType } from '#core/harnesses/types'
@@ -42,4 +43,31 @@ export function loadHarnessCatalog(
         .toLowerCase(),
     }
   })
+}
+
+function systemHarnessManifests(projectDir: string): string[] {
+  const root = path.join(projectDir, '.capybara', 'harnesses')
+  if (!fs.existsSync(root)) return []
+  const manifests: string[] = []
+  const visit = (directory: string) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const target = path.join(directory, entry.name)
+      if (entry.isDirectory()) visit(target)
+      if (entry.isFile() && entry.name === 'manifest.json') {
+        manifests.push(path.relative(projectDir, target).replaceAll('\\', '/'))
+      }
+    }
+  }
+  visit(root)
+  return manifests.sort()
+}
+
+export function loadRuntimeHarnessCatalog(
+  projectDir: string,
+  manifestPaths: readonly string[],
+): HarnessCatalogEntry[] {
+  return loadHarnessCatalog(
+    projectDir,
+    [...new Set([...systemHarnessManifests(projectDir), ...manifestPaths])],
+  )
 }

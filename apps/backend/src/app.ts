@@ -22,6 +22,7 @@ import {
   isInitializableProjectDirectory,
 } from '#core/project-initializer'
 import { ProjectResources } from '#core/project-resources'
+import { resolveSystemPromptVariables } from '#core/system-prompt-templates'
 import {
   ProjectResourceRegistry,
   ResourceRevisionConflict,
@@ -732,16 +733,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   })
   app.post('/api/resources/project-settings/llm/test', async (request, reply) => {
     let settings: ReturnType<ProjectResources['readSettings']>
-    let promptVariable: ReturnType<ProjectResources['readSystemVariables']>['variables'][number] | undefined
+    let promptVariable: { key: string; value: string } | undefined
     try {
       const resources = new ProjectResources(requestProject(request).path)
       settings = resources.resolveSettings({ llm: request.body })
       const variables = resources.readSystemVariables().variables
-      promptVariable = variables.find((variable) => (
-        variable.key === 'llm_test_prompt' && variable.value.trim()
-      )) ?? variables.find((variable) => (
-        variable.key === 'agent_identity' && variable.value.trim()
+      const prompts = resolveSystemPromptVariables(variables).prompts
+      const key = ['llm_test_prompt', 'agent_identity'].find((candidate) => (
+        prompts[candidate]?.trim()
       ))
+      promptVariable = key ? { key, value: prompts[key] as string } : undefined
       if (!promptVariable) {
         throw new Error('project system variables must define llm_test_prompt or agent_identity')
       }

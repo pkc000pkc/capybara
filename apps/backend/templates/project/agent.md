@@ -56,6 +56,8 @@ Document the important directories and ownership boundaries here. Keep the descr
 
 Use a hook when project-specific code must inspect or transform runtime state. Keep one hook definition per file, expose a clear registration/default export, and make trigger conditions explicit. Hooks should return reviewable changes or artifacts rather than silently mutating unrelated state.
 
+Store user-defined hooks in the project-root `hooks/*.ts` directory so they can be watched, tested, and edited as project resources. Treat `.capybara/hooks/*.ts` as system-owned runtime hooks and do not modify them.
+
 When the project uses training or feedback:
 
 - Keep training and held-out testing separate.

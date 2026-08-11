@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "package": "variable-injection",
+  "harnesses": [
+    {
+      "name": "runtime-variable-probe",
+      "description": "Verifies that runtime variables are rendered into Harness content.",
+      "type": "experience",
+      "entry": "runtime-variable-probe.j2",
+      "priority": 90,
+      "activation": {
+        "keywords": ["harness variable probe"],
+        "tags": ["test", "variables"]
+      },
+      "inputs": [
+        "user_message",
+        "task.title",
+        "context.harness_probe",
+        "context.harness_count",
+        "context.harness_enabled",
+        "context.harness_items",
+        "context.harness_meta",
+        "context.harness_empty"
+      ],
+      "requiredTools": [],
+      "examples": [
+        {
+          "request": "harness variable probe",
+          "user_message": "preview-user-message",
+          "task": { "title": "preview-task-title" },
+          "context": {
+            "harness_probe": "preview-context-marker",
+            "harness_count": 3,
+            "harness_enabled": true,
+            "harness_items": ["preview-a", "preview-b"],
+            "harness_meta": { "source": "preview" },
+            "harness_empty": null
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+Harness variable injection probe.
+user_message={{ user_message }}
+request={{ request }}
+task_title={{ task.title }}
+context_marker={% if context.harness_probe %}{{ context.harness_probe }}{% else %}missing{% endif %}
+count={% if context.harness_count != null %}{{ context.harness_count }}{% else %}missing{% endif %}
+enabled={% if context.harness_enabled %}true{% else %}false{% endif %}
+items={% if context.harness_items %}{{ context.harness_items | join(',') }}{% else %}missing{% endif %}
+meta_source={% if context.harness_meta %}{{ context.harness_meta.source }}{% else %}missing{% endif %}
+empty={% if context.harness_empty == null %}null{% else %}{{ context.harness_empty }}{% endif %}

@@ -47,6 +47,17 @@ export interface RuntimeFailure {
   timestamp: string
 }
 
+export interface RuntimeModelRetry {
+  phase: 'waiting' | 'attempting'
+  stepId: string
+  attempt: number
+  maxAttempts: number
+  delayMs: number
+  reason: string
+  statusCode?: number
+  updatedAt: string
+}
+
 export interface RunState {
   runId: string | null
   mode: ExecutionMode
@@ -54,6 +65,7 @@ export interface RunState {
   currentStep: number
   currentStepId?: string
   failure?: RuntimeFailure
+  modelRetry?: RuntimeModelRetry
   variablesEditable: boolean
   updatedAt: string
 }
@@ -124,6 +136,7 @@ export interface ChatMessage {
   status: 'queued' | 'streaming' | 'completed' | 'failed' | 'cancelled'
   content: ChatContentText[]
   thinkingSummary?: string
+  failure?: RuntimeFailure
   createdAt: string
   completedAt?: string
 }
@@ -674,6 +687,7 @@ export interface EventPayloadMap {
     code: string
     message: string
     retryable: boolean
+    failure: RuntimeFailure
   }
   'run.state.changed': RunState
   'run.trace.started': {

@@ -28,14 +28,19 @@ test('resource HTTP API exposes tools, skills, and harnesses and executes their 
     const harnessModule = catalog.items.find(
       (item: any) => item.kind === 'harness' && item.package === 'document-analysis',
     )
-    const hookModule = catalog.items.find((item: any) => item.kind === 'hook')
     const readFile = toolModule.tools.find((item: any) => item.id === 'project-files:read_file')
     const skill = skillModule.skills.find((item: any) => item.id === 'project-files')
     const versionHarness = harnessModule.harnesses.find(
       (item: any) => item.id === 'document-analysis:version-summary',
     )
+    const variableHarnessModule = catalog.items.find(
+      (item: any) => item.kind === 'harness' && item.package === 'variable-injection',
+    )
+    const variableHarness = variableHarnessModule.harnesses.find(
+      (item: any) => item.id === 'variable-injection:runtime-variable-probe',
+    )
     assert.equal(catalog.items.length, 6)
-    assert.equal(hookModule.hooks[0].name, 'context-compression')
+    assert.equal(catalog.items.some((item: any) => item.kind === 'hook'), false)
     assert.equal(toolModule.runner.entry, 'tools/files/runner.mjs')
     assert.deepEqual(toolModule.files.map((file: any) => file.role), ['manifest', 'runner'])
     assert.equal(readFile.diagnostics.length, 0)
@@ -88,6 +93,23 @@ test('resource HTTP API exposes tools, skills, and harnesses and executes their 
     assert.equal(harnessResponse.statusCode, 200)
     assert.equal(harnessResponse.json().matched, true)
     assert.match(harnessResponse.json().rendered, /planned work/)
+
+    const variableHarnessResponse = await app.inject({
+      method: 'POST',
+      url: `/api/resources/harnesses/${encodeURIComponent(variableHarness.id)}/test`,
+      payload: { context: variableHarness.examples[0] },
+    })
+    assert.equal(variableHarnessResponse.statusCode, 200)
+    assert.equal(variableHarnessResponse.json().matched, true)
+    assert.match(variableHarnessResponse.json().rendered, /user_message=preview-user-message/)
+    assert.match(variableHarnessResponse.json().rendered, /request=harness variable probe/)
+    assert.match(variableHarnessResponse.json().rendered, /task_title=preview-task-title/)
+    assert.match(variableHarnessResponse.json().rendered, /context_marker=preview-context-marker/)
+    assert.match(variableHarnessResponse.json().rendered, /count=3/)
+    assert.match(variableHarnessResponse.json().rendered, /enabled=true/)
+    assert.match(variableHarnessResponse.json().rendered, /items=preview-a,preview-b/)
+    assert.match(variableHarnessResponse.json().rendered, /meta_source=preview/)
+    assert.match(variableHarnessResponse.json().rendered, /empty=null/)
   } finally {
     await app.close()
     fs.rmSync(projectDir, { recursive: true, force: true })

@@ -3,11 +3,16 @@ import path from 'node:path'
 
 import { loadLlmConfig } from '#util/llm/config'
 import { enqueueProjectWrite } from '#core/project-write-queue'
+import {
+  resolveSystemPromptVariables,
+  type SystemPromptVariableType,
+} from '#core/system-prompt-templates'
 
 export type SystemVariableScope = 'session' | 'project'
 
 export interface SystemVariableDefinition {
   key: string
+  type: SystemPromptVariableType
   label: string
   description: string
   value: string
@@ -60,6 +65,7 @@ export type ProjectResourceChange =
 const EMPTY_SYSTEM_VARIABLES: SystemVariablesResource = { version: 1, variables: [] }
 const SYS_MESSAGE_VARIABLE: SystemVariableDefinition = {
   key: 'sys_message',
+  type: 'text',
   label: 'LLM messages',
   description: 'Runtime-managed complete LLM message list exposed as builtin.sys_message.',
   value: '',
@@ -193,6 +199,7 @@ export class ProjectResources {
         throw new Error(`readonly system variables can only be defined in the project file: ${variable.key}`)
       }
       if (existing && (
+        variable.type !== existing.type ||
         variable.label !== existing.label ||
         variable.description !== existing.description ||
          variable.value !== existing.value ||
@@ -216,6 +223,7 @@ export class ProjectResources {
         source: variable.readonly ? 'builtin' as const : 'project' as const,
       })),
     }
+    resolveSystemPromptVariables(resource.variables)
     this.writeSystemVariablesFile(resource)
     return resource
   }
@@ -240,6 +248,7 @@ export class ProjectResources {
         variable.value = update.value
       }
       const resource = { version: 1 as const, variables: [...byKey.values()] }
+      resolveSystemPromptVariables(resource.variables)
       this.writeSystemVariablesFile(resource)
       return resource
     })
@@ -372,11 +381,18 @@ export class ProjectResources {
       if (typeof item.value !== 'string' || typeof item.required !== 'boolean') {
         throw new Error(`variables[${index}] requires string value and boolean required`)
       }
+      const type: SystemPromptVariableType = item.type === 'prompt_template'
+        ? 'prompt_template'
+        : 'text'
+      if (item.type !== undefined && item.type !== 'text' && item.type !== 'prompt_template') {
+        throw new Error(`variables[${index}].type must be text or prompt_template`)
+      }
       if (item.readonly === true && item.scope === 'project') {
         throw new Error(`variables[${index}] readonly variables must be session-scoped`)
       }
       return {
         key,
+        type,
         label: typeof item.label === 'string' ? item.label : key,
         description: typeof item.description === 'string' ? item.description : '',
         value: item.value,
@@ -394,6 +410,7 @@ export class ProjectResources {
     const resource = this.validateSystemVariables(
       this.readJson(this.systemVariablesFile, EMPTY_SYSTEM_VARIABLES),
     )
+    resolveSystemPromptVariables(resource.variables)
     return {
       version: 1,
       variables: [
@@ -467,9 +484,11 @@ export class ProjectResources {
             ? 'tools'
           : file.startsWith('skills/')
             ? 'skills'
-          : file.startsWith('harnesses/')
+          : file.startsWith('harnesses/') || file.startsWith('.capybara/harnesses/')
               ? 'harnesses'
-              : file.startsWith('.capybara/hooks/') && file.endsWith('.ts')
+              : (
+                  file.startsWith('.capybara/hooks/') || file.startsWith('hooks/')
+                ) && file.endsWith('.ts')
                 ? 'hooks'
               : undefined
       if (!change) return

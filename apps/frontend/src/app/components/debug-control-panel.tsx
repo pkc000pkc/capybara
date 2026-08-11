@@ -5,6 +5,7 @@ import {
   Eye,
   Pause,
   Play,
+  RefreshCw,
   RotateCcw,
   Square,
   StepForward,
@@ -276,7 +277,31 @@ export default function DebugControlPanel(props: Props) {
         <ActionButton action="interrupt" disabled={!canInterrupt} icon={Square} label={t("debug.interrupt")} onClick={onInterrupt} tone="danger" />
         <span aria-hidden="true" className="mx-1 h-5 w-px bg-[#d5dfdf]" />
         <ActionButton action="restore-previous" disabled={!canRestore} icon={Undo2} label={t("debug.restorePrevious")} onClick={onRestorePrevious} />
-        {run.status === "failed" && run.failure ? (
+        {run.modelRetry ? (
+          <span
+            className="ml-auto flex min-w-0 max-w-[48%] items-center gap-1 px-1 text-[9px] font-semibold text-[#815d21]"
+            data-model-retry-summary
+            title={`${run.modelRetry.reason}${run.modelRetry.delayMs > 0 ? ` · ${run.modelRetry.delayMs} ms` : ""}`}
+          >
+            <RefreshCw
+              aria-hidden="true"
+              className={`shrink-0 ${run.modelRetry.phase === "attempting" ? "motion-safe:animate-spin" : ""}`}
+              size={11}
+            />
+            <span className="shrink-0">
+              {t(
+                run.modelRetry.phase === "waiting"
+                  ? "debug.modelRetryWaiting"
+                  : "debug.modelRetryAttempting",
+                {
+                  attempt: run.modelRetry.attempt,
+                  maxAttempts: run.modelRetry.maxAttempts,
+                },
+              )}
+            </span>
+            <span className="truncate font-mono font-normal">{run.modelRetry.reason}</span>
+          </span>
+        ) : run.status === "failed" && run.failure ? (
           <button
             className="ml-auto min-w-0 truncate px-1 text-[9px] font-semibold uppercase text-[#9b4141] outline-none hover:bg-[#f7e7e7] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#9b4141]"
             data-run-status={run.status}

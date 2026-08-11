@@ -111,7 +111,7 @@ export class ProjectResourceRegistry {
       ...skills.list().map((skill) => this.skillModule(skill)),
       ...groupBy(harnesses.list(), (harness) => harness.manifestFile)
         .map((group) => this.harnessModule(group, toolNames)),
-      ...hooks.list().map((hook) => this.hookModule(hook)),
+      ...hooks.listProject().map((hook) => this.hookModule(hook)),
     ]
     return {
       revision: hash(...items.map((item) => `${item.id}:${item.revision}`)),
@@ -212,7 +212,7 @@ export class ProjectResourceRegistry {
 
   async testHook(id: string, fixtureValue: unknown) {
     const registry = new HookRegistry(this.projectDir)
-    const hook = registry.get(id)
+    const hook = registry.getProject(id)
     if (!hook) throw new Error('Hook resource was not found')
     if (!hook.loadable) throw new Error(hook.diagnostics[0]?.message ?? 'Hook is invalid')
     const settings = this.resources.readSettings()

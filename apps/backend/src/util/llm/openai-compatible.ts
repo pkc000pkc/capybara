@@ -6,6 +6,7 @@ import type {
   LlmChatResponse,
   LlmConfig,
   LlmProvider,
+  LlmRetryHandler,
   LlmTextDeltaHandler,
   LlmToolCall,
   LlmUsage,
@@ -88,6 +89,26 @@ function retryableError(error: unknown): boolean {
     || /timed out|socket hang up/i.test(error.message)
 }
 
+async function waitForRetry(
+  failedAttempt: number,
+  maxRetries: number,
+  reason: string,
+  signal?: AbortSignal,
+  onRetry?: LlmRetryHandler,
+  statusCode?: number,
+): Promise<void> {
+  const delayMs = Math.min(1_000 * 2 ** (failedAttempt - 1), 8_000)
+  const notification = {
+    attempt: failedAttempt + 1,
+    maxAttempts: maxRetries + 1,
+    reason,
+    ...(statusCode === undefined ? {} : { statusCode }),
+  }
+  onRetry?.({ ...notification, phase: 'waiting', delayMs })
+  await sleep(delayMs, signal)
+  onRetry?.({ ...notification, phase: 'attempting', delayMs: 0 })
+}
+
 async function postJsonWithRetry(
   target: string,
   headers: Record<string, string>,
@@ -95,19 +116,32 @@ async function postJsonWithRetry(
   timeoutMs: number,
   maxRetries: number,
   signal?: AbortSignal,
+  onRetry?: LlmRetryHandler,
 ): Promise<HttpResult> {
   let lastError: unknown
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    let retryReason = 'Retrying model request'
+    let retryStatusCode: number | undefined
     try {
       signal?.throwIfAborted()
       const result = await postJson(target, headers, body, timeoutMs, signal)
       if (!retryableStatus(result.statusCode) || attempt === maxRetries) return result
       lastError = new Error(`LLM request failed with retryable status ${result.statusCode}`)
+      retryReason = `HTTP ${result.statusCode}${result.statusMessage ? ` ${result.statusMessage}` : ''}`
+      retryStatusCode = result.statusCode
     } catch (error) {
       lastError = error
       if (!retryableError(error) || attempt === maxRetries) throw error
+      retryReason = error instanceof Error ? error.message : String(error)
     }
-    await sleep(Math.min(1_000 * 2 ** attempt, 8_000), signal)
+    await waitForRetry(
+      attempt + 1,
+      maxRetries,
+      retryReason,
+      signal,
+      onRetry,
+      retryStatusCode,
+    )
   }
   throw lastError
 }
@@ -226,10 +260,13 @@ async function postSseWithRetry(
   maxRetries: number,
   onEvent: (event: string, data: string) => void,
   signal?: AbortSignal,
+  onRetry?: LlmRetryHandler,
 ): Promise<HttpResult> {
   let lastError: unknown
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     let receivedEvent = false
+    let retryReason = 'Retrying model request'
+    let retryStatusCode: number | undefined
     try {
       const result = await postSse(
         target,
@@ -244,12 +281,22 @@ async function postSseWithRetry(
       )
       if (!retryableStatus(result.statusCode) || attempt === maxRetries) return result
       lastError = new Error(`LLM request failed with retryable status ${result.statusCode}`)
+      retryReason = `HTTP ${result.statusCode}${result.statusMessage ? ` ${result.statusMessage}` : ''}`
+      retryStatusCode = result.statusCode
     } catch (error) {
       lastError = error
       const retryableAfterEvent = error instanceof RetryableLlmStreamError && error.retryableAfterEvent
       if ((receivedEvent && !retryableAfterEvent) || !retryableError(error) || attempt === maxRetries) throw error
+      retryReason = error instanceof Error ? error.message : String(error)
     }
-    await sleep(Math.min(1_000 * 2 ** attempt, 8_000), signal)
+    await waitForRetry(
+      attempt + 1,
+      maxRetries,
+      retryReason,
+      signal,
+      onRetry,
+      retryStatusCode,
+    )
   }
   throw lastError
 }
@@ -525,6 +572,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       this.config.timeoutMs,
       this.config.maxRetries,
       request.signal,
+      request.onRetry,
     )
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -612,6 +660,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         }
       },
       request.signal,
+      request.onRetry,
     )
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw new Error(`LLM request failed (${response.statusCode} ${response.statusMessage}): ${response.text}`)
@@ -662,6 +711,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       this.config.timeoutMs,
       this.config.maxRetries,
       request.signal,
+      request.onRetry,
     )
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -753,6 +803,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         }
       },
       request.signal,
+      request.onRetry,
     )
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw new Error(`LLM request failed (${response.statusCode} ${response.statusMessage}): ${response.text}`)

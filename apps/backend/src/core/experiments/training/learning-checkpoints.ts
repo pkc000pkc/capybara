@@ -1,5 +1,6 @@
 import type { HookFixture, HookTrainingContext } from '#core/hooks/types'
 import type { SystemVariableDefinition } from '#core/project-resources'
+import { resolveSystemPromptVariables } from '#core/system-prompt-templates'
 import type { RuntimeVariables } from '#protocol/runtime-protocol'
 
 export function learningFixture(
@@ -8,10 +9,10 @@ export function learningFixture(
   variables: SystemVariableDefinition[],
   variableValues: Record<string, string> = {},
 ): HookFixture {
-  const prompts = Object.fromEntries(variables.map((variable) => [
-    variable.key,
-    variableValues[variable.key] ?? variable.value,
-  ]))
+  const prompts = resolveSystemPromptVariables(variables.map((variable) => ({
+    ...variable,
+    value: variableValues[variable.key] ?? variable.value,
+  }))).prompts
   const runtimeVariables = {
     builtin: {
       project_path: '',

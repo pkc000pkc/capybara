@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { test } from 'node:test'
 
-import { createLlmService } from '#util/llm'
+import { createLlmService, type LlmRetryNotification } from '#util/llm'
 
 test('LLM service accepts explicit OpenAI-compatible configuration', () => {
   const service = createLlmService({
@@ -217,6 +217,7 @@ test('Responses protocol streams text and function arguments from SSE', async ()
 
 test('Responses protocol retries an overloaded failed event before output starts', async () => {
   let requestCount = 0
+  const retries: LlmRetryNotification[] = []
   await withSseApi((_body, path, response) => {
     assert.equal(path, '/v1/responses')
     requestCount += 1
@@ -229,10 +230,29 @@ test('Responses protocol retries an overloaded failed event before output starts
     const service = createLlmService({
       provider: 'custom', protocol: 'responses', baseUrl, model: 'test-model', maxRetries: 1,
     })
-    const response = await service.stream({ messages: [{ role: 'user', content: 'reply' }] }, () => {})
+    const response = await service.stream({
+      messages: [{ role: 'user', content: 'reply' }],
+      onRetry: (notification) => retries.push(notification),
+    }, () => {})
     assert.equal(response.text, 'done')
   })
   assert.equal(requestCount, 2)
+  assert.deepEqual(retries, [
+    {
+      phase: 'waiting',
+      attempt: 2,
+      maxAttempts: 2,
+      delayMs: 1_000,
+      reason: 'LLM response failed (server_error): Try again later.',
+    },
+    {
+      phase: 'attempting',
+      attempt: 2,
+      maxAttempts: 2,
+      delayMs: 0,
+      reason: 'LLM response failed (server_error): Try again later.',
+    },
+  ])
 })
 
 test('Chat Completions protocol streams content and tool calls from SSE', async () => {

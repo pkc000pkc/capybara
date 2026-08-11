@@ -18,12 +18,23 @@ export function matchesModelHarness(
     models?: string[]
     modelFamilies?: string[]
   }
+  return matchesModelHarnessActivation(activation, provider, model)
+}
+
+export function matchesModelHarnessActivation(
+  activation: { providers?: string[]; models?: string[]; modelFamilies?: string[] },
+  provider: string,
+  model: string,
+): boolean {
   const normalizedProvider = provider.toLowerCase()
   const normalizedModel = model.toLowerCase()
+  const matches = (value: string, actual: string) => value === '*' || value.toLowerCase() === actual
   return Boolean(
-    activation.providers?.some((item) => item.toLowerCase() === normalizedProvider)
-    || activation.models?.some((item) => item.toLowerCase() === normalizedModel)
-    || activation.modelFamilies?.some((item) => normalizedModel.startsWith(item.toLowerCase())),
+    activation.providers?.some((item) => matches(item, normalizedProvider))
+    || activation.models?.some((item) => matches(item, normalizedModel))
+    || activation.modelFamilies?.some((item) => (
+      item === '*' || normalizedModel.startsWith(item.toLowerCase())
+    )),
   )
 }
 

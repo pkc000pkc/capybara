@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "package": "capybara-system",
+  "harnesses": [
+    {
+      "name": "hook-authoring",
+      "description": "Constrain generated user Hooks to the format accepted by the Capybara runtime.",
+      "type": "model",
+      "entry": "hook-authoring.j2",
+      "priority": 10000,
+      "activation": {
+        "providers": ["*"]
+      },
+      "inputs": ["user_message"],
+      "requiredTools": []
+    }
+  ]
+}

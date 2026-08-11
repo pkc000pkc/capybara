@@ -5,17 +5,24 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import nunjucks from 'nunjucks'
 
 import { ContextBuilder, type RenderEvent } from '#core/context-builder'
+import { matchesModelHarnessActivation } from '#core/harnesses/harness-registry'
 import { HookRegistry } from '#core/hooks/hook-registry'
 import { HookRunner } from '#core/hooks/hook-runner'
 import type { HookFixture, HookResult, HookStatusSnapshot } from '#core/hooks/types'
 import { Loop } from '#core/loop'
+import { installSystemProjectResources } from '#core/project-initializer'
+import { enqueueProjectWrite } from '#core/project-write-queue'
 import {
   ProjectResources,
   type ProjectResourceChange,
   type SystemVariablesResource,
 } from '#core/project-resources'
 import {
-  loadHarnessCatalog,
+  resolveSystemPromptVariables,
+  templateVariablePaths,
+} from '#core/system-prompt-templates'
+import {
+  loadRuntimeHarnessCatalog,
   type HarnessCatalogEntry,
 } from '#core/resources/harness-catalog'
 import { SkillRegistry } from '#core/skills/skill-registry'
@@ -55,6 +62,7 @@ import {
   type RuntimeEffectiveContextRevision,
   type RuntimeFailure,
   type RuntimeFailurePhase,
+  type RuntimeModelRetry,
   type RuntimeObservation,
   type RuntimeSnapshot,
   type RuntimeSkillsState,
@@ -77,6 +85,7 @@ import {
   type LlmChatResponse,
   type LlmConfig,
   type LlmMessage,
+  type LlmRetryNotification,
   type LlmToolCall,
   type LlmToolDefinition,
   type LlmUsage,
@@ -100,6 +109,9 @@ export interface RuntimeLoopOptions {
   llm?: RuntimeLlm
   initialState?: RuntimeLoopState
 }
+
+const MAX_GENERATED_HOOK_FILES = 8
+const MAX_GENERATED_HOOK_TOTAL_BYTES = 1024 * 1024
 
 interface Checkpoint {
   id: string
@@ -440,33 +452,6 @@ function assertNoReservedToolNames(tools: readonly ToolDefinition[]): void {
   if (conflict) throw new Error(`project tool name is reserved by the runtime: ${conflict.name}`)
 }
 
-type TemplateNode = {
-  typename?: string
-  value?: unknown
-  target?: TemplateNode
-  val?: TemplateNode
-  findAll(type: unknown): TemplateNode[]
-}
-
-function templateVariablePaths(source: string): Set<string> {
-  const api = nunjucks as unknown as {
-    parser: { parse(value: string): TemplateNode }
-    nodes: { LookupVal: unknown }
-  }
-  const pathOf = (node: TemplateNode): string[] => {
-    if (node.typename === 'Symbol' && typeof node.value === 'string') return [node.value]
-    if (node.typename !== 'LookupVal' || typeof node.val?.value !== 'string') return []
-    const target = node.target ? pathOf(node.target) : []
-    return target.length > 0 ? [...target, node.val.value] : []
-  }
-  return new Set(
-    api.parser.parse(source)
-      .findAll(api.nodes.LookupVal)
-      .map((node) => pathOf(node).join('.'))
-      .filter(Boolean),
-  )
-}
-
 function variablesEditable(run: RunState): boolean {
   return [
     'idle',
@@ -592,6 +577,7 @@ export class RuntimeLoop extends Loop {
   private reservedOutputTokens: number
   private harnessPolicy: ReturnType<ProjectResources['readSettings']>['harness_policy']
   private systemVariables: SystemVariablesResource
+  private systemPromptDependencies: Record<string, string[]> = {}
   private runCounter = 0
   private assistantCounter = 0
   private assistantChunkIndex = 0
@@ -688,9 +674,13 @@ export class RuntimeLoop extends Loop {
       options.projectDir ?? process.env.CAPYBARA_PROJECT_DIR ?? 'test-project',
     )
     this.workspaceDir = path.resolve(options.workspaceDir ?? this.projectDir)
+    if (!fs.statSync(this.projectDir).isDirectory()) {
+      throw new Error(`project is not a directory: ${this.projectDir}`)
+    }
     if (!fs.statSync(this.workspaceDir).isDirectory()) {
       throw new Error(`workspace is not a directory: ${this.workspaceDir}`)
     }
+    installSystemProjectResources(this.projectDir)
     this.projectResources = new ProjectResources(this.projectDir, true)
     const config = this.projectResources.readSettings()
     this.systemVariables = this.projectResources.readSystemVariables()
@@ -742,7 +732,7 @@ export class RuntimeLoop extends Loop {
       items: [],
       catalog: clone(this.toolCatalog),
     }
-    this.harnessCatalog = loadHarnessCatalog(
+    this.harnessCatalog = loadRuntimeHarnessCatalog(
       this.projectDir,
       config.harnesses,
     )
@@ -1018,6 +1008,7 @@ export class RuntimeLoop extends Loop {
     this.run = this.withRun({
       ...snapshot.run,
       ...(wasActive ? { status: 'interrupted' as const } : {}),
+      modelRetry: undefined,
     })
     this.runtimeStatus = {
       ...clone(snapshot.status),
@@ -1411,6 +1402,24 @@ export class RuntimeLoop extends Loop {
     this.emit('run.state.changed', clone(this.run), correlationId)
   }
 
+  private updateModelRetry(
+    stepId: string,
+    retry: LlmRetryNotification | undefined,
+    correlationId: string,
+  ): void {
+    if (!retry && !this.run.modelRetry) return
+    this.run = this.withRun({
+      modelRetry: retry
+        ? {
+            ...retry,
+            stepId,
+            updatedAt: now(),
+          } satisfies RuntimeModelRetry
+        : undefined,
+    })
+    this.emitRun(correlationId)
+  }
+
   private createTimeline(): TimelineStep[] {
     return STEP_BLUEPRINT.map((step, index) => ({
       ...step,
@@ -1441,6 +1450,7 @@ export class RuntimeLoop extends Loop {
       currentStep: 0,
       currentStepId: undefined,
       failure: undefined,
+      modelRetry: undefined,
     })
     this.timeline = this.createTimeline()
     this.timelineRevision += 1
@@ -1909,6 +1919,7 @@ export class RuntimeLoop extends Loop {
       currentStepId: checkpoint.currentStepId,
       status: 'paused',
       failure: undefined,
+      modelRetry: undefined,
     })
     this.snapshotRevision += 1
     this.checkpointRevision += 1
@@ -2541,6 +2552,14 @@ export class RuntimeLoop extends Loop {
       responseFormat: 'json',
       signal: controller.signal,
     }
+    Object.defineProperty(request, 'onRetry', {
+      enumerable: false,
+      value: (retry: LlmRetryNotification) => {
+        if (this.generation === generation) {
+          this.updateModelRetry(step.id, retry, correlationId)
+        }
+      },
+    })
     const nativeStream = llm.stream !== undefined
     const llmConfig = llm.getConfig()
     const requestArtifact = this.createArtifact(
@@ -2605,6 +2624,9 @@ export class RuntimeLoop extends Loop {
       }
     } finally {
       if (this.activeAbortController === controller) this.activeAbortController = undefined
+      if (this.generation === generation) {
+        this.updateModelRetry(step.id, undefined, correlationId)
+      }
     }
     if (this.generation !== generation) return
 
@@ -3087,6 +3109,7 @@ export class RuntimeLoop extends Loop {
     const message = this.messages.find((item) => item.id === messageId)
     if (message) {
       message.status = 'failed'
+      message.failure = clone(failure)
       message.completedAt = now()
     }
     this.activeAssistantId = undefined
@@ -3097,6 +3120,7 @@ export class RuntimeLoop extends Loop {
       code: failure.code,
       message: failure.message,
       retryable: failure.retryable,
+      failure: clone(failure),
     }, correlationId)
   }
 
@@ -3695,11 +3719,25 @@ export class RuntimeLoop extends Loop {
     content: string,
     missingVariables: readonly string[] = [],
   ): RenderResultState {
-    const referencedVariables = templateVariablePaths(this.template.source)
+    const referencedVariables = new Set(
+      [...templateVariablePaths(this.template.source)]
+        .filter((name) => name.startsWith('builtin.prompts.'))
+        .map((name) => name.split('.')[2])
+        .filter((name): name is string => Boolean(name)),
+    )
+    const pendingReferences = [...referencedVariables]
+    while (pendingReferences.length > 0) {
+      const key = pendingReferences.pop() as string
+      for (const dependency of this.systemPromptDependencies[key] ?? []) {
+        if (referencedVariables.has(dependency)) continue
+        referencedVariables.add(dependency)
+        pendingReferences.push(dependency)
+      }
+    }
     const missingReferences = this.systemVariables.variables
       .filter((variable) => variable.required)
       .map((variable) => `builtin.prompts.${variable.key}`)
-      .filter((name) => !referencedVariables.has(name))
+      .filter((name) => !referencedVariables.has(name.split('.')[2] ?? ''))
     const missingValues = [
       ...missingVariables,
       ...this.variables.value.builtin.missing_prompts.map(
@@ -3730,18 +3768,18 @@ export class RuntimeLoop extends Loop {
   }
 
   private systemPromptState(resource: SystemVariablesResource) {
+    const resolved = resolveSystemPromptVariables(resource.variables)
+    this.systemPromptDependencies = resolved.dependencies
     return {
-      prompts: Object.fromEntries(
-        resource.variables
-          .filter((variable) => variable.key !== 'sys_message')
-          .map((variable) => [variable.key, variable.value]),
-      ),
+      prompts: resolved.prompts,
       shared_prompts: resource.variables
         .filter((variable) => variable.key !== 'sys_message' && variable.scope === 'project')
         .map((variable) => variable.key),
       missing_prompts: resource.variables
         .filter((variable) => (
-          variable.key !== 'sys_message' && variable.required && !variable.value.trim()
+          variable.key !== 'sys_message' &&
+          variable.required &&
+          !(resolved.prompts[variable.key] ?? '').trim()
         ))
         .map((variable) => variable.key),
     }
@@ -3824,7 +3862,7 @@ export class RuntimeLoop extends Loop {
           const execution = await new HookRunner(this.llm).run(hook, fixture, controller.signal)
           this.addUsage(execution.usage)
           if (execution.matched && execution.result) {
-            this.applyHookResult(hook, execution.result, claimedPaths, correlationId)
+            await this.applyHookResult(hook, execution.result, claimedPaths, correlationId)
           }
           this.createArtifact(
             'hook-result',
@@ -3878,12 +3916,52 @@ export class RuntimeLoop extends Loop {
     }, correlationId)
   }
 
-  private applyHookResult(
+  private async applyHookResult(
     hook: ReturnType<HookRegistry['list']>[number],
     result: HookResult,
     claimedPaths: Set<string>,
     correlationId: string,
-  ): void {
+  ): Promise<void> {
+    if (result.hookFiles !== undefined) {
+      if (hook.permissions.hooks !== 'write') {
+        throw new Error(`Hook ${hook.id} returned hookFiles without hooks:write permission`)
+      }
+      if (!Array.isArray(result.hookFiles) || result.hookFiles.length === 0) {
+        throw new Error(`Hook ${hook.id} hookFiles must be a non-empty array`)
+      }
+      if (result.hookFiles.length > MAX_GENERATED_HOOK_FILES) {
+        throw new Error(`Hook ${hook.id} returned more than ${MAX_GENERATED_HOOK_FILES} Hook files`)
+      }
+      let totalBytes = 0
+      const candidates = result.hookFiles.map((candidate, index) => {
+        if (!candidate || typeof candidate.name !== 'string' || typeof candidate.source !== 'string') {
+          throw new Error(`Hook ${hook.id} returned an invalid Hook file at index ${index}`)
+        }
+        totalBytes += Buffer.byteLength(candidate.source)
+        return { name: candidate.name, source: candidate.source }
+      })
+      if (totalBytes > MAX_GENERATED_HOOK_TOTAL_BYTES) {
+        throw new Error(
+          `Hook ${hook.id} generated Hook files exceed ${MAX_GENERATED_HOOK_TOTAL_BYTES} bytes`,
+        )
+      }
+      const installed = await enqueueProjectWrite(this.projectDir, () => (
+        this.hookRegistry.createMany(candidates)
+      ))
+      for (const generated of installed) {
+        this.createArtifact(
+          'hook-result',
+          `Hook installed · ${generated.name}`,
+          {
+            name: generated.name,
+            path: path.relative(this.projectDir, generated.entryFile).replaceAll('\\', '/'),
+            revision: generated.revision,
+          },
+          correlationId,
+        )
+      }
+    }
+
     if (result.messages !== undefined) {
       if (hook.permissions.messages !== 'replace') {
         throw new Error(`Hook ${hook.id} returned messages without messages:replace permission`)
@@ -3991,6 +4069,10 @@ export class RuntimeLoop extends Loop {
         }
         if (change === 'settings' || change === 'harnesses') {
           this.reloadProjectHarnesses(settings, `resource:${change}`)
+        }
+        if (change === 'hooks') {
+          this.hookRegistry.reload()
+          this.updateRuntimeStatus({}, `resource:${change}`)
         }
         if (change === 'settings') this.renderAndPublish(`resource:${change}`)
         return
@@ -4282,7 +4364,7 @@ export class RuntimeLoop extends Loop {
     correlationId: string,
   ): void {
     this.harnessPolicy = clone(settings.harness_policy)
-    this.harnessCatalog = loadHarnessCatalog(
+    this.harnessCatalog = loadRuntimeHarnessCatalog(
       this.projectDir,
       settings.harnesses,
     )
@@ -4459,10 +4541,11 @@ export class RuntimeLoop extends Loop {
           models?: string[]
           modelFamilies?: string[]
         }
-        const model = llm.model.toLowerCase()
-        const matched = activation.providers?.some((item) => item.toLowerCase() === llm.provider)
-          || activation.models?.some((item) => item.toLowerCase() === model)
-          || activation.modelFamilies?.some((item) => model.startsWith(item.toLowerCase()))
+        const matched = matchesModelHarnessActivation(
+          activation,
+          llm.provider,
+          llm.model,
+        )
         if (matched) add(entry.id, {
           id: `model:${llm.provider}:${llm.model}`,
           source: 'model',

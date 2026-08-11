@@ -4,9 +4,16 @@ import path from 'node:path'
 import { loadLlmConfig } from '#util/llm/config'
 
 const SYSTEM_PROJECT_TEMPLATE_DIR = path.resolve(import.meta.dirname, '../../templates/project')
-const SYSTEM_PROJECT_TEMPLATE_FILES = [
-  'agent.md',
+const SYSTEM_MANAGED_PROJECT_FILES = [
   '.capybara/hooks/context-compression.ts',
+  '.capybara/hooks/hook-authoring.ts',
+  '.capybara/harnesses/hook-authoring/manifest.json',
+  '.capybara/harnesses/hook-authoring/hook-authoring.j2',
+] as const
+const INITIAL_PROJECT_TEMPLATE_FILES = [
+  'agent.md',
+  ...SYSTEM_MANAGED_PROJECT_FILES,
+  'hooks/.gitkeep',
   'tools/files/manifest.json',
   'tools/files/runner.mjs',
 ] as const
@@ -87,6 +94,7 @@ const INITIAL_SYSTEM_VARIABLES = {
   variables: [
     {
       key: 'resource_loading',
+      type: 'text',
       label: 'Resource loading',
       description: 'Controls discovery and on-demand activation of project resources.',
       value: 'Project tools, harnesses, and skills are a searchable catalog and are not loaded by default. Search for relevant resources before loading them, and use only exact IDs returned by the search.',
@@ -95,6 +103,7 @@ const INITIAL_SYSTEM_VARIABLES = {
     },
     {
       key: 'completion_status',
+      type: 'text',
       label: 'Completion status',
       description: 'Defines the structured status contract used by the runtime Loop.',
       value: 'When you are not making tool calls, output exactly one JSON object with no Markdown fence. Use {"status":"completed","content":"final user-facing response"} when the task is finished, or {"status":"running","content":"brief reason more work is required"} when another model step is required.',
@@ -103,6 +112,7 @@ const INITIAL_SYSTEM_VARIABLES = {
     },
     {
       key: 'workspace_boundary',
+      type: 'text',
       label: 'Workspace boundary',
       description: 'Constrains project tools to the selected workspace.',
       value: 'Tool paths must be relative to the selected workspace root. Never access a parent or sibling directory.',
@@ -111,6 +121,7 @@ const INITIAL_SYSTEM_VARIABLES = {
     },
     {
       key: 'resource_search_tool_description',
+      type: 'text',
       label: 'Resource search tool',
       description: 'Description injected into the built-in resource search tool.',
       value: 'Search the Agent project catalog for tools, harnesses, and skills relevant to the current task.',
@@ -119,6 +130,7 @@ const INITIAL_SYSTEM_VARIABLES = {
     },
     {
       key: 'resource_load_tool_description',
+      type: 'text',
       label: 'Resource load tool',
       description: 'Description injected into the built-in resource loading tool.',
       value: 'Activate Agent project tools, harnesses, or skills by exact IDs returned from search_resources.',
@@ -127,6 +139,7 @@ const INITIAL_SYSTEM_VARIABLES = {
     },
     {
       key: 'workflow_execution_tool_description',
+      type: 'text',
       label: 'Runtime workflow execution',
       description: 'Description injected into the temporary workflow tool.',
       value: 'Generate and execute one temporary workflow when multiple loaded Tool operations can be chained without another model decision.',
@@ -135,6 +148,7 @@ const INITIAL_SYSTEM_VARIABLES = {
     },
     {
       key: 'skill_reference_tool_description',
+      type: 'text',
       label: 'Skill reference reader',
       description: 'Description injected into the Skill reference reader.',
       value: 'Read one exact reference path registered by an active Skill and add its content to the next context revision.',
@@ -143,6 +157,7 @@ const INITIAL_SYSTEM_VARIABLES = {
     },
     {
       key: 'skill_script_tool_description',
+      type: 'text',
       label: 'Skill script runner',
       description: 'Description injected into the Skill script runner.',
       value: 'Run one exact script registered by an active Skill with an explicit argument array inside the selected workspace.',
@@ -151,6 +166,7 @@ const INITIAL_SYSTEM_VARIABLES = {
     },
     {
       key: 'agent_identity',
+      type: 'text',
       label: 'Agent identity',
       description: 'Base identity prepended to the rendered system message.',
       value: 'You are a project agent running in Capybara.',
@@ -159,6 +175,7 @@ const INITIAL_SYSTEM_VARIABLES = {
     },
     {
       key: 'execution_policy',
+      type: 'text',
       label: 'Execution policy',
       description: 'Default operating policy for this project.',
       value: 'Keep decisions explicit, preserve developer control, and report runtime state changes.',
@@ -192,6 +209,20 @@ export interface ProjectInitializationResult {
 export function isInitializableProjectDirectory(projectDir: string): boolean {
   if (!fs.existsSync(projectDir) || !fs.statSync(projectDir).isDirectory()) return false
   return fs.readdirSync(projectDir).every((entry) => entry === '.git')
+}
+
+export function installSystemProjectResources(input: string): string[] {
+  const projectDir = path.resolve(input)
+  const installed: string[] = []
+  for (const relative of SYSTEM_MANAGED_PROJECT_FILES) {
+    const source = fs.readFileSync(path.join(SYSTEM_PROJECT_TEMPLATE_DIR, relative), 'utf8')
+    const target = path.join(projectDir, relative)
+    if (fs.existsSync(target) && fs.readFileSync(target, 'utf8') === source) continue
+    fs.mkdirSync(path.dirname(target), { recursive: true })
+    fs.writeFileSync(target, source, 'utf8')
+    installed.push(relative)
+  }
+  return installed
 }
 
 export function initializeProjectDirectory(input: string): ProjectInitializationResult {
@@ -236,7 +267,7 @@ export function initializeProjectDirectory(input: string): ProjectInitialization
     }, null, 2)}\n`],
     ['.capybara/system-variables.json', `${JSON.stringify(INITIAL_SYSTEM_VARIABLES, null, 2)}\n`],
     ['main.j2', INITIAL_MAIN_TEMPLATE],
-    ...SYSTEM_PROJECT_TEMPLATE_FILES.map((relative): [string, string] => [
+    ...INITIAL_PROJECT_TEMPLATE_FILES.map((relative): [string, string] => [
       relative,
       fs.readFileSync(path.join(SYSTEM_PROJECT_TEMPLATE_DIR, relative), 'utf8'),
     ]),

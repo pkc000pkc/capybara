@@ -139,7 +139,78 @@ test('system variable scope defaults to session for legacy files', () => {
     }))
     const variable = new ProjectResources(projectDir).readSystemVariables().variables[0]
     assert.equal(variable?.scope, 'session')
+    assert.equal(variable?.type, 'text')
   } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime resolves and refreshes nested prompt_template values with transitive required references', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-prompt-templates-runtime-'))
+  createRuntimeProject(projectDir)
+  fs.writeFileSync(path.join(projectDir, '.capybara', 'system-variables.json'), JSON.stringify({
+    version: 1,
+    variables: [
+      {
+        key: 'template_parameter',
+        type: 'text',
+        label: 'Parameter',
+        description: '',
+        value: 'leaf-value',
+        required: true,
+        readonly: false,
+        show_in_status: false,
+        scope: 'project',
+      },
+      {
+        key: 'template_level_2',
+        type: 'prompt_template',
+        label: 'Level 2',
+        description: '',
+        value: 'level2({{ builtin.prompts.template_parameter }})',
+        required: true,
+        readonly: false,
+        show_in_status: false,
+      },
+      {
+        key: 'template_level_1',
+        type: 'prompt_template',
+        label: 'Level 1',
+        description: '',
+        value: 'level1({{ builtin.prompts.template_level_2 }})',
+        required: true,
+        readonly: false,
+        show_in_status: false,
+      },
+    ],
+  }))
+  fs.writeFileSync(
+    path.join(projectDir, 'main.j2'),
+    '{{ builtin.prompts.template_level_1 }}',
+  )
+  const loop = new RuntimeLoop({ projectDir, workspaceDir: projectDir })
+  try {
+    const snapshot = loop.getSnapshot(0)
+    assert.equal(
+      snapshot.variables.value.builtin.prompts.template_level_1,
+      'level1(level2(leaf-value))',
+    )
+    assert.equal(snapshot.renderResult?.messages[0]?.content, 'level1(level2(leaf-value))')
+    assert.equal(
+      snapshot.renderResult?.diagnostics.some(
+        (diagnostic) => diagnostic.code === 'MISSING_SYSTEM_VARIABLE_REFERENCE',
+      ),
+      false,
+    )
+    await new ProjectResources(projectDir).updateSharedSystemVariables([
+      { key: 'template_parameter', value: 'updated-leaf' },
+    ])
+    await waitFor(() => (
+      loop.getSnapshot(0).variables.value.builtin.prompts.template_level_1 ===
+      'level1(level2(updated-leaf))'
+    ))
+  } finally {
+    loop.close()
     fs.rmSync(projectDir, { recursive: true, force: true })
   }
 })

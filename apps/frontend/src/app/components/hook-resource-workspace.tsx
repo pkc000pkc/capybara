@@ -369,7 +369,7 @@ export default function HookResourceWorkspace({ divider, projectPath }: {
     <>
       <WorkspaceListPane
         countLabel={t("resources.itemCount", { count: filteredHooks.length })}
-        empty={filteredHooks.length === 0}
+        empty={false}
         emptyLabel={t("hooks.noHooks")}
         id="resource-hooks-list"
         loading={loading}
@@ -406,6 +406,11 @@ export default function HookResourceWorkspace({ divider, projectPath }: {
           </div>
         )}
         {filteredHooks.map((hook) => <HookListItem hook={hook} key={hook.id} onSelect={() => selectHook(hook)} selected={hook.id === selected?.id} />)}
+        {!loading && filteredHooks.length === 0 && (
+          <div className="flex min-h-32 items-center justify-center px-4 text-center text-xs text-[#718488]">
+            {t("hooks.noHooks")}
+          </div>
+        )}
       </WorkspaceListPane>
       {divider}
       <div aria-labelledby="resource-hooks-tab" className="grid min-h-0 grid-rows-[34px_34px_minmax(0,1fr)] bg-white" id="resource-hooks-panel" onKeyDown={handleShortcut} role="tabpanel">

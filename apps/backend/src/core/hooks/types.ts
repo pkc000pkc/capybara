@@ -16,6 +16,7 @@ export interface HookPermissions {
   variables?: 'patch'
   messages?: 'replace'
   artifacts?: 'write'
+  hooks?: 'write'
 }
 
 export interface HookParameterDefinition {
@@ -52,11 +53,11 @@ export interface HookTriggerContext {
     runId: string
     iteration: number
   }
+  messages: readonly LlmMessage[]
   training?: HookTrainingContext
 }
 
 export interface HookRunContext extends HookTriggerContext {
-  messages: readonly LlmMessage[]
   llm?: unknown
   signal?: AbortSignal
   logger?: unknown
@@ -71,6 +72,10 @@ export interface HookResult {
   }>
   metadata?: JsonValue
   experiences?: HookExperienceCandidate[]
+  hookFiles?: Array<{
+    name: string
+    source: string
+  }>
 }
 
 export interface HookVariableDiff {
