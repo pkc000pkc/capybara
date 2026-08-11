@@ -15,7 +15,7 @@ import { initializeProjectDirectory } from '#core/project-initializer'
 import { ProjectResources } from '#core/project-resources'
 import type { RuntimeLlm } from '#core/runtime-loop'
 
-const EXPERIENCE_HOOK = `import { defineHook } from "@capybara/sdk";
+const EXPERIENCE_HOOK = `import { defineHook } from "@capybara-agent/sdk";
 
 export default defineHook({
   name: "experience-extractor",
@@ -48,7 +48,7 @@ export default defineHook({
 });
 `
 
-const EMPTY_EXPERIENCE_HOOK = `import { defineHook } from "@capybara/sdk";
+const EMPTY_EXPERIENCE_HOOK = `import { defineHook } from "@capybara-agent/sdk";
 
 export default defineHook({
   name: "empty-extractor",
@@ -62,7 +62,7 @@ export default defineHook({
 });
 `
 
-const TIMEOUT_EXPERIENCE_HOOK = `import { defineHook } from "@capybara/sdk";
+const TIMEOUT_EXPERIENCE_HOOK = `import { defineHook } from "@capybara-agent/sdk";
 
 export default defineHook({
   name: "timeout-extractor",

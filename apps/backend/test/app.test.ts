@@ -281,7 +281,7 @@ test('empty project directories require confirmation and initialize a runnable p
         'run_command',
       ])
 
-      const hookSource = `import { defineHook } from "@capybara/sdk";
+      const hookSource = `import { defineHook } from "@capybara-agent/sdk";
 
 export default defineHook({
   name: "audit-snapshot",

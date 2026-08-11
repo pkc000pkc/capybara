@@ -19,6 +19,10 @@ export interface SessionStorageStats {
   databaseFile: string
 }
 
+export interface SessionStoreOptions {
+  directory?: string
+}
+
 type SessionRow = {
   id: string
   name: string
@@ -59,8 +63,8 @@ export class SessionStore {
   readonly databaseFile: string
   private readonly database: DatabaseSync
 
-  constructor(readonly projectDir: string) {
-    const directory = path.join(projectDir, '.capybara')
+  constructor(readonly projectDir: string, options: SessionStoreOptions = {}) {
+    const directory = path.resolve(options.directory ?? path.join(projectDir, '.capybara'))
     fs.mkdirSync(directory, { recursive: true })
     this.databaseFile = path.join(directory, 'sessions.sqlite')
     this.database = new DatabaseSync(this.databaseFile)

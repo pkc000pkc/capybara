@@ -1,0 +1,58 @@
+{
+  "name": "@capybara-agent/client",
+  "version": "0.1.0",
+  "description": "Universal WebSocket client for Capybara Agent runners",
+  "keywords": [
+    "ai-agent",
+    "websocket",
+    "typescript",
+    "agent-runtime",
+    "capybara"
+  ],
+  "license": "Apache-2.0",
+  "author": {
+    "name": "kanli8",
+    "email": "pkc000pkc@gmail.com"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pkc000pkc/capybara.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://github.com/pkc000pkc/capybara/tree/main/packages/client#readme",
+  "bugs": {
+    "url": "https://github.com/pkc000pkc/capybara/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build && npm run typecheck && npm test",
+    "test": "tsx --conditions=development --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@capybara-agent/protocol": "0.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.1",
+    "typescript": "^6.0.3"
+  }
+}

@@ -12,7 +12,7 @@ import type { RuntimeLlm } from '#core/runtime-loop'
 import { RuntimeLoop } from '#core/runtime-loop'
 import type { ClientCommand } from '#protocol/runtime-protocol'
 
-const SOURCE = `import { defineHook } from "@capybara/sdk";
+const SOURCE = `import { defineHook } from "@capybara-agent/sdk";
 
 export default defineHook({
   name: "summary-hook",

@@ -172,6 +172,7 @@ const INITIAL_GITIGNORE = `.capybara/secrets.json
 .capybara/sessions.sqlite*
 .capybara/experiments.sqlite*
 .capybara/worktrees/
+.capybara/runtime/
 .capybara/*.log
 `
 

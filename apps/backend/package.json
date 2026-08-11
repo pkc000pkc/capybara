@@ -1,9 +1,41 @@
 {
-  "name": "capybara",
-  "version": "1.0.0",
+  "name": "capybara-agent",
+  "version": "0.1.0",
+  "description": "Local runtime and CLI for Capybara Agent projects",
+  "keywords": [
+    "ai-agent",
+    "agent-runtime",
+    "cli",
+    "websocket",
+    "capybara"
+  ],
+  "author": {
+    "name": "kanli8",
+    "email": "pkc000pkc@gmail.com"
+  },
   "license": "Apache-2.0",
-  "private": true,
   "type": "module",
+  "files": [
+    "dist",
+    "templates",
+    "LICENSE",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pkc000pkc/capybara.git",
+    "directory": "apps/backend"
+  },
+  "homepage": "https://github.com/pkc000pkc/capybara/tree/main/apps/backend#readme",
+  "bugs": {
+    "url": "https://github.com/pkc000pkc/capybara/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "capybara": "dist/cli.js"
+  },
   "imports": {
     "#app": {
       "development": "./src/app.ts",
@@ -31,6 +63,8 @@
   },
   "scripts": {
     "dev": "tsx watch --conditions=development src/server.ts",
+    "serve": "tsx --conditions=development src/cli.ts serve",
+    "prepack": "npm run build && npm run typecheck",
     "demo:context": "tsx --conditions=development demo/context-builder-demo.ts",
     "demo:llm": "tsx --conditions=development demo/llm.ts",
     "demo:tool-loop": "tsx --conditions=development demo/tool-loop.ts",
@@ -41,6 +75,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@capybara-agent/protocol": "0.1.0",
     "@fastify/websocket": "^11.3.0",
     "ajv": "^8.20.0",
     "dotenv": "^17.4.2",

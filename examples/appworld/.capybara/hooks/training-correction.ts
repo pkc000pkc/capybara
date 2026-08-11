@@ -1,4 +1,4 @@
-import { defineHook } from "@capybara/sdk";
+import { defineHook } from "@capybara-agent/sdk";
 
 const MAX_CORRECTION_INPUT = 18_000;
 

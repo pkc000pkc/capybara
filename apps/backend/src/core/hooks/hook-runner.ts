@@ -42,7 +42,7 @@ function log(level, message, data) {
   const module = { exports: {} };
   const defineHook = (value) => value;
   const requireHook = (specifier) => {
-    if (specifier !== '@capybara/sdk') throw new Error('unsupported Hook import: ' + specifier);
+    if (specifier !== '@capybara-agent/sdk') throw new Error('unsupported Hook import: ' + specifier);
     return { defineHook };
   };
   const factory = new Function('module', 'exports', 'require', workerData.compiled);

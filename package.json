@@ -4,6 +4,7 @@
   "license": "Apache-2.0",
   "private": true,
   "workspaces": [
+    "packages/*",
     "apps/backend",
     "apps/frontend"
   ],
@@ -14,10 +15,12 @@
     "dev": "concurrently --names backend,frontend --prefix-colors green,cyan \"npm:dev:backend\" \"npm:dev:frontend\"",
     "dev:backend": "npm run dev --workspace=apps/backend",
     "dev:frontend": "npm run dev --workspace=apps/frontend",
+    "serve:agent": "npm run serve --workspace=apps/backend --",
     "build": "npm run build --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
-    "test": "npm run test:backend",
+    "test": "npm run test:backend && npm run test:client",
     "test:backend": "cross-env CAPYBARA_TEST_PROJECT_DIR=../../examples/test-project CAPYBARA_PROJECT_DIR=../../examples/test-project npm run test --workspace=apps/backend",
+    "test:client": "cross-env CAPYBARA_TEST_PROJECT_DIR=../../examples/test-project npm run test --workspace=@capybara-agent/client",
     "test:e2e": "npm run test:e2e --workspace=apps/frontend",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },

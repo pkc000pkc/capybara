@@ -53,7 +53,7 @@ const DEFAULT_FIXTURE: HookTestFixture = {
 };
 
 function hookTemplate(name: string): string {
-  return `import { defineHook } from "@capybara/sdk";
+  return `import { defineHook } from "@capybara-agent/sdk";
 
 export default defineHook({
   name: "${name}",

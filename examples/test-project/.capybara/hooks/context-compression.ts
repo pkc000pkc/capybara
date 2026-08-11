@@ -1,4 +1,4 @@
-import { defineHook } from "@capybara/sdk";
+import { defineHook } from "@capybara-agent/sdk";
 
 export default defineHook({
   name: "context-compression",

@@ -1,0 +1,55 @@
+{
+  "name": "@capybara-agent/protocol",
+  "version": "0.1.0",
+  "description": "Shared Capybara Runtime protocol types and validation",
+  "keywords": [
+    "ai-agent",
+    "protocol",
+    "typescript",
+    "agent-runtime",
+    "capybara"
+  ],
+  "license": "Apache-2.0",
+  "author": {
+    "name": "kanli8",
+    "email": "pkc000pkc@gmail.com"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pkc000pkc/capybara.git",
+    "directory": "packages/protocol"
+  },
+  "homepage": "https://github.com/pkc000pkc/capybara/tree/main/packages/protocol#readme",
+  "bugs": {
+    "url": "https://github.com/pkc000pkc/capybara/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build && npm run typecheck",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

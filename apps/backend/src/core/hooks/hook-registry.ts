@@ -36,8 +36,8 @@ function diagnosticText(diagnostic: ts.Diagnostic): string {
 
 export function compileHookSource(source: string, fileName: string): string {
   const imports = ts.preProcessFile(source, true, true).importedFiles.map((item) => item.fileName)
-  const unsupported = imports.find((item) => item !== '@capybara/sdk')
-  if (unsupported) throw new Error(`Hook files may only import @capybara/sdk: ${unsupported}`)
+  const unsupported = imports.find((item) => item !== '@capybara-agent/sdk')
+  if (unsupported) throw new Error(`Hook files may only import @capybara-agent/sdk: ${unsupported}`)
   const output = ts.transpileModule(source, {
     fileName,
     reportDiagnostics: true,
@@ -62,7 +62,7 @@ function loadDefinition(compiled: string, fileName: string): ProjectHookDefiniti
     module,
     exports: module.exports,
     require: (specifier: string) => {
-      if (specifier !== '@capybara/sdk') throw new Error(`unsupported Hook import: ${specifier}`)
+      if (specifier !== '@capybara-agent/sdk') throw new Error(`unsupported Hook import: ${specifier}`)
       return { defineHook }
     },
   })

@@ -28,6 +28,7 @@ playwright-report/
 **/.capybara/sessions.sqlite*
 **/.capybara/experiments.sqlite*
 **/.capybara/worktrees/
+**/.capybara/runtime/
 **/.capybara/*.log
 
 # Editor and operating-system files
