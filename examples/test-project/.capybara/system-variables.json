@@ -42,6 +42,22 @@
       "readonly": true
     },
     {
+      "key": "system_variable_read_tool_description",
+      "label": "System variable reader",
+      "description": "Description injected into the built-in system variable reader.",
+      "value": "Read selected system prompt variables and the current revision before proposing a change.",
+      "required": true,
+      "readonly": true
+    },
+    {
+      "key": "system_variable_apply_tool_description",
+      "label": "System variable change tool",
+      "description": "Description injected into the built-in system variable change tool.",
+      "value": "Atomically add, patch, replace, or remove system prompt variables using the latest revision and return the validated diff.",
+      "required": true,
+      "readonly": true
+    },
+    {
       "key": "workflow_execution_tool_description",
       "label": "Runtime workflow execution",
       "description": "Instructs the model how to generate a temporary multi-tool workflow for the current run.",
@@ -79,6 +95,15 @@
       "description": "Default operating policy shared by project prompts.",
       "value": "Keep decisions explicit, preserve developer control, and report runtime state changes.",
       "required": true,
+      "readonly": false
+    },
+    {
+      "key": "dynamic_context",
+      "type": "prompt_template",
+      "label": "Dynamic context",
+      "description": "Stable root template for user-approved context assembled from dynamic variables.",
+      "value": "",
+      "required": false,
       "readonly": false
     },
     {

@@ -20,6 +20,7 @@ export function learningFixture(
       config_file: '.capybara/config.json',
       main_template: 'main.j2',
       initialized_at: new Date().toISOString(),
+      system_variables_revision: '',
       prompts,
       shared_prompts: variables.filter((item) => item.scope === 'project').map((item) => item.key),
       missing_prompts: [],

@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 const resourceProject = fs.mkdtempSync(path.join(os.tmpdir(), "capybara-resources-e2e-"));
+const backendPort = Number(process.env.CAPYBARA_E2E_BACKEND_PORT ?? 3005);
+const backendUrl = `http://localhost:${backendPort}`;
 let originalUserPreferences: unknown;
 fs.cpSync(path.resolve(process.cwd(), "../../examples/test-project"), resourceProject, {
   filter: (source) => !path.basename(source).startsWith("sessions.sqlite"),
@@ -11,8 +13,8 @@ fs.cpSync(path.resolve(process.cwd(), "../../examples/test-project"), resourcePr
 });
 
 test.beforeAll(async () => {
-  originalUserPreferences = await fetch("http://localhost:3005/api/preferences").then((response) => response.json());
-  await fetch("http://localhost:3005/api/preferences", {
+  originalUserPreferences = await fetch(`${backendUrl}/api/preferences`).then((response) => response.json());
+  await fetch(`${backendUrl}/api/preferences`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ language: "zh-CN", color_theme: "light" }),
@@ -31,7 +33,7 @@ test.afterEach(async ({ page }) => {
 });
 
 test.afterAll(async () => {
-  await fetch("http://127.0.0.1:3005/api/projects/release", {
+  await fetch(`${backendUrl}/api/projects/release`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path: resourceProject }),
@@ -41,7 +43,7 @@ test.afterAll(async () => {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
   }
-  await fetch("http://localhost:3005/api/preferences", {
+  await fetch(`${backendUrl}/api/preferences`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(originalUserPreferences),
@@ -198,6 +200,257 @@ test("resource workspace uses real tool and skill HTTP APIs", async ({ page }) =
   await systemVariablesPanel.getByRole("button", { name: "保存", exact: true }).click();
   await deleteSharedVariable;
 
+  const systemVariablesUrl = `${backendUrl}/api/resources/system-variables?projectPath=${encodeURIComponent(resourceProject)}`;
+  const externalVariables = await fetch(systemVariablesUrl).then((response) => response.json()) as {
+    version: 1;
+    variables: Array<Record<string, unknown>>;
+  };
+  const externalSave = await fetch(systemVariablesUrl, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      version: 1,
+      variables: [...externalVariables.variables, {
+        key: "external_refresh_probe",
+        type: "text",
+        label: "External refresh probe",
+        description: "Verifies model-side variable changes refresh Resources.",
+        value: "external value",
+        required: false,
+        readonly: false,
+        show_in_status: false,
+        scope: "project",
+        source: "project",
+      }],
+    }),
+  });
+  expect(externalSave.ok).toBe(true);
+  await expect(page.getByRole("button", { name: /external_refresh_probe.*项目共享/ })).toBeVisible();
+
+  const cleanupVariables = await fetch(systemVariablesUrl).then((response) => response.json()) as {
+    version: 1;
+    variables: Array<Record<string, unknown>>;
+  };
+  const externalCleanup = await fetch(systemVariablesUrl, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      version: 1,
+      variables: cleanupVariables.variables.filter(
+        (variable) => variable.key !== "external_refresh_probe",
+      ),
+    }),
+  });
+  expect(externalCleanup.ok).toBe(true);
+  await expect(page.getByRole("button", { name: /external_refresh_probe/ })).toHaveCount(0);
+
+  expect(pageErrors).toEqual([]);
+});
+
+test("Skill marketplace supports search, preview, install, removal, and undo", async ({ page }) => {
+  test.setTimeout(60_000);
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  const catalogUrl = `${backendUrl}/api/resources/catalog?projectPath=${encodeURIComponent(resourceProject)}`;
+  const baseCatalog = await fetch(catalogUrl).then((response) => response.json()) as {
+    revision: string;
+    items: Array<Record<string, unknown>>;
+  };
+  let installed = false;
+  const content = [
+    "---",
+    "name: marketplace-test",
+    "description: Verify the complete Skill marketplace flow",
+    "allowed-tools: read_file",
+    "---",
+    "# Marketplace test",
+    "",
+    "Inspect project files safely.",
+    "",
+  ].join("\n");
+  const skillModule = {
+    id: "skill-module:marketplace-test",
+    kind: "skill",
+    package: "marketplace-test",
+    name: "marketplace-test",
+    version: 1,
+    source: "skills/marketplace-test/SKILL.md",
+    enabled: true,
+    revision: "marketplace-rev",
+    diagnostics: [],
+    files: [{
+      path: "skills/marketplace-test/SKILL.md",
+      role: "entry",
+      language: "Markdown",
+      editable: true,
+    }],
+    skills: [{
+      id: "marketplace-test",
+      kind: "skill",
+      name: "marketplace-test",
+      description: "Verify the complete Skill marketplace flow",
+      metadata: {
+        "github-repo": "example/skills",
+        "github-tree-sha": "1234567890abcdef1234567890abcdef12345678",
+      },
+      allowedTools: "read_file",
+      entry: "skills/marketplace-test/SKILL.md",
+      scripts: ["skills/marketplace-test/scripts/check.mjs"],
+      references: [],
+      assets: [],
+      content,
+      entryRevision: "entry-rev",
+      diagnostics: [],
+    }],
+  };
+
+  await page.route("**/api/resources/catalog?*", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        revision: installed ? "catalog-installed" : baseCatalog.revision,
+        items: installed ? [...baseCatalog.items, skillModule] : baseCatalog.items,
+      }),
+    });
+  });
+  await page.route("**/api/resources/file?*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("path") !== "skills/marketplace-test/SKILL.md") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...skillModule.files[0],
+        content,
+        revision: "entry-rev",
+      }),
+    });
+  });
+  await page.route("**/api/resources/skills/marketplace/installed?*", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: installed ? [{
+          id: "marketplace-test",
+          path: "skills/marketplace-test",
+          managed: true,
+          repo: "example/skills",
+          requestedPath: "skills/marketplace-test/SKILL.md",
+          commit: "1234567890abcdef1234567890abcdef12345678",
+          installedAt: "2026-08-12T00:00:00.000Z",
+          hasLocalChanges: false,
+        }] : [],
+      }),
+    });
+  });
+  await page.route("**/api/resources/skills/marketplace/search?*", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        page: 1,
+        items: [{
+          description: "Verify the complete Skill marketplace flow",
+          namespace: "",
+          path: "skills/marketplace-test/SKILL.md",
+          repo: "example/skills",
+          skillName: "marketplace-test",
+          stars: 42,
+          installed,
+        }],
+      }),
+    });
+  });
+  await page.route("**/api/resources/skills/marketplace/preview?*", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        repo: "example/skills",
+        requestedPath: "skills/marketplace-test/SKILL.md",
+        commit: "1234567890abcdef1234567890abcdef12345678",
+        ref: "refs/heads/main",
+        skillName: "marketplace-test",
+        description: "Verify the complete Skill marketplace flow",
+        allowedTools: "read_file",
+        metadata: {},
+        content,
+        files: [
+          { path: "SKILL.md", size: content.length, kind: "entry" },
+          { path: "scripts/check.mjs", size: 28, kind: "script" },
+        ],
+        warnings: ["This Skill contains executable scripts."],
+      }),
+    });
+  });
+  await page.route("**/api/resources/skills/marketplace/install?*", async (route) => {
+    installed = true;
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        skill: { id: "marketplace-test", managed: true },
+        catalog: { revision: "catalog-installed", items: [...baseCatalog.items, skillModule] },
+      }),
+    });
+  });
+  await page.route("**/api/resources/skills/marketplace/restore?*", async (route) => {
+    installed = true;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ restored: true, skillId: "marketplace-test", catalog: { revision: "catalog-restored", items: [...baseCatalog.items, skillModule] } }),
+    });
+  });
+  await page.route("**/api/resources/skills/marketplace-test?*", async (route) => {
+    if (route.request().method() !== "DELETE") {
+      await route.continue();
+      return;
+    }
+    installed = false;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "trash-marketplace-test",
+        skillId: "marketplace-test",
+        originalPath: "skills/marketplace-test",
+        trashPath: ".capybara/trash/skills/trash-marketplace-test",
+        removedAt: "2026-08-12T00:00:00.000Z",
+        expiresAt: "2026-08-19T00:00:00.000Z",
+        configIndex: 1,
+        hadLocalChanges: false,
+        catalog: baseCatalog,
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.locator('[title="已连接"]')).toBeVisible({ timeout: 20_000 });
+  await page.locator("#app-resources-tab").click();
+  await page.locator("#resource-skills-tab").click();
+  await page.getByRole("tab", { name: "GitHub 搜索" }).click();
+  await page.getByLabel("搜索 Skill").fill("marketplace");
+  await page.getByRole("button", { name: "搜索", exact: true }).click();
+  await expect(page.getByRole("button", { name: /marketplace-test.*42.*example\/skills/ })).toBeVisible();
+  await page.getByRole("button", { name: /marketplace-test.*42.*example\/skills/ }).click();
+  await expect(page.getByText("1 个脚本", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("远程 SKILL.md 预览")).toContainText("Marketplace test");
+
+  await page.getByRole("button", { name: "安装到项目" }).click();
+  const installDialog = page.getByRole("dialog", { name: "确认安装 Skill" });
+  await expect(installDialog).toContainText("example/skills");
+  await expect(installDialog).toContainText("skills/marketplace-test");
+  await expect(installDialog).toContainText("该 Skill 包含可执行脚本");
+  await installDialog.getByRole("button", { name: "确认安装" }).click();
+  await expect(page.getByRole("heading", { name: "marketplace-test" })).toBeVisible();
+  await expect(page.getByText(/example\/skills.*12345678/)).toBeVisible();
+
+  await page.getByRole("button", { name: "移除 Skill marketplace-test" }).click();
+  const uninstallDialog = page.getByRole("dialog", { name: "确认移除 Skill" });
+  await expect(uninstallDialog).toContainText("回收区");
+  await uninstallDialog.getByRole("button", { name: "卸载" }).click();
+  await expect(page.getByRole("status")).toContainText("已从项目移除 marketplace-test");
+  await page.getByRole("button", { name: "撤销" }).click();
+  await expect(page.getByRole("heading", { name: "marketplace-test" })).toBeVisible();
   expect(pageErrors).toEqual([]);
 });
 
@@ -321,7 +574,7 @@ test("resource workspace panes support pointer and keyboard resizing", async ({ 
 });
 
 test("project configuration is a resource and system settings stays at the bottom", async ({ page }) => {
-  const originalPreferences = await fetch("http://localhost:3005/api/preferences").then((response) => response.json());
+  const originalPreferences = await fetch(`${backendUrl}/api/preferences`).then((response) => response.json());
   await page.goto("/");
   await expect(page.locator('[title="已连接"]')).toBeVisible({ timeout: 20_000 });
 
@@ -414,10 +667,10 @@ test("project configuration is a resource and system settings stays at the botto
   await settingsPanel.getByLabel("Language").selectOption("zh-CN");
   await expect(settingsPanel.getByText("界面设置", { exact: true })).toBeVisible();
 
-  await expect.poll(async () => fetch("http://localhost:3005/api/preferences")
+  await expect.poll(async () => fetch(`${backendUrl}/api/preferences`)
     .then((response) => response.json()))
     .toMatchObject({ language: "zh-CN", color_theme: "light" });
-  await fetch("http://localhost:3005/api/preferences", {
+  await fetch(`${backendUrl}/api/preferences`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(originalPreferences),

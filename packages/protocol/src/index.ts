@@ -77,6 +77,7 @@ export interface RuntimeVariables extends JsonObject {
     config_file: string
     main_template: string
     initialized_at: string
+    system_variables_revision: string
     prompts: { [key: string]: string }
     shared_prompts?: string[]
     missing_prompts: string[]
@@ -499,6 +500,38 @@ export interface RuntimeStatusState {
   updatedAt: string
 }
 
+export type RuntimeSkillConfirmationStatus =
+  | 'pending'
+  | 'executing'
+  | 'completed'
+  | 'cancelled'
+  | 'failed'
+
+export interface RuntimeSkillConfirmation {
+  id: string
+  kind: 'install' | 'uninstall'
+  status: RuntimeSkillConfirmationStatus
+  skillName: string
+  source?: {
+    repo: string
+    requestedPath: string
+    commit: string
+  }
+  targetPath: string
+  warnings: string[]
+  fileCount?: number
+  scriptCount?: number
+  hasLocalChanges?: boolean
+  requestedAt: string
+  resolvedAt?: string
+  error?: string
+}
+
+export interface RuntimeSkillConfirmationsState {
+  revision: number
+  items: RuntimeSkillConfirmation[]
+}
+
 export interface RuntimeSnapshot {
   snapshotRevision: number
   lastSequence: number
@@ -513,6 +546,7 @@ export interface RuntimeSnapshot {
   tools: RuntimeToolsState
   harnesses: RuntimeHarnessesState
   skills: RuntimeSkillsState
+  skillConfirmations: RuntimeSkillConfirmationsState
   artifacts: RuntimeArtifactsState
   contexts: RuntimeContextsState
   effectiveContexts: RuntimeEffectiveContextsState
@@ -582,6 +616,8 @@ export interface CommandPayloadMap {
     argv: string[]
     baseRevision: number
   }
+  'runtime.skills.confirm': { confirmationId: string }
+  'runtime.skills.cancelConfirmation': { confirmationId: string }
 }
 
 export type CommandType = keyof CommandPayloadMap
@@ -744,6 +780,7 @@ export interface EventPayloadMap {
   'runtime.tools.updated': RuntimeToolsState
   'runtime.harnesses.updated': RuntimeHarnessesState
   'runtime.skills.updated': RuntimeSkillsState
+  'runtime.skills.confirmations.updated': RuntimeSkillConfirmationsState
   'session.resync.required': {
     reason: 'sequenceGap' | 'historyExpired' | 'backpressure'
     lastAvailableSequence?: number
@@ -825,6 +862,8 @@ const COMMAND_TYPES = new Set<CommandType>([
   'runtime.skills.detach',
   'runtime.skills.reference.load',
   'runtime.skills.script.run',
+  'runtime.skills.confirm',
+  'runtime.skills.cancelConfirmation',
 ])
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -1045,6 +1084,12 @@ function validatePayload(type: CommandType, payload: Record<string, unknown>): v
         !payload.argv.every((item) => typeof item === 'string' && item.length <= 4_096)
       ) {
         throw new CommandError('INVALID_PAYLOAD', `${type} requires skillId, path, baseRevision, and string argv`)
+      }
+      return
+    case 'runtime.skills.confirm':
+    case 'runtime.skills.cancelConfirmation':
+      if (!hasString(payload, 'confirmationId')) {
+        throw new CommandError('INVALID_PAYLOAD', `${type} requires confirmationId`)
       }
   }
 }

@@ -168,6 +168,7 @@ export class HookRunner {
     const runId = fixture.runId || `hook-${randomUUID()}`
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Hook execution was aborted'))
+      const attemptController = new AbortController()
       const worker = new Worker(WORKER_SOURCE, {
         eval: true,
         workerData: {
@@ -184,6 +185,7 @@ export class HookRunner {
         settled = true
         clearTimeout(timer)
         signal?.removeEventListener('abort', abort)
+        if (error) attemptController.abort()
         void worker.terminate()
         if (error) return reject(error)
         resolve({
@@ -203,14 +205,18 @@ export class HookRunner {
       worker.on('message', (message: unknown) => {
         if (!isObject(message)) return
         if (message.type === 'rpc') {
-          void this.handleRpc(message, signal, usage).then(
-            (result) => worker.postMessage({ type: 'rpc-result', id: message.id, ok: true, result }),
-            (error) => worker.postMessage({
-              type: 'rpc-result',
-              id: message.id,
-              ok: false,
-              error: error instanceof Error ? error.message : String(error),
-            }),
+          void this.handleRpc(message, attemptController.signal, usage).then(
+            (result) => {
+              if (!settled) worker.postMessage({ type: 'rpc-result', id: message.id, ok: true, result })
+            },
+            (error) => {
+              if (!settled) worker.postMessage({
+                type: 'rpc-result',
+                id: message.id,
+                ok: false,
+                error: error instanceof Error ? error.message : String(error),
+              })
+            },
           )
           return
         }

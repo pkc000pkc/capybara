@@ -23,7 +23,7 @@ import {
   Wrench,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { RuntimeToolsState } from "../runtime-protocol";
 import CodeSurface from "./code-surface";
@@ -32,6 +32,7 @@ import HookResourceWorkspace from "./hook-resource-workspace";
 import ProjectFilesWorkspace from "./project-files-workspace";
 import ResourceDefinitionWorkspace from "./resource-definition-workspace";
 import ResizeHandle from "./resize-handle";
+import SkillResourceWorkspace from "./skill-resource-workspace";
 import {
   PanelHeader,
   WorkspaceListPane,
@@ -680,6 +681,7 @@ export default function ResourcesWorkspace({
   preferences,
   projectControls,
   projectPath,
+  systemVariablesRefreshKey,
   runtimeTools,
 }: {
   activeSection?: ResourceSection;
@@ -687,6 +689,7 @@ export default function ResourcesWorkspace({
   preferences?: ReactNode;
   projectControls?: ReactNode;
   projectPath: string;
+  systemVariablesRefreshKey?: string;
   runtimeTools?: RuntimeToolsState;
 }) {
   const { t } = useI18n();
@@ -695,8 +698,9 @@ export default function ResourcesWorkspace({
   const activeSection = controlledActiveSection ?? internalActiveSection;
   const [query, setQuery] = useState("");
   const [systemVariables, setSystemVariables] = useState<SystemVariableDefinition[]>([]);
-  const [selectedSystemVariableIndex, setSelectedSystemVariableIndex] = useState(0);
+  const [selectedSystemVariableKey, setSelectedSystemVariableKey] = useState<string>();
   const [systemVariablesDirty, setSystemVariablesDirty] = useState(false);
+  const systemVariablesDirtyRef = useRef(false);
   const [settings, setSettings] = useState<ProjectSettings>({
     main_template: "main.j2",
     max_messages: 20,
@@ -726,19 +730,30 @@ export default function ResourcesWorkspace({
   const [catalogWidth, setCatalogWidth] = useState(CATALOG_DEFAULT_WIDTH);
 
   useEffect(() => {
-    if (!projectPath) return;
+    if (!projectPath || systemVariablesDirty) return;
+    let cancelled = false;
     void Promise.all([
       resourceRequest<SystemVariablesResource>(projectPath, "system-variables"),
       resourceRequest<ProjectSettings>(projectPath, "project-settings"),
     ]).then(([variablesResource, loadedSettings]) => {
+      if (cancelled || systemVariablesDirtyRef.current) return;
       setSystemVariables(variablesResource.variables);
+      setSelectedSystemVariableKey((current) =>
+        current && variablesResource.variables.some((variable) => variable.key === current)
+          ? current
+          : variablesResource.variables[0]?.key,
+      );
       setSettings(loadedSettings);
       setLlmTestState(null);
       setResourceError(null);
     }).catch((error: unknown) => {
+      if (cancelled) return;
       setResourceError(error instanceof Error ? error.message : String(error));
     });
-  }, [projectPath]);
+    return () => {
+      cancelled = true;
+    };
+  }, [projectPath, systemVariablesDirty, systemVariablesRefreshKey]);
 
   const selectSection = (section: ResourceSection) => {
     setInternalActiveSection(section);
@@ -756,6 +771,10 @@ export default function ResourcesWorkspace({
     [normalizedQuery, systemVariables],
   );
 
+  const selectedSystemVariableIndex = Math.max(
+    0,
+    systemVariables.findIndex((variable) => variable.key === selectedSystemVariableKey),
+  );
   const selectedSystemVariable = systemVariables[selectedSystemVariableIndex];
 
   const updateSystemVariable = (changes: Partial<SystemVariableDefinition>) => {
@@ -763,14 +782,17 @@ export default function ResourcesWorkspace({
     setSystemVariables((current) => current.map((variable, index) =>
       index === selectedSystemVariableIndex ? { ...variable, ...changes } : variable,
     ));
+    if (typeof changes.key === "string") setSelectedSystemVariableKey(changes.key);
+    systemVariablesDirtyRef.current = true;
     setSystemVariablesDirty(true);
   };
 
   const addSystemVariable = () => {
     let suffix = systemVariables.length + 1;
     while (systemVariables.some((variable) => variable.key === `prompt_${suffix}`)) suffix += 1;
+    const key = `prompt_${suffix}`;
     setSystemVariables((current) => [...current, {
-      key: `prompt_${suffix}`,
+      key,
       type: "text",
       label: `Prompt ${suffix}`,
       description: "",
@@ -781,14 +803,17 @@ export default function ResourcesWorkspace({
       scope: "session",
       source: "project",
     }]);
-    setSelectedSystemVariableIndex(systemVariables.length);
+    setSelectedSystemVariableKey(key);
+    systemVariablesDirtyRef.current = true;
     setSystemVariablesDirty(true);
   };
 
   const deleteSystemVariable = () => {
     if (selectedSystemVariable?.readonly) return;
-    setSystemVariables((current) => current.filter((_, index) => index !== selectedSystemVariableIndex));
-    setSelectedSystemVariableIndex((current) => Math.max(0, current - 1));
+    const next = systemVariables.filter((variable) => variable.key !== selectedSystemVariable?.key);
+    setSystemVariables(next);
+    setSelectedSystemVariableKey(next[Math.max(0, selectedSystemVariableIndex - 1)]?.key);
+    systemVariablesDirtyRef.current = true;
     setSystemVariablesDirty(true);
   };
 
@@ -801,6 +826,12 @@ export default function ResourcesWorkspace({
         variables: systemVariables,
       });
       setSystemVariables(saved.variables);
+      setSelectedSystemVariableKey((current) =>
+        current && saved.variables.some((variable) => variable.key === current)
+          ? current
+          : saved.variables[0]?.key,
+      );
+      systemVariablesDirtyRef.current = false;
       setSystemVariablesDirty(false);
       setResourceError(null);
     } catch (error) {
@@ -932,7 +963,7 @@ export default function ResourcesWorkspace({
       )}
 
       {activeSection === "skills" && (
-        <ResourceDefinitionWorkspace catalogWidth={catalogWidth} divider={catalogDivider} key={`skills:${projectPath}`} kind="skill" projectPath={projectPath} runtimeTools={runtimeTools} />
+        <SkillResourceWorkspace catalogWidth={catalogWidth} divider={catalogDivider} key={`skills:${projectPath}`} projectPath={projectPath} runtimeTools={runtimeTools} />
       )}
 
       {activeSection === "harnesses" && (
@@ -972,8 +1003,8 @@ export default function ResourcesWorkspace({
                     ? t("resources.variableScopeProject")
                   : variable.required ? t("resources.required") : t("resources.optional")}
                 name={variable.key}
-                onSelect={() => setSelectedSystemVariableIndex(index)}
-                selected={selectedSystemVariableIndex === index}
+                onSelect={() => setSelectedSystemVariableKey(variable.key)}
+                selected={selectedSystemVariableKey === variable.key}
               />
             ))}
           </WorkspaceListPane>

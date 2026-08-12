@@ -7,6 +7,8 @@ import { DatabaseSync } from "node:sqlite";
 
 const sourceProject = path.resolve(process.cwd(), "../../examples/test-project");
 const e2eProject = fs.mkdtempSync(path.join(os.tmpdir(), "capybara-experiment-e2e-"));
+const backendPort = Number(process.env.CAPYBARA_E2E_BACKEND_PORT ?? 3005);
+const backendUrl = `http://localhost:${backendPort}`;
 let originalUserPreferences: unknown;
 const analysisBaselineId = "training-analysis-baseline";
 const analysisCandidateId = "training-analysis-candidate";
@@ -57,23 +59,23 @@ test.beforeAll(async () => {
     { name: "training-e2e", path: "datasets/training-e2e.jsonl", tags: ["train"] },
     { name: "testing-e2e", path: "datasets/testing-e2e.jsonl", tags: ["test_normal"] },
   ]) {
-    const created = await fetch(`http://localhost:3005/api/datasets${projectQuery}`, {
+    const created = await fetch(`${backendUrl}/api/datasets${projectQuery}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ...definition, storage: "jsonl", scoringPrompt: "" }),
     }).then((response) => response.json()) as { id: string; error?: string };
     if (!created.id) throw new Error(created.error ?? `failed to create ${definition.name}`);
-    await fetch(`http://localhost:3005/api/datasets/${created.id}/records${projectQuery}`, {
+    await fetch(`${backendUrl}/api/datasets/${created.id}/records${projectQuery}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ question: `${definition.name} question`, thinking: "reference", answer: "answer", expectedTools: [], metadata: { tags: [] } }),
     });
   }
-  const datasets = await fetch(`http://localhost:3005/api/datasets${projectQuery}`).then((response) => response.json()) as { items: Array<{ id: string; name: string }> };
+  const datasets = await fetch(`${backendUrl}/api/datasets${projectQuery}`).then((response) => response.json()) as { items: Array<{ id: string; name: string }> };
   const trainDatasetId = datasets.items.find((item) => item.name === "training-e2e")?.id;
   const testDatasetId = datasets.items.find((item) => item.name === "testing-e2e")?.id;
   if (!trainDatasetId || !testDatasetId) throw new Error("failed to resolve E2E datasets");
-  await fetch(`http://localhost:3005/api/experiments/training${projectQuery}`);
+  await fetch(`${backendUrl}/api/experiments/training${projectQuery}`);
   const database = new DatabaseSync(path.join(e2eProject, ".capybara", "experiments.sqlite"));
   const insertRun = database.prepare(`
     INSERT INTO training_runs (
@@ -176,8 +178,8 @@ test.beforeAll(async () => {
   } finally {
     database.close();
   }
-  originalUserPreferences = await fetch("http://localhost:3005/api/preferences").then((response) => response.json());
-  await fetch("http://localhost:3005/api/preferences", {
+  originalUserPreferences = await fetch(`${backendUrl}/api/preferences`).then((response) => response.json());
+  await fetch(`${backendUrl}/api/preferences`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ language: "zh-CN", color_theme: "light" }),
@@ -192,13 +194,13 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.afterAll(async () => {
-  await fetch("http://127.0.0.1:3005/api/projects/release", {
+  await fetch(`${backendUrl}/api/projects/release`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path: e2eProject }),
   });
   fs.rmSync(e2eProject, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  await fetch("http://localhost:3005/api/preferences", {
+  await fetch(`${backendUrl}/api/preferences`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(originalUserPreferences),

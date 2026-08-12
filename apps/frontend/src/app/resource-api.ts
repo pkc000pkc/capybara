@@ -131,6 +131,59 @@ export type ProjectResourceModule = ToolResourceModule | SkillResourceModule | H
 export type ResourceCatalog = { revision: string; items: ProjectResourceModule[] };
 export type ResourceFileContent = ResourceFile & { content: string; revision: string };
 
+export type SkillMarketplaceResult = {
+  description: string;
+  namespace: string;
+  path: string;
+  repo: string;
+  skillName: string;
+  stars: number;
+  installed: boolean;
+};
+
+export type SkillMarketplacePreview = {
+  repo: string;
+  requestedPath: string;
+  commit: string;
+  ref: string;
+  skillName: string;
+  description: string;
+  license?: string;
+  compatibility?: string;
+  allowedTools?: string;
+  metadata: Record<string, string>;
+  content: string;
+  files: Array<{
+    path: string;
+    size: number;
+    kind: "entry" | "script" | "reference" | "asset" | "other";
+  }>;
+  warnings: string[];
+};
+
+export type InstalledSkillSummary = {
+  id: string;
+  path: string;
+  managed: boolean;
+  repo?: string;
+  requestedPath?: string;
+  commit?: string;
+  installedAt?: string;
+  hasLocalChanges: boolean;
+};
+
+export type RemovedSkill = {
+  id: string;
+  skillId: string;
+  originalPath: string;
+  trashPath: string;
+  removedAt: string;
+  expiresAt: string;
+  configIndex: number;
+  hadLocalChanges: boolean;
+  catalog: ResourceCatalog;
+};
+
 export type ProjectFileEntry = {
   name: string;
   path: string;
@@ -265,6 +318,34 @@ export const resourceApi = {
     request<unknown>(projectPath, `harnesses/${encodeURIComponent(id)}/test`, "POST", { context }),
   saveSkill: (projectPath: string, id: string, content: string, revision: string) =>
     request<SkillResourceModule>(projectPath, `skills/${encodeURIComponent(id)}`, "PUT", { content, revision }),
+  searchSkills: (projectPath: string, query: string, owner: string, page: number, limit = 15) => {
+    const parameters = new URLSearchParams({ query, page: String(page), limit: String(limit) });
+    if (owner.trim()) parameters.set("owner", owner.trim());
+    return request<{ items: SkillMarketplaceResult[]; page: number }>(
+      projectPath,
+      `skills/marketplace/search?${parameters.toString()}`,
+    );
+  },
+  previewMarketplaceSkill: (projectPath: string, repo: string, path: string) =>
+    request<SkillMarketplacePreview>(projectPath, "skills/marketplace/preview", "POST", { repo, path }),
+  installedSkills: (projectPath: string) =>
+    request<{ items: InstalledSkillSummary[] }>(projectPath, "skills/marketplace/installed"),
+  installMarketplaceSkill: (projectPath: string, repo: string, path: string, commit: string) =>
+    request<{ skill?: InstalledSkillSummary; catalog: ResourceCatalog }>(
+      projectPath,
+      "skills/marketplace/install",
+      "POST",
+      { repo, path, commit },
+    ),
+  uninstallSkill: (projectPath: string, id: string) =>
+    request<RemovedSkill>(projectPath, `skills/${encodeURIComponent(id)}`, "DELETE"),
+  restoreSkill: (projectPath: string, trashId: string) =>
+    request<{ restored: true; skillId: string; catalog: ResourceCatalog }>(
+      projectPath,
+      "skills/marketplace/restore",
+      "POST",
+      { trashId },
+    ),
   saveHarness: (projectPath: string, id: string, content: string, revision: string) =>
     request<HarnessResourceModule>(projectPath, `harnesses/${encodeURIComponent(id)}`, "PUT", { content, revision }),
   createHook: (projectPath: string, name: string, content: string) =>

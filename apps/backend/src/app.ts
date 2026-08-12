@@ -33,6 +33,7 @@ import {
   type RuntimeLoopState,
 } from '#core/runtime-loop'
 import { SessionStore } from '#core/session-store'
+import { SkillMarketplaceService } from '#core/skills/skill-marketplace'
 import { UserPreferencesStore } from '#core/user-preferences'
 import { WebSocketChannel } from '#transport/websocket-channel'
 import { loadLlmConfig } from '#util/llm/config'
@@ -877,6 +878,54 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
   })
+  app.get('/api/resources/skills/marketplace/search', async (request, reply) => {
+    try {
+      const query = request.query as {
+        projectPath?: unknown
+        query?: unknown
+        owner?: unknown
+        page?: unknown
+        limit?: unknown
+      }
+      return await new SkillMarketplaceService(requestProject(request).path).search(query)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/resources/skills/marketplace/preview', async (request, reply) => {
+    try {
+      return await new SkillMarketplaceService(requestProject(request).path)
+        .preview((request.body ?? {}) as { repo?: unknown; path?: unknown })
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.get('/api/resources/skills/marketplace/installed', async (request, reply) => {
+    try {
+      return {
+        items: new SkillMarketplaceService(requestProject(request).path).installed(),
+      }
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/resources/skills/marketplace/install', async (request, reply) => {
+    try {
+      const installed = await new SkillMarketplaceService(requestProject(request).path)
+        .install((request.body ?? {}) as { repo?: unknown; path?: unknown; commit?: unknown })
+      return reply.code(201).send(installed)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/resources/skills/marketplace/restore', async (request, reply) => {
+    try {
+      const body = (request.body ?? {}) as { trashId?: unknown }
+      return await new SkillMarketplaceService(requestProject(request).path).restore(body.trashId)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
   app.put('/api/resources/skills/:id', async (request, reply) => {
     try {
       return new ProjectResourceRegistry(requestProject(request).path)
@@ -885,6 +934,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       return reply.code(error instanceof ResourceRevisionConflict ? 409 : 400).send({
         error: error instanceof Error ? error.message : String(error),
       })
+    }
+  })
+  app.delete('/api/resources/skills/:id', async (request, reply) => {
+    try {
+      return await new SkillMarketplaceService(requestProject(request).path)
+        .uninstall((request.params as { id: string }).id)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
   })
   app.post('/api/resources/harnesses/:id/test', async (request, reply) => {

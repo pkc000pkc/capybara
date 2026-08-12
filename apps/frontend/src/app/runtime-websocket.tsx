@@ -70,6 +70,8 @@ type RuntimeContextValue = RuntimeStore & {
   selectSession: (sessionId: string) => void;
   attachHarness: (harnessId: string) => void;
   attachSkill: (skillId: string) => void;
+  confirmSkillOperation: (confirmationId: string) => void;
+  cancelSkillOperation: (confirmationId: string) => void;
   applyVariables: (patch: JsonPatchOperation[]) => void;
   applyContext: (contextRevisionId: string) => void;
   attachTool: (toolId: string) => void;
@@ -488,6 +490,9 @@ function applyEvent(store: RuntimeStore, event: ServerEvent): RuntimeStore {
     case "runtime.skills.updated":
       next = { ...snapshot, skills: clone(event.payload) };
       break;
+    case "runtime.skills.confirmations.updated":
+      next = { ...snapshot, skillConfirmations: clone(event.payload) };
+      break;
     case "timeline.step.upserted": {
       const existing = snapshot.timeline.steps.findIndex(
         (step) => step.id === event.payload.step.id,
@@ -857,6 +862,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           skillId,
         });
       },
+      confirmSkillOperation: (confirmationId: string) =>
+        sendCommand("runtime.skills.confirm", { confirmationId }),
+      cancelSkillOperation: (confirmationId: string) =>
+        sendCommand("runtime.skills.cancelConfirmation", { confirmationId }),
       applyContext: (contextRevisionId: string) =>
         sendCommand("runtime.context.apply", { contextRevisionId }),
       applyVariables: (patch: JsonPatchOperation[]) => {

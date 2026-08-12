@@ -1,6 +1,6 @@
 {
   "name": "@capybara-agent/protocol",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared Capybara Runtime protocol types and validation",
   "keywords": [
     "ai-agent",

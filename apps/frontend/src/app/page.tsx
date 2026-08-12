@@ -2,6 +2,7 @@
 
 import {
   AlertCircle,
+  ArchiveX,
   Check,
   ChevronDown,
   Database,
@@ -10,6 +11,8 @@ import {
   FolderPlus,
   FolderOpen,
   FolderX,
+  PackageCheck,
+  PackagePlus,
   PencilLine,
   Plus,
   RefreshCw,
@@ -46,6 +49,7 @@ import {
 import type {
   JsonValue,
   RuntimeObservationsState,
+  RuntimeSkillConfirmation,
   RuntimeStatusState,
 } from "./runtime-protocol";
 import {
@@ -381,13 +385,14 @@ function ConversationPanel({
   const [savingSessionName, setSavingSessionName] = useState(false);
   const messageEndRef = useRef<HTMLDivElement>(null);
   const messages = snapshot?.conversation.messages;
+  const skillConfirmations = snapshot?.skillConfirmations.items ?? [];
   const requestSelectionLocked = Boolean(snapshot && ![
     "idle", "ready", "completed", "failed", "cancelled", "interrupted",
   ].includes(snapshot.run.status));
 
   useEffect(() => {
     messageEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, snapshot?.skillConfirmations.revision]);
 
   const submitDraft = () => {
     const content = draft.trim();
@@ -694,6 +699,9 @@ function ConversationPanel({
               </article>
             );
           })}
+          {skillConfirmations.map((confirmation) => (
+            <SkillConfirmationCard confirmation={confirmation} key={confirmation.id} />
+          ))}
           <div ref={messageEndRef} />
         </div>
       </div>
@@ -726,6 +734,137 @@ function ConversationPanel({
             {t("chat.send")}
           </button>
         </form>
+      </div>
+    </section>
+  );
+}
+
+function SkillConfirmationCard({
+  confirmation,
+}: {
+  confirmation: RuntimeSkillConfirmation;
+}) {
+  const { t } = useI18n();
+  const runtime = useRuntime();
+  const pending = confirmation.status === "pending";
+  const executing = confirmation.status === "executing";
+  const install = confirmation.kind === "install";
+  const terminalTone = confirmation.status === "failed"
+    ? "border-[#b44747] bg-[#fff5f5]"
+    : confirmation.status === "completed"
+      ? "border-[#328076] bg-[#f3faf8]"
+      : confirmation.status === "cancelled"
+        ? "border-[#a6b4b5] bg-[#f7f9f9]"
+        : "border-[#c28a2f] bg-[#fffaf0]";
+  const statusLabel = confirmation.status === "pending"
+    ? t("chat.skillConfirmationRequired")
+    : confirmation.status === "executing"
+      ? t("chat.skillExecuting")
+      : confirmation.status === "completed"
+        ? t("chat.skillCompleted")
+        : confirmation.status === "cancelled"
+          ? t("chat.skillCancelled")
+          : t("chat.skillFailed");
+  const StatusIcon = confirmation.status === "completed"
+    ? PackageCheck
+    : confirmation.status === "cancelled" || confirmation.status === "failed"
+      ? ArchiveX
+      : PackagePlus;
+  const warnings = confirmation.warnings
+    .filter((warning) => !(confirmation.hasLocalChanges && /contains local changes/i.test(warning)))
+    .map((warning) => {
+      if (/not verified by GitHub/i.test(warning)) return t("skills.unverifiedWarning");
+      if (/contains executable scripts/i.test(warning)) return t("skills.executableWarning");
+      if (/removed from the project and moved to the recoverable trash area/i.test(warning)) {
+        return t("skills.recoveryWarning");
+      }
+      return warning;
+    });
+
+  return (
+    <section
+      aria-label={`${install ? t("chat.skillInstallTitle") : t("chat.skillUninstallTitle")} ${confirmation.skillName}`}
+      className={`border-l-2 px-3 py-3 ${terminalTone}`}
+      data-skill-confirmation={confirmation.id}
+    >
+      <div className="flex min-w-0 items-start gap-2.5">
+        <StatusIcon aria-hidden="true" className="mt-0.5 shrink-0 text-[#47666a]" size={16} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <h3 className="break-all text-xs font-semibold text-[#173b40]">
+              {install ? t("chat.skillInstallTitle") : t("chat.skillUninstallTitle")} · {confirmation.skillName}
+            </h3>
+            <span className="border border-current px-1.5 py-0.5 text-[9px] font-semibold text-[#6c5529]">
+              {statusLabel}
+            </span>
+          </div>
+          <dl className="mt-2 grid grid-cols-[72px_minmax(0,1fr)] gap-x-2 gap-y-1 text-[10px] leading-4">
+            {confirmation.source && (
+              <>
+                <dt className="text-[#6a7c7f]">{t("chat.skillSource")}</dt>
+                <dd className="break-all font-mono text-[#29484c]">
+                  {confirmation.source.repo}/{confirmation.source.requestedPath}
+                </dd>
+                <dt className="text-[#6a7c7f]">{t("chat.skillCommit")}</dt>
+                <dd className="break-all font-mono text-[#29484c]" title={confirmation.source.commit}>
+                  {confirmation.source.commit.slice(0, 12)}
+                </dd>
+              </>
+            )}
+            <dt className="text-[#6a7c7f]">{t("chat.skillTarget")}</dt>
+            <dd className="break-all font-mono text-[#29484c]">{confirmation.targetPath}</dd>
+          </dl>
+          {(confirmation.fileCount !== undefined || confirmation.scriptCount !== undefined) && (
+            <div className="mt-2 flex flex-wrap gap-1.5 text-[9px] text-[#49666a]">
+              {confirmation.fileCount !== undefined && (
+                <span className="border border-[#cbd8d8] bg-white px-1.5 py-0.5">
+                  {t("chat.skillFiles", { count: confirmation.fileCount })}
+                </span>
+              )}
+              {confirmation.scriptCount !== undefined && (
+                <span className="border border-[#dec58f] bg-[#fff9e9] px-1.5 py-0.5 text-[#72501c]">
+                  {t("chat.skillScripts", { count: confirmation.scriptCount })}
+                </span>
+              )}
+            </div>
+          )}
+          {(confirmation.hasLocalChanges || warnings.length > 0) && (
+            <ul className="mt-2 space-y-1 text-[10px] leading-4 text-[#785425]">
+              {confirmation.hasLocalChanges && <li>• {t("chat.skillLocalChanges")}</li>}
+              {warnings.map((warning) => <li key={warning}>• {warning}</li>)}
+            </ul>
+          )}
+          {confirmation.error && (
+            <p className="mt-2 whitespace-pre-wrap break-words font-mono text-[10px] leading-4 text-[#843d3d]" role="alert">
+              {confirmation.error}
+            </p>
+          )}
+          {(pending || executing) && (
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                className="inline-flex h-8 items-center gap-1.5 bg-[#0c766e] px-3 text-[10px] font-semibold text-white outline-none hover:bg-[#095f59] focus-visible:ring-2 focus-visible:ring-[#0c766e] focus-visible:ring-offset-2 disabled:cursor-wait disabled:bg-[#8fa9a6]"
+                disabled={!pending || runtime.connection !== "connected"}
+                onClick={() => runtime.confirmSkillOperation(confirmation.id)}
+                type="button"
+              >
+                {executing
+                  ? <RefreshCw aria-hidden="true" className="motion-safe:animate-spin" size={12} />
+                  : <Check aria-hidden="true" size={12} />}
+                {executing
+                  ? t("chat.skillExecuting")
+                  : install ? t("chat.skillConfirmInstall") : t("chat.skillConfirmUninstall")}
+              </button>
+              <button
+                className="h-8 px-3 text-[10px] font-semibold text-[#5b7074] outline-none hover:bg-white focus-visible:ring-2 focus-visible:ring-[#0c766e] disabled:text-[#9facad]"
+                disabled={!pending || runtime.connection !== "connected"}
+                onClick={() => runtime.cancelSkillOperation(confirmation.id)}
+                type="button"
+              >
+                {t("chat.skillCancel")}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </section>
   );
@@ -1413,6 +1552,7 @@ function HomeContent() {
           <div
             aria-live="polite"
             className="flex h-6 items-center gap-1.5 px-1 text-[10px] text-[#60777a]"
+            data-connection-state={runtime.connection}
             title={runtime.error ?? connectionLabel}
           >
             <span
@@ -1583,6 +1723,9 @@ function HomeContent() {
             preferences={<ApplicationPreferences onThemeModeChange={selectThemeMode} themeMode={themeMode} />}
             projectPath={runtime.project.path}
             runtimeTools={snapshot?.tools}
+            systemVariablesRefreshKey={
+              snapshot?.variables.value.builtin.system_variables_revision
+            }
           />
         ) : (
           <div className="flex h-full items-center justify-center text-xs text-[#60777a]">

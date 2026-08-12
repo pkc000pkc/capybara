@@ -4,6 +4,9 @@ import os from "node:os";
 import path from "node:path";
 
 const e2eProject = fs.mkdtempSync(path.join(os.tmpdir(), "capybara-e2e-"));
+const backendPort = Number(process.env.CAPYBARA_E2E_BACKEND_PORT ?? 3005);
+const modelPort = Number(process.env.CAPYBARA_E2E_MODEL_PORT ?? 3016);
+const backendUrl = `http://localhost:${backendPort}`;
 let originalUserPreferences: unknown;
 fs.cpSync(path.resolve(process.cwd(), "../../examples/test-project"), e2eProject, {
   filter: (source) => !path.basename(source).startsWith("sessions.sqlite"),
@@ -13,7 +16,7 @@ const projectConfigPath = path.join(e2eProject, ".capybara", "config.json");
 const projectConfig = JSON.parse(fs.readFileSync(projectConfigPath, "utf8"));
 projectConfig.llm = {
   model: "gpt-5",
-  base_url: "http://127.0.0.1:3016/v1",
+  base_url: `http://127.0.0.1:${modelPort}/v1`,
   protocol: "responses",
 };
 fs.writeFileSync(projectConfigPath, `${JSON.stringify(projectConfig, null, 2)}\n`);
@@ -23,7 +26,7 @@ fs.writeFileSync(
 );
 
 test.beforeAll(async () => {
-  const projectInspection = await fetch("http://localhost:3005/api/projects/inspect", {
+  const projectInspection = await fetch(`${backendUrl}/api/projects/inspect`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path: e2eProject }),
@@ -31,8 +34,8 @@ test.beforeAll(async () => {
   if (!projectInspection.ok) {
     throw new Error(`E2E project inspection failed: ${await projectInspection.text()}`);
   }
-  originalUserPreferences = await fetch("http://localhost:3005/api/preferences").then((response) => response.json());
-  await fetch("http://localhost:3005/api/preferences", {
+  originalUserPreferences = await fetch(`${backendUrl}/api/preferences`).then((response) => response.json());
+  await fetch(`${backendUrl}/api/preferences`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ language: "zh-CN", color_theme: "light" }),
@@ -47,13 +50,13 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.afterAll(async () => {
-  await fetch("http://127.0.0.1:3005/api/projects/release", {
+  await fetch(`${backendUrl}/api/projects/release`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path: e2eProject }),
   });
   fs.rmSync(e2eProject, { recursive: true, force: true });
-  await fetch("http://localhost:3005/api/preferences", {
+  await fetch(`${backendUrl}/api/preferences`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(originalUserPreferences),
@@ -100,7 +103,7 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
   await page.goto("/");
-  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator("#context-rendered-panel")).toContainText(
     "You are Capybara",
   );
@@ -356,7 +359,7 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
 test("projects, sessions, request replay, storage, and clearing stay coordinated", async ({ page }) => {
   test.setTimeout(150_000);
   await page.goto("/");
-  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({ timeout: 20_000 });
 
   const projectButton = page.getByRole("button", {
     name: path.basename(e2eProject),
@@ -429,7 +432,7 @@ test("projects, sessions, request replay, storage, and clearing stay coordinated
 test("sending after an interrupted run starts a new request", async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto("/");
-  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({ timeout: 20_000 });
   await page.getByRole("button", { name: "新增会话" }).click();
 
   const conversation = page.locator("#conversation-panel");
@@ -456,7 +459,7 @@ test("sending after an interrupted run starts a new request", async ({ page }) =
 test("model failures remain visible in the conversation after reload", async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto("/");
-  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({ timeout: 20_000 });
   await page.getByRole("button", { name: "新增会话" }).click();
 
   await page.getByLabel("输入消息").fill("E2E_FORCE_MODEL_ERROR");
@@ -471,7 +474,7 @@ test("model failures remain visible in the conversation after reload", async ({ 
   await expect(page.locator('[data-run-status="failed"]')).toBeVisible();
 
   await page.reload();
-  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator("[data-chat-failure]")).toContainText(
     "E2E forced model transport failure",
   );
@@ -480,7 +483,7 @@ test("model failures remain visible in the conversation after reload", async ({ 
 test("model retry progress is visible until the request recovers", async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto("/");
-  await expect(page.locator('[title="已连接"], [title="Connected"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({ timeout: 20_000 });
   await page.getByRole("button", { name: "新增会话" }).click();
 
   await page.getByLabel("输入消息").fill("E2E_RETRY_THEN_SUCCEED");
@@ -500,4 +503,49 @@ test("model retry progress is visible until the request recovers", async ({ page
   await expect(retry).toHaveCount(0);
   await expect(page.locator("[data-model-retry-summary]")).toHaveCount(0);
   await expect(page.locator('[data-run-status="completed"]')).toBeVisible();
+});
+
+test("runtime Skill removal requires an in-conversation button confirmation", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto("/");
+  await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({ timeout: 20_000 });
+  await page.getByRole("button", { name: "新增会话" }).click();
+
+  const configPath = path.join(e2eProject, ".capybara", "config.json");
+  const configuredSkills = () => JSON.parse(fs.readFileSync(configPath, "utf8")).skills as string[];
+  expect(configuredSkills()).toContain("skills/project-files");
+
+  await page.getByLabel("输入消息").fill("E2E_REQUEST_SKILL_UNINSTALL");
+  await page.getByRole("button", { name: "发送" }).click();
+  const firstCard = page.locator("[data-skill-confirmation]").last();
+  await expect(firstCard).toBeVisible({ timeout: 30_000 });
+  await expect(firstCard).toContainText("卸载 Skill · project-files");
+  await expect(firstCard).toContainText("需要你的确认");
+  await expect(firstCard.getByRole("button", { name: "确认卸载" })).toBeVisible();
+  expect(configuredSkills()).toContain("skills/project-files");
+
+  await page.reload();
+  await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({ timeout: 20_000 });
+  const restoredPendingCard = page.locator("[data-skill-confirmation]").last();
+  await expect(restoredPendingCard).toContainText("需要你的确认");
+  await expect(restoredPendingCard.getByRole("button", { name: "确认卸载" })).toBeVisible();
+
+  await restoredPendingCard.getByRole("button", { name: "取消" }).click();
+  await expect(restoredPendingCard).toContainText("已取消");
+  await expect(restoredPendingCard.getByRole("button", { name: "确认卸载" })).toHaveCount(0);
+  expect(configuredSkills()).toContain("skills/project-files");
+  await expect(page.locator('[data-run-status="interrupted"]')).toBeVisible();
+
+  await page.getByLabel("输入消息").fill("E2E_REQUEST_SKILL_UNINSTALL");
+  await page.getByRole("button", { name: "发送" }).click();
+  const secondCard = page.locator("[data-skill-confirmation]").last();
+  await expect(page.locator("[data-skill-confirmation]")).toHaveCount(2, { timeout: 30_000 });
+  await expect(secondCard).toContainText("需要你的确认", { timeout: 30_000 });
+  await secondCard.getByRole("button", { name: "确认卸载" }).click();
+  await expect(secondCard).toContainText("已完成", { timeout: 30_000 });
+  await expect.poll(configuredSkills).not.toContain("skills/project-files");
+
+  await page.reload();
+  await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator("[data-skill-confirmation]").last()).toContainText("已完成");
 });

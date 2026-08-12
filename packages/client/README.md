@@ -4,7 +4,7 @@ Framework-neutral TypeScript WebSocket client for a local Capybara Runner. It us
 
 ## Install
 
-The package is prepared but has not yet been published to npm. After the first release:
+Install the published Client SDK:
 
 ```bash
 npm install @capybara-agent/client

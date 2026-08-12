@@ -6,7 +6,7 @@ The package contains no browser, Node.js, transport, or framework dependencies.
 
 ## Install
 
-The package is prepared but has not yet been published to npm. After the first release:
+Install the published protocol package:
 
 ```bash
 npm install @capybara-agent/protocol

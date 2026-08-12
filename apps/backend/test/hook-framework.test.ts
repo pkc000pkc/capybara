@@ -51,6 +51,7 @@ function fixture(): HookFixture {
     variables: {
       builtin: {
         project_path: '', workspace_path: '', config_file: '', main_template: '', initialized_at: '',
+        system_variables_revision: '',
         prompts: {}, missing_prompts: [], sys_message: [],
       },
       task: { title: '' },

@@ -15,6 +15,8 @@ import { enqueueProjectWrite } from '#core/project-write-queue'
 import {
   ProjectResources,
   type ProjectResourceChange,
+  type SystemVariableChange,
+  type SystemVariableDefinition,
   type SystemVariablesResource,
 } from '#core/project-resources'
 import {
@@ -26,6 +28,12 @@ import {
   type HarnessCatalogEntry,
 } from '#core/resources/harness-catalog'
 import { SkillRegistry } from '#core/skills/skill-registry'
+import {
+  SkillMarketplaceService,
+  type InstalledSkillSummary,
+  type SkillPreview,
+  type SkillSearchResult,
+} from '#core/skills/skill-marketplace'
 import { SkillScriptRunner } from '#core/skills/skill-script-runner'
 import type { RegisteredSkill } from '#core/skills/types'
 import { ToolDispatcher } from '#core/tools/tool-dispatcher'
@@ -66,6 +74,8 @@ import {
   type RuntimeObservation,
   type RuntimeSnapshot,
   type RuntimeSkillsState,
+  type RuntimeSkillConfirmation,
+  type RuntimeSkillConfirmationsState,
   type RuntimeStatusState,
   type RuntimeVariables,
   type RuntimeWorkflowNode,
@@ -108,10 +118,20 @@ export interface RuntimeLoopOptions {
   stepDelayMs?: number
   llm?: RuntimeLlm
   initialState?: RuntimeLoopState
+  skillMarketplace?: RuntimeSkillMarketplace
+}
+
+export interface RuntimeSkillMarketplace {
+  search(input: { query?: unknown; owner?: unknown; page?: unknown; limit?: unknown }): Promise<{ items: SkillSearchResult[]; page: number }>
+  preview(input: { repo?: unknown; path?: unknown }): Promise<SkillPreview>
+  installed(): InstalledSkillSummary[]
+  install(input: { repo?: unknown; path?: unknown; commit?: unknown }): Promise<unknown>
+  uninstall(skillId: unknown): Promise<unknown>
 }
 
 const MAX_GENERATED_HOOK_FILES = 8
 const MAX_GENERATED_HOOK_TOTAL_BYTES = 1024 * 1024
+const MAX_SKILL_CONFIRMATIONS = 50
 
 interface Checkpoint {
   id: string
@@ -188,6 +208,7 @@ const INITIAL_VARIABLES: RuntimeVariables = {
     config_file: '.capybara/config.json',
     main_template: 'main.j2',
     initialized_at: '',
+    system_variables_revision: '',
     prompts: {},
     shared_prompts: [],
     missing_prompts: [],
@@ -204,6 +225,9 @@ const INITIAL_VARIABLES: RuntimeVariables = {
 
 interface InternalResourceToolDefinition extends Omit<LlmToolDefinition, 'description'> {
   descriptionVariable: string
+  defaultDescription?: string
+  sideEffects?: 'none' | 'workspace-write' | 'external'
+  replay?: 'safe' | 'confirm' | 'never'
 }
 
 const INTERNAL_RESOURCE_TOOLS: InternalResourceToolDefinition[] = [
@@ -244,6 +268,99 @@ const INTERNAL_RESOURCE_TOOLS: InternalResourceToolDefinition[] = [
     },
   },
   {
+    name: 'read_system_variables',
+    descriptionVariable: 'system_variable_read_tool_description',
+    defaultDescription: 'Read selected system prompt variables and the current revision before changing them.',
+    parameters: {
+      type: 'object',
+      properties: {
+        keys: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 50,
+          uniqueItems: true,
+          items: { type: 'string', pattern: '^[a-z][a-z0-9_]*$' },
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'apply_system_variable_changes',
+    descriptionVariable: 'system_variable_apply_tool_description',
+    defaultDescription: 'Atomically add, patch, replace, or remove system prompt variables using the latest revision and return a validated diff.',
+    sideEffects: 'workspace-write',
+    replay: 'never',
+    parameters: {
+      type: 'object',
+      properties: {
+        base_revision: { type: 'string', minLength: 1 },
+        changes: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 50,
+          items: {
+            oneOf: [
+              {
+                type: 'object',
+                description: 'Create a variable or replace its complete definition and value.',
+                properties: {
+                  op: { type: 'string', enum: ['upsert'] },
+                  key: { type: 'string', pattern: '^[a-z][a-z0-9_]*$' },
+                  type: { type: 'string', enum: ['text', 'prompt_template'] },
+                  label: { type: 'string' },
+                  description: { type: 'string' },
+                  value: { type: 'string' },
+                  required: { type: 'boolean' },
+                  show_in_status: { type: 'boolean' },
+                  scope: { type: 'string', enum: ['session', 'project'] },
+                },
+                required: ['op', 'key', 'value'],
+                additionalProperties: false,
+              },
+              {
+                type: 'object',
+                description: 'Patch only the value of an existing variable with exact text replacements.',
+                properties: {
+                  op: { type: 'string', enum: ['patch'] },
+                  key: { type: 'string', pattern: '^[a-z][a-z0-9_]*$' },
+                  edits: {
+                    type: 'array',
+                    minItems: 1,
+                    maxItems: 50,
+                    items: {
+                      type: 'object',
+                      properties: {
+                        old_text: { type: 'string', minLength: 1 },
+                        new_text: { type: 'string' },
+                      },
+                      required: ['old_text', 'new_text'],
+                      additionalProperties: false,
+                    },
+                  },
+                },
+                required: ['op', 'key', 'edits'],
+                additionalProperties: false,
+              },
+              {
+                type: 'object',
+                description: 'Remove an existing variable.',
+                properties: {
+                  op: { type: 'string', enum: ['remove'] },
+                  key: { type: 'string', pattern: '^[a-z][a-z0-9_]*$' },
+                },
+                required: ['op', 'key'],
+                additionalProperties: false,
+              },
+            ],
+          },
+        },
+      },
+      required: ['base_revision', 'changes'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'execute_workflow',
     descriptionVariable: 'workflow_execution_tool_description',
     parameters: GENERATED_WORKFLOW_PARAMETERS,
@@ -276,6 +393,74 @@ const INTERNAL_RESOURCE_TOOLS: InternalResourceToolDefinition[] = [
         },
       },
       required: ['skill_id', 'path', 'argv'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'search_skill_marketplace',
+    descriptionVariable: 'skill_marketplace_search_tool_description',
+    defaultDescription: 'Search the GitHub Skill marketplace for project Skills. This is read-only. Preview a result before requesting installation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', minLength: 1, maxLength: 120 },
+        owner: { type: 'string', minLength: 1, maxLength: 100 },
+        page: { type: 'integer', minimum: 1 },
+        limit: { type: 'integer', minimum: 1, maximum: 30 },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'preview_skill_marketplace',
+    descriptionVariable: 'skill_marketplace_preview_tool_description',
+    defaultDescription: 'Download and inspect a GitHub Skill in temporary staging. Returns its immutable commit, files, scripts, and warnings without changing the project.',
+    parameters: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', pattern: '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' },
+        path: { type: 'string', minLength: 1, maxLength: 512 },
+      },
+      required: ['repo', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_installed_skills',
+    descriptionVariable: 'skill_marketplace_installed_tool_description',
+    defaultDescription: 'List project-installed Skills and report their source, immutable commit, and whether local files changed. This is read-only.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'request_skill_install',
+    descriptionVariable: 'skill_marketplace_install_tool_description',
+    defaultDescription: 'Request installation of an already previewed GitHub Skill at its full 40-character commit SHA. This only creates a pending user confirmation; it never installs directly.',
+    parameters: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', pattern: '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' },
+        path: { type: 'string', minLength: 1, maxLength: 512 },
+        commit: { type: 'string', pattern: '^[a-f0-9]{40}$' },
+      },
+      required: ['repo', 'path', 'commit'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'request_skill_uninstall',
+    descriptionVariable: 'skill_marketplace_uninstall_tool_description',
+    defaultDescription: 'Request removal of an installed project Skill. This only creates a pending user confirmation; it never removes files directly.',
+    parameters: {
+      type: 'object',
+      properties: {
+        skill_id: { type: 'string', minLength: 1 },
+      },
+      required: ['skill_id'],
       additionalProperties: false,
     },
   },
@@ -565,6 +750,7 @@ export class RuntimeLoop extends Loop {
   private readonly projectResources: ProjectResources
   private readonly toolRegistry: ToolRegistry
   private readonly skillRegistry: SkillRegistry
+  private readonly skillMarketplace: RuntimeSkillMarketplace
   private readonly hookRegistry: HookRegistry
   private llm: RuntimeLlm
   private readonly projectLlmEnabled: boolean
@@ -593,6 +779,7 @@ export class RuntimeLoop extends Loop {
   private timelineRevision = 1
   private harnessRevision = 1
   private skillRevision = 1
+  private skillConfirmationRevision = 0
   private artifactRevision = 0
   private contextRevision = 0
   private effectiveContextRevision = 0
@@ -646,6 +833,7 @@ export class RuntimeLoop extends Loop {
     catalog: [] as HarnessCatalogDefinition[],
   }
   private skills: RuntimeSkillsState = { revision: 1, items: [], catalog: [] }
+  private skillConfirmations: RuntimeSkillConfirmationsState = { revision: 0, items: [] }
   private workflows: RuntimeWorkflowsState = { revision: 0, items: [] }
   private timeline: TimelineStep[] = this.createTimeline()
   private run: RunState = {
@@ -683,7 +871,8 @@ export class RuntimeLoop extends Loop {
     installSystemProjectResources(this.projectDir)
     this.projectResources = new ProjectResources(this.projectDir, true)
     const config = this.projectResources.readSettings()
-    this.systemVariables = this.projectResources.readSystemVariables()
+    const systemVariablesState = this.projectResources.readSystemVariablesState()
+    this.systemVariables = systemVariablesState.resource
     this.maxMessages = config.max_messages
     this.maxToolRounds = config.max_tool_rounds
     this.maxInputTokens = config.context.max_input_tokens
@@ -698,6 +887,7 @@ export class RuntimeLoop extends Loop {
     this.toolRegistry.load(config.tools)
     this.skillRegistry = new SkillRegistry(this.projectDir)
     this.skillRegistry.load(config.skills)
+    this.skillMarketplace = options.skillMarketplace ?? new SkillMarketplaceService(this.projectDir)
     this.hookRegistry = new HookRegistry(this.projectDir)
     this.toolDispatcher = new ToolDispatcher(this.toolRegistry, this.workspaceDir, {
       timeoutMs: config.tool_timeout_ms,
@@ -746,6 +936,7 @@ export class RuntimeLoop extends Loop {
       config_file: this.projectResources.configFile,
       main_template: config.main_template,
       initialized_at: now(),
+      system_variables_revision: systemVariablesState.revision,
       ...this.systemPromptState(this.systemVariables),
       sys_message: [],
     }
@@ -805,6 +996,7 @@ export class RuntimeLoop extends Loop {
       tools: this.tools,
       harnesses: this.harnesses,
       skills: this.skills,
+      skillConfirmations: this.skillConfirmations,
       artifacts: { revision: this.artifactRevision, items: this.artifactItems },
       contexts: {
         revision: this.contextRevision,
@@ -873,6 +1065,7 @@ export class RuntimeLoop extends Loop {
     this.timelineRevision = snapshot.timeline.revision
     this.harnessRevision = snapshot.harnesses.revision
     this.skillRevision = snapshot.skills?.revision ?? 1
+    this.skillConfirmationRevision = snapshot.skillConfirmations?.revision ?? 0
     this.artifactRevision = snapshot.artifacts.revision
     this.contextRevision = snapshot.contexts.revision
     this.effectiveContextRevision = snapshot.effectiveContexts.revision
@@ -999,6 +1192,17 @@ export class RuntimeLoop extends Loop {
       catalog: clone(this.skillCatalog),
       items: restoredSkillItems,
     }
+    this.skillConfirmations = clone(snapshot.skillConfirmations ?? { revision: 0, items: [] })
+    this.skillConfirmations.items = this.skillConfirmations.items.map((item) =>
+      item.status === 'executing'
+        ? {
+            ...item,
+            status: 'failed' as const,
+            resolvedAt: now(),
+            error: 'Skill operation was interrupted while restoring the session.',
+          }
+        : item)
+    this.skillConfirmationRevision = this.skillConfirmations.revision
     if (this.tools.items.length !== restoredToolCount) this.tools.revision += 1
     this.skillRevision = this.skills.revision
     this.reconcileHarnessBindings('restore', { publish: false })
@@ -1271,6 +1475,20 @@ export class RuntimeLoop extends Loop {
         this.assertRevision(command.payload.baseRevision, this.skills.revision)
         this.assertSkillResource(command.payload.skillId, command.payload.path, 'script')
         return
+      case 'runtime.skills.confirm':
+      case 'runtime.skills.cancelConfirmation':
+        {
+          const confirmation = this.skillConfirmations.items.find(
+            (item) => item.id === command.payload.confirmationId,
+          )
+          if (!confirmation) {
+            throw new CommandError('NOT_FOUND', 'Skill confirmation was not found')
+          }
+          if (confirmation.status !== 'pending') {
+            throw new CommandError('INVALID_STATE', 'Skill confirmation has already been resolved')
+          }
+        }
+        return
     }
   }
 
@@ -1376,6 +1594,12 @@ export class RuntimeLoop extends Loop {
           command.payload.argv,
           command.id,
         )
+        return
+      case 'runtime.skills.confirm':
+        this.confirmSkillOperation(command.payload.confirmationId, command.id)
+        return
+      case 'runtime.skills.cancelConfirmation':
+        this.cancelSkillConfirmation(command.payload.confirmationId, command.id)
     }
   }
 
@@ -2815,6 +3039,7 @@ export class RuntimeLoop extends Loop {
     const argumentsValue = toJsonValue(request.arguments)
     const startedAt = now()
     const projectTool = this.tools.items.find((tool) => tool.name === request.name)
+    const internalTool = INTERNAL_RESOURCE_TOOLS.find((tool) => tool.name === request.name)
     step.detail = {
       ...(step.detail ?? {}),
       callId: request.id,
@@ -2828,8 +3053,8 @@ export class RuntimeLoop extends Loop {
         inputSchema: projectTool.inputSchema,
       } : {
         toolId: `runtime:${request.name}`,
-        sideEffects: 'none',
-        replay: 'safe',
+        sideEffects: internalTool?.sideEffects ?? 'none',
+        replay: internalTool?.replay ?? 'safe',
       }),
     }
     this.updateTimeline({ ...step }, correlationId)
@@ -4031,10 +4256,38 @@ export class RuntimeLoop extends Loop {
 
   private internalResourceTools(): LlmToolDefinition[] {
     const prompts = this.variables.value.builtin.prompts
-    return INTERNAL_RESOURCE_TOOLS.map(({ descriptionVariable, ...tool }) => ({
+    return INTERNAL_RESOURCE_TOOLS.map(({
+      descriptionVariable,
+      defaultDescription,
+      sideEffects: _sideEffects,
+      replay: _replay,
+      ...tool
+    }) => ({
       ...tool,
-      description: prompts[descriptionVariable] || tool.name,
+      description: prompts[descriptionVariable] || defaultDescription || tool.name,
     }))
+  }
+
+  private refreshSystemVariablesResource(
+    resource: SystemVariablesResource,
+    correlationId: string,
+    revision = this.projectResources.readSystemVariablesState().revision,
+  ): void {
+    this.systemVariables = resource
+    const state = this.systemPromptState(resource)
+    const candidates: JsonPatchOperation[] = [
+      { op: 'replace', path: '/builtin/system_variables_revision', value: revision },
+      { op: 'replace', path: '/builtin/prompts', value: state.prompts },
+      { op: 'replace', path: '/builtin/shared_prompts', value: state.shared_prompts },
+      { op: 'replace', path: '/builtin/missing_prompts', value: state.missing_prompts },
+    ]
+    const patch = candidates.filter((operation) => {
+      if (!('value' in operation)) return false
+      const key = operation.path.split('/').at(-1) as keyof RuntimeVariables['builtin']
+      return JSON.stringify(this.variables.value.builtin[key]) !== JSON.stringify(operation.value)
+    })
+    if (patch.length > 0) this.updateVariables(patch, 'runtime', correlationId)
+    this.updateRuntimeStatus({}, correlationId)
   }
 
   private handleProjectResourceChange(change: ProjectResourceChange): void {
@@ -4077,18 +4330,8 @@ export class RuntimeLoop extends Loop {
         if (change === 'settings') this.renderAndPublish(`resource:${change}`)
         return
       }
-      this.systemVariables = this.projectResources.readSystemVariables()
-      const state = this.systemPromptState(this.systemVariables)
-      this.updateVariables(
-        [
-          { op: 'replace', path: '/builtin/prompts', value: state.prompts },
-          { op: 'replace', path: '/builtin/shared_prompts', value: state.shared_prompts },
-          { op: 'replace', path: '/builtin/missing_prompts', value: state.missing_prompts },
-        ],
-        'runtime',
-        'resource:system-variables',
-      )
-      this.updateRuntimeStatus({}, 'resource:system-variables')
+      const state = this.projectResources.readSystemVariablesState()
+      this.refreshSystemVariablesResource(state.resource, 'resource:system-variables', state.revision)
     } catch (error) {
       this.emit('render.result.failed', {
         templateRevision: this.template.revision,
@@ -4745,6 +4988,103 @@ export class RuntimeLoop extends Loop {
     if (render) this.syncResourceVariables(correlationId)
   }
 
+  private publishSkillConfirmations(correlationId: string): void {
+    this.skillConfirmationRevision += 1
+    const pending = this.skillConfirmations.items.filter((item) => item.status === 'pending')
+    const resolvedLimit = Math.max(0, MAX_SKILL_CONFIRMATIONS - pending.length)
+    const resolvedItems = this.skillConfirmations.items.filter((item) => item.status !== 'pending')
+    const resolved = resolvedLimit === 0 ? [] : resolvedItems.slice(-resolvedLimit)
+    this.skillConfirmations = {
+      revision: this.skillConfirmationRevision,
+      items: [...resolved, ...pending],
+    }
+    this.snapshotRevision += 1
+    this.emit(
+      'runtime.skills.confirmations.updated',
+      clone(this.skillConfirmations),
+      correlationId,
+    )
+  }
+
+  private addSkillConfirmation(
+    confirmation: RuntimeSkillConfirmation,
+    correlationId: string,
+  ): RuntimeSkillConfirmation {
+    const duplicate = this.skillConfirmations.items.find((item) =>
+      item.status === 'pending' &&
+      item.kind === confirmation.kind &&
+      item.skillName === confirmation.skillName &&
+      JSON.stringify(item.source) === JSON.stringify(confirmation.source))
+    if (duplicate) return duplicate
+    if (this.skillConfirmations.items.filter((item) => item.status === 'pending').length >= MAX_SKILL_CONFIRMATIONS) {
+      throw new Error('too many pending Skill confirmations; resolve an existing request first')
+    }
+    this.skillConfirmations = {
+      ...this.skillConfirmations,
+      items: [...this.skillConfirmations.items, confirmation],
+    }
+    this.publishSkillConfirmations(correlationId)
+    return confirmation
+  }
+
+  private updateSkillConfirmation(
+    confirmationId: string,
+    changes: Partial<RuntimeSkillConfirmation>,
+    correlationId: string,
+  ): void {
+    this.skillConfirmations = {
+      ...this.skillConfirmations,
+      items: this.skillConfirmations.items.map((item) => item.id === confirmationId
+        ? { ...item, ...changes }
+        : item),
+    }
+    this.publishSkillConfirmations(correlationId)
+  }
+
+  private cancelSkillConfirmation(confirmationId: string, correlationId: string): void {
+    this.updateSkillConfirmation(confirmationId, {
+      status: 'cancelled',
+      resolvedAt: now(),
+    }, correlationId)
+  }
+
+  private confirmSkillOperation(confirmationId: string, correlationId: string): void {
+    const confirmation = this.skillConfirmations.items.find((item) => item.id === confirmationId)
+    if (!confirmation || confirmation.status !== 'pending') return
+    this.updateSkillConfirmation(confirmationId, { status: 'executing' }, correlationId)
+    void this.resolveSkillConfirmation(confirmation, correlationId)
+  }
+
+  private async resolveSkillConfirmation(
+    confirmation: RuntimeSkillConfirmation,
+    correlationId: string,
+  ): Promise<void> {
+    try {
+      if (confirmation.kind === 'install') {
+        if (!confirmation.source) throw new Error('Skill installation source is missing')
+        await this.skillMarketplace.install({
+          repo: confirmation.source.repo,
+          path: confirmation.source.requestedPath,
+          commit: confirmation.source.commit,
+        })
+      } else {
+        await this.skillMarketplace.uninstall(confirmation.skillName)
+      }
+      this.reloadProjectSkills(this.projectResources.readSettings(), correlationId)
+      this.updateSkillConfirmation(confirmation.id, {
+        status: 'completed',
+        resolvedAt: now(),
+        error: undefined,
+      }, correlationId)
+    } catch (error) {
+      this.updateSkillConfirmation(confirmation.id, {
+        status: 'failed',
+        resolvedAt: now(),
+        error: error instanceof Error ? error.message : String(error),
+      }, correlationId)
+    }
+  }
+
   private attachSkill(
     skillId: string,
     source: SkillDefinition['source'],
@@ -4908,6 +5248,100 @@ export class RuntimeLoop extends Loop {
     )
   }
 
+  private async requestSkillInstall(
+    argumentsValue: unknown,
+    correlationId: string,
+  ): Promise<JsonObject> {
+    const allowedKeys = new Set(['repo', 'path', 'commit'])
+    if (
+      !isObject(argumentsValue) ||
+      Object.keys(argumentsValue).some((key) => !allowedKeys.has(key)) ||
+      typeof argumentsValue.repo !== 'string' ||
+      typeof argumentsValue.path !== 'string' ||
+      typeof argumentsValue.commit !== 'string' ||
+      !/^[a-f0-9]{40}$/.test(argumentsValue.commit)
+    ) {
+      throw new Error('request_skill_install requires repo, path, and a full 40-character commit SHA')
+    }
+    const preview = await this.skillMarketplace.preview({
+      repo: argumentsValue.repo,
+      path: argumentsValue.path,
+    })
+    if (preview.commit !== argumentsValue.commit) {
+      throw new Error('the requested commit no longer matches the current preview; preview the Skill again')
+    }
+    const confirmation = this.addSkillConfirmation({
+      id: `skill-confirmation-${randomUUID()}`,
+      kind: 'install',
+      status: 'pending',
+      skillName: preview.skillName,
+      source: {
+        repo: preview.repo,
+        requestedPath: preview.requestedPath,
+        commit: preview.commit,
+      },
+      targetPath: `skills/${preview.skillName}`,
+      warnings: preview.warnings,
+      fileCount: preview.files.length,
+      scriptCount: preview.files.filter((file) => file.kind === 'script').length,
+      requestedAt: now(),
+    }, correlationId)
+    return toJsonValue({
+      confirmation,
+      requiresUserConfirmation: true,
+      projectChanged: false,
+    }) as JsonObject
+  }
+
+  private requestSkillUninstall(
+    argumentsValue: unknown,
+    correlationId: string,
+  ): JsonObject {
+    if (
+      !isObject(argumentsValue) ||
+      Object.keys(argumentsValue).some((key) => key !== 'skill_id') ||
+      typeof argumentsValue.skill_id !== 'string' ||
+      !argumentsValue.skill_id.trim()
+    ) {
+      throw new Error('request_skill_uninstall requires skill_id')
+    }
+    const installed = this.skillMarketplace.installed().find(
+      (skill) => skill.id === argumentsValue.skill_id,
+    )
+    if (!installed) throw new Error('project Skill was not found')
+    if (installed.path === '.capybara' || installed.path.startsWith('.capybara/')) {
+      throw new Error('system Skills cannot be removed from the runtime')
+    }
+    const warnings = [
+      'The Skill will be removed from the project and moved to the recoverable trash area.',
+    ]
+    if (installed.hasLocalChanges) {
+      warnings.push('This Skill contains local changes that differ from its installed source.')
+    }
+    const confirmation = this.addSkillConfirmation({
+      id: `skill-confirmation-${randomUUID()}`,
+      kind: 'uninstall',
+      status: 'pending',
+      skillName: installed.id,
+      ...(installed.repo && installed.requestedPath && installed.commit ? {
+        source: {
+          repo: installed.repo,
+          requestedPath: installed.requestedPath,
+          commit: installed.commit,
+        },
+      } : {}),
+      targetPath: installed.path,
+      warnings,
+      hasLocalChanges: installed.hasLocalChanges,
+      requestedAt: now(),
+    }, correlationId)
+    return toJsonValue({
+      confirmation,
+      requiresUserConfirmation: true,
+      projectChanged: false,
+    }) as JsonObject
+  }
+
   private reloadProjectSkills(
     settings: ReturnType<ProjectResources['readSettings']>,
     correlationId: string,
@@ -4994,7 +5428,21 @@ export class RuntimeLoop extends Loop {
         ? this.searchResources(request.arguments)
         : request.name === 'load_resources'
           ? this.loadResources(request.arguments, correlationId)
-          : this.readSkillResourceArguments(request.arguments, correlationId)
+          : request.name === 'read_system_variables'
+            ? this.readSystemVariablesTool(request.arguments)
+            : request.name === 'apply_system_variable_changes'
+              ? await this.applySystemVariableChangesTool(request.arguments, correlationId)
+              : request.name === 'search_skill_marketplace'
+                ? await this.skillMarketplace.search(isObject(request.arguments) ? request.arguments : {})
+                : request.name === 'preview_skill_marketplace'
+                  ? await this.skillMarketplace.preview(isObject(request.arguments) ? request.arguments : {})
+                  : request.name === 'list_installed_skills'
+                    ? { items: this.skillMarketplace.installed() }
+                    : request.name === 'request_skill_install'
+                      ? await this.requestSkillInstall(request.arguments, correlationId)
+                      : request.name === 'request_skill_uninstall'
+                        ? this.requestSkillUninstall(request.arguments, correlationId)
+                        : this.readSkillResourceArguments(request.arguments, correlationId)
       return {
         id: request.id,
         name: request.name,
@@ -5018,6 +5466,183 @@ export class RuntimeLoop extends Loop {
         durationMs: Date.now() - started,
       }
     }
+  }
+
+  private readSystemVariablesTool(argumentsValue: unknown): JsonObject {
+    if (!isObject(argumentsValue)) {
+      throw new Error('read_system_variables requires an object')
+    }
+    const unknown = Object.keys(argumentsValue).find((key) => key !== 'keys')
+    if (unknown) throw new Error(`read_system_variables does not accept ${unknown}`)
+    const requestedKeys = argumentsValue.keys
+    if (
+      requestedKeys !== undefined
+      && (
+        !Array.isArray(requestedKeys)
+        || requestedKeys.length === 0
+        || requestedKeys.length > 50
+        || !requestedKeys.every((key) => typeof key === 'string' && /^[a-z][a-z0-9_]*$/.test(key))
+        || new Set(requestedKeys).size !== requestedKeys.length
+      )
+    ) {
+      throw new Error('read_system_variables keys must contain 1-50 unique lowercase snake_case names')
+    }
+    const state = this.projectResources.readSystemVariablesState()
+    const allVariables = state.resource.variables.filter((variable) => variable.key !== 'sys_message')
+    const resolved = resolveSystemPromptVariables(allVariables)
+    const selectedKeys = requestedKeys as string[] | undefined
+    const selected = selectedKeys ? new Set(selectedKeys) : undefined
+    const variables = selected
+      ? allVariables.filter((variable) => selected.has(variable.key))
+      : allVariables
+    const dependencies = Object.fromEntries(
+      variables.map((variable) => [variable.key, resolved.dependencies[variable.key] ?? []]),
+    )
+    return toJsonValue({
+      revision: state.revision,
+      variables,
+      dependencies,
+      ...(selectedKeys
+        ? {
+            selected_keys: selectedKeys,
+            missing_keys: selectedKeys.filter((key) => !allVariables.some((variable) => variable.key === key)),
+          }
+        : {}),
+      ...(!selectedKeys || selected?.has('dynamic_context')
+        ? { dynamic_context: resolved.prompts.dynamic_context ?? '' }
+        : {}),
+    }) as JsonObject
+  }
+
+  private systemVariableChangeArguments(argumentsValue: unknown): {
+    baseRevision: string
+    changes: SystemVariableChange[]
+  } {
+    if (
+      !isObject(argumentsValue) ||
+      typeof argumentsValue.base_revision !== 'string' ||
+      !argumentsValue.base_revision.trim() ||
+      !Array.isArray(argumentsValue.changes) ||
+      argumentsValue.changes.length === 0 ||
+      argumentsValue.changes.length > 50
+    ) {
+      throw new Error('apply_system_variable_changes requires base_revision and 1-50 changes')
+    }
+    const changes = argumentsValue.changes.map((value, index): SystemVariableChange => {
+      if (
+        !isObject(value)
+        || (value.op !== 'upsert' && value.op !== 'patch' && value.op !== 'remove')
+      ) {
+        throw new Error(`changes[${index}] requires op upsert, patch, or remove`)
+      }
+      if (typeof value.key !== 'string' || !/^[a-z][a-z0-9_]*$/.test(value.key)) {
+        throw new Error(`changes[${index}].key must use lowercase snake_case`)
+      }
+      if (value.op === 'remove') {
+        const unknown = Object.keys(value).find((key) => key !== 'op' && key !== 'key')
+        if (unknown) throw new Error(`changes[${index}] remove does not accept ${unknown}`)
+        return { op: 'remove', key: value.key }
+      }
+      if (value.op === 'patch') {
+        const unknown = Object.keys(value).find((key) => key !== 'op' && key !== 'key' && key !== 'edits')
+        if (unknown) throw new Error(`changes[${index}] patch does not accept ${unknown}`)
+        if (!Array.isArray(value.edits) || value.edits.length === 0 || value.edits.length > 50) {
+          throw new Error(`changes[${index}].edits must contain 1-50 text replacements`)
+        }
+        const edits = value.edits.map((edit, editIndex) => {
+          if (
+            !isObject(edit)
+            || Object.keys(edit).some((key) => key !== 'old_text' && key !== 'new_text')
+            || typeof edit.old_text !== 'string'
+            || !edit.old_text
+            || typeof edit.new_text !== 'string'
+          ) {
+            throw new Error(
+              `changes[${index}].edits[${editIndex}] requires only non-empty old_text and string new_text`,
+            )
+          }
+          return { old_text: edit.old_text, new_text: edit.new_text }
+        })
+        return { op: 'patch', key: value.key, edits }
+      }
+      const allowed = new Set([
+        'op', 'key', 'type', 'label', 'description', 'value',
+        'required', 'show_in_status', 'scope',
+      ])
+      const unknown = Object.keys(value).find((key) => !allowed.has(key))
+      if (unknown) throw new Error(`changes[${index}] does not accept ${unknown}`)
+      if (typeof value.value !== 'string') {
+        throw new Error(`changes[${index}].value must be a string for upsert`)
+      }
+      if (value.type !== undefined && value.type !== 'text' && value.type !== 'prompt_template') {
+        throw new Error(`changes[${index}].type must be text or prompt_template`)
+      }
+      for (const key of ['label', 'description'] as const) {
+        if (value[key] !== undefined && typeof value[key] !== 'string') {
+          throw new Error(`changes[${index}].${key} must be a string`)
+        }
+      }
+      for (const key of ['required', 'show_in_status'] as const) {
+        if (value[key] !== undefined && typeof value[key] !== 'boolean') {
+          throw new Error(`changes[${index}].${key} must be a boolean`)
+        }
+      }
+      if (value.scope !== undefined && value.scope !== 'session' && value.scope !== 'project') {
+        throw new Error(`changes[${index}].scope must be session or project`)
+      }
+      return {
+        op: 'upsert',
+        key: value.key,
+        value: value.value,
+        ...(value.type ? { type: value.type } : {}),
+        ...(typeof value.label === 'string' ? { label: value.label } : {}),
+        ...(typeof value.description === 'string' ? { description: value.description } : {}),
+        ...(typeof value.required === 'boolean' ? { required: value.required } : {}),
+        ...(typeof value.show_in_status === 'boolean'
+          ? { show_in_status: value.show_in_status }
+          : {}),
+        ...(value.scope ? { scope: value.scope } : {}),
+      }
+    })
+    return { baseRevision: argumentsValue.base_revision, changes }
+  }
+
+  private async applySystemVariableChangesTool(
+    argumentsValue: unknown,
+    correlationId: string,
+  ): Promise<JsonObject> {
+    const input = this.systemVariableChangeArguments(argumentsValue)
+    const result = await this.projectResources.applySystemVariableChanges(
+      input.baseRevision,
+      input.changes,
+    )
+    this.refreshSystemVariablesResource(result.resource, correlationId, result.revision)
+    const resolved = resolveSystemPromptVariables(result.resource.variables)
+    const summarize = (variable: SystemVariableDefinition) => ({
+      key: variable.key,
+      type: variable.type,
+      scope: variable.scope ?? 'session',
+      required: variable.required,
+      show_in_status: variable.show_in_status,
+      value_length: variable.value.length,
+      value_sha256: createHash('sha256').update(variable.value).digest('hex'),
+    })
+    const diff = result.diff.map((item) => ({
+      op: item.op,
+      key: item.key,
+      ...(item.before ? { before: summarize(item.before) } : {}),
+      ...(item.after ? { after: summarize(item.after) } : {}),
+    }))
+    const dynamicContextChanged = result.diff.some((item) => item.key === 'dynamic_context')
+    return toJsonValue({
+      revision: result.revision,
+      diff,
+      dependencies: resolved.dependencies,
+      ...(dynamicContextChanged
+        ? { dynamic_context: resolved.prompts.dynamic_context ?? '' }
+        : { dynamic_context_unchanged: true }),
+      context_updated: result.diff.length > 0,
+    }) as JsonObject
   }
 
   private searchResources(argumentsValue: unknown): JsonObject {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -26,6 +27,44 @@ export interface SystemVariableDefinition {
 export interface SystemVariablesResource {
   version: 1
   variables: SystemVariableDefinition[]
+}
+
+export type SystemVariableChange = {
+  op: 'upsert'
+  key: string
+  type?: SystemPromptVariableType
+  label?: string
+  description?: string
+  value: string
+  required?: boolean
+  show_in_status?: boolean
+  scope?: SystemVariableScope
+} | {
+  op: 'patch'
+  key: string
+  edits: Array<{
+    old_text: string
+    new_text: string
+  }>
+} | {
+  op: 'remove'
+  key: string
+}
+
+export interface SystemVariableDiff {
+  op: 'add' | 'replace' | 'remove'
+  key: string
+  before?: SystemVariableDefinition
+  after?: SystemVariableDefinition
+}
+
+export interface SystemVariablesState {
+  revision: string
+  resource: SystemVariablesResource
+}
+
+export interface SystemVariableChangeResult extends SystemVariablesState {
+  diff: SystemVariableDiff[]
 }
 
 export interface ProjectSettings {
@@ -77,6 +116,21 @@ const SYS_MESSAGE_VARIABLE: SystemVariableDefinition = {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function persistedSystemVariables(resource: SystemVariablesResource): SystemVariablesResource {
+  return {
+    version: 1,
+    variables: resource.variables
+      .filter((variable) => variable.key !== SYS_MESSAGE_VARIABLE.key)
+      .map(({ source: _source, ...variable }) => ({ ...variable, source: 'project' as const })),
+  }
+}
+
+function systemVariablesRevision(resource: SystemVariablesResource): string {
+  const persisted = persistedSystemVariables(resource)
+  const value = persisted.variables.map(({ source: _source, ...variable }) => variable)
+  return createHash('sha256').update(JSON.stringify({ version: 1, variables: value })).digest('hex')
 }
 
 export class ProjectResources {
@@ -184,8 +238,22 @@ export class ProjectResources {
     return settings
   }
 
+  saveSkillDirectories(skillDirectories: readonly string[]): ProjectSettings {
+    const settings = this.resolveSettings({ skills: [...skillDirectories] })
+    const source = fs.existsSync(this.configFile) ? this.configFile : this.legacyConfigFile
+    const current = this.readJson(source, {})
+    if (!isObject(current)) throw new Error('.capybara/config.json must contain an object')
+    this.writeJsonAtomic(this.configFile, { ...current, skills: settings.skills })
+    return settings
+  }
+
   readSystemVariables(): SystemVariablesResource {
     return this.readProjectSystemVariables()
+  }
+
+  readSystemVariablesState(): SystemVariablesState {
+    const resource = this.readProjectSystemVariables()
+    return { revision: systemVariablesRevision(resource), resource }
   }
 
   saveSystemVariables(value: unknown): SystemVariablesResource {
@@ -230,6 +298,103 @@ export class ProjectResources {
 
   saveSystemVariablesQueued(value: unknown): Promise<SystemVariablesResource> {
     return enqueueProjectWrite(this.projectDir, () => this.saveSystemVariables(value))
+  }
+
+  applySystemVariableChanges(
+    baseRevision: string,
+    changes: readonly SystemVariableChange[],
+  ): Promise<SystemVariableChangeResult> {
+    return enqueueProjectWrite(this.projectDir, () => {
+      const current = this.readSystemVariablesState()
+      if (current.revision !== baseRevision) {
+        throw new Error(`system variables revision conflict; current revision is ${current.revision}`)
+      }
+      if (changes.length === 0) throw new Error('system variable changes must not be empty')
+      const duplicateKeys = changes
+        .map((change) => change.key)
+        .filter((key, index, keys) => keys.indexOf(key) !== index)
+      if (duplicateKeys.length > 0) {
+        throw new Error(`system variable changes contain duplicate keys: ${[...new Set(duplicateKeys)].join(', ')}`)
+      }
+
+      const before = new Map(current.resource.variables.map((variable) => [variable.key, variable]))
+      const after = new Map(before)
+      for (const change of changes) {
+        if (!/^[a-z][a-z0-9_]*$/.test(change.key)) {
+          throw new Error(`system variable key must use lowercase snake_case: ${change.key}`)
+        }
+        const existing = after.get(change.key)
+        if (existing?.readonly) throw new Error(`system variable is read-only: ${change.key}`)
+        if (change.op === 'remove') {
+          if (!existing) throw new Error(`system variable was not found: ${change.key}`)
+          after.delete(change.key)
+          continue
+        }
+        if (change.op === 'patch') {
+          if (!existing) throw new Error(`system variable was not found: ${change.key}`)
+          if (change.edits.length === 0 || change.edits.length > 50) {
+            throw new Error(`system variable patch requires 1-50 edits: ${change.key}`)
+          }
+          let value = existing.value
+          for (const [index, edit] of change.edits.entries()) {
+            if (!edit.old_text) {
+              throw new Error(`system variable patch old_text must not be empty: ${change.key}[${index}]`)
+            }
+            const matchIndex = value.indexOf(edit.old_text)
+            const nextMatchIndex = matchIndex < 0
+              ? -1
+              : value.indexOf(edit.old_text, matchIndex + 1)
+            if (matchIndex < 0 || nextMatchIndex >= 0) {
+              const matches = matchIndex < 0 ? 0 : 2
+              throw new Error(
+                `system variable patch old_text must match exactly once: ${change.key}[${index}] matched ${matches === 0 ? '0' : 'more than 1'} times`,
+              )
+            }
+            value = `${value.slice(0, matchIndex)}${edit.new_text}${value.slice(matchIndex + edit.old_text.length)}`
+          }
+          after.set(change.key, { ...existing, value, source: 'project' })
+          continue
+        }
+        after.set(change.key, {
+          key: change.key,
+          type: change.type ?? existing?.type ?? 'text',
+          label: change.label ?? existing?.label ?? change.key,
+          description: change.description ?? existing?.description ?? '',
+          value: change.value,
+          required: change.required ?? existing?.required ?? false,
+          readonly: false,
+          show_in_status: change.show_in_status ?? existing?.show_in_status ?? false,
+          scope: change.scope ?? existing?.scope ?? 'session',
+          source: 'project',
+        })
+      }
+
+      const candidate = { version: 1 as const, variables: [...after.values()] }
+      resolveSystemPromptVariables(candidate.variables)
+      const diff: SystemVariableDiff[] = []
+      for (const change of changes) {
+        const previous = before.get(change.key)
+        const next = after.get(change.key)
+        if (JSON.stringify(previous) === JSON.stringify(next)) continue
+        if (!previous && next) {
+          diff.push({ op: 'add', key: change.key, after: next })
+          continue
+        }
+        if (previous && !next) {
+          diff.push({ op: 'remove', key: change.key, before: previous })
+          continue
+        }
+        diff.push({
+          op: 'replace',
+          key: change.key,
+          before: previous,
+          after: next,
+        })
+      }
+      if (diff.length === 0) return { ...current, diff }
+      const resource = this.saveSystemVariables(candidate)
+      return { revision: systemVariablesRevision(resource), resource, diff }
+    })
   }
 
   updateSharedSystemVariables(
@@ -430,11 +595,10 @@ export class ProjectResources {
   }
 
   private writeSystemVariablesFile(resource: SystemVariablesResource): void {
+    const persisted = persistedSystemVariables(resource)
     this.writeJsonAtomic(this.systemVariablesFile, {
-      version: 1,
-      variables: resource.variables
-        .filter((variable) => variable.key !== SYS_MESSAGE_VARIABLE.key)
-        .map(({ source: _source, ...variable }) => variable),
+      version: persisted.version,
+      variables: persisted.variables.map(({ source: _source, ...variable }) => variable),
     })
   }
 

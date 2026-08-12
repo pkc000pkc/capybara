@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  ...(process.env.CAPYBARA_NEXT_DIST_DIR
+    ? { distDir: process.env.CAPYBARA_NEXT_DIST_DIR }
+    : {}),
 };
 
 export default nextConfig;

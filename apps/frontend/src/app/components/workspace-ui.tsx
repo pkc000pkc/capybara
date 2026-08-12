@@ -354,6 +354,7 @@ export function WorkspaceListPane({
   countLabel,
   empty,
   emptyLabel,
+  headerActions,
   id,
   loading = false,
   loadingLabel,
@@ -366,6 +367,7 @@ export function WorkspaceListPane({
   countLabel: ReactNode;
   empty: boolean;
   emptyLabel: string;
+  headerActions?: ReactNode;
   id: string;
   loading?: boolean;
   loadingLabel?: string;
@@ -377,7 +379,7 @@ export function WorkspaceListPane({
   return (
     <aside className="grid min-h-0 grid-rows-[34px_38px_1fr] bg-[#f8faf9]" id={id}>
       <PanelHeader
-        actions={<span className="font-mono text-[9px] text-[#718488]">{countLabel}</span>}
+        actions={headerActions ?? <span className="font-mono text-[9px] text-[#718488]">{countLabel}</span>}
         title={title}
       />
       <div className="border-b border-[#d9e3e3] p-1.5">

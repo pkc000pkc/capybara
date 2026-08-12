@@ -17,6 +17,8 @@ Capybara keeps the full agent engineering loop visible: inspect live context and
 - Dataset-backed training, correction Hooks, replay, snapshots, held-out testing, and analysis.
 - A standalone authenticated Runner for local deployment without the developer interface.
 - A typed WebSocket Client SDK shared by browser and Node.js applications.
+- Runtime Skill marketplace discovery with explicit user confirmation before installation or removal.
+- Project Hooks with hot reload and validated, model-assisted prompt variable authoring.
 
 ## Interface tour
 
@@ -75,7 +77,7 @@ The default project is `examples/test-project`. Add the LLM API Key from the Pro
 
 ## Local Agent Runner
 
-Run an Agent project without starting the Capybara developer interface. After the first npm release, install the CLI globally:
+Run an Agent project without starting the Capybara developer interface. The Runner is published as `capybara-agent`:
 
 ```bash
 npm install --global capybara-agent
@@ -83,6 +85,18 @@ capybara serve ./my-agent \
   --port 3210 \
   --token local-development-token \
   --allow-origin http://localhost:3000
+```
+
+To run without a global installation:
+
+```bash
+npx capybara-agent@latest serve ./my-agent --port 3210
+```
+
+When no fixed token is supplied, the Runner prints a generated access token. Check the service before connecting a client:
+
+```bash
+curl http://127.0.0.1:3210/v1/health
 ```
 
 To run the same command from this repository during development:
@@ -137,8 +151,7 @@ provided by the Capybara Runtime when a Hook is loaded, not a separately install
 The framework-neutral TypeScript client uses only `fetch`, `WebSocket`, and standard Web APIs.
 It supports modern browsers and Node.js 22 or newer.
 
-The packages currently build inside this workspace and have not yet been published to npm.
-After the first npm release, installation will be:
+Install the published framework-neutral Client SDK:
 
 ```bash
 npm install @capybara-agent/client
@@ -179,6 +192,12 @@ await restored.send('runtime.snapshot.get', {})
 ```
 
 See [`packages/client/README.md`](packages/client/README.md) for the SDK API and error model.
+
+## Runtime Skills
+
+An Agent can search and preview GitHub Skills, inspect installed Skills, and request installation or removal through runtime system tools. File-changing operations never run directly from a model tool call. They create a confirmation card in the conversation, and the user must explicitly confirm or cancel the action.
+
+Installation is pinned to a full Git commit SHA and revalidated immediately before files are written. System Skills inside `.capybara` cannot be removed, local modifications are surfaced as warnings, and confirmation state survives Session refresh and reconnection.
 
 ## AppWorld reproduction
 

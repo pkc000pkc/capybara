@@ -1,0 +1,14 @@
+System variable authoring protocol:
+
+Use this protocol only when the user explicitly asks to create, update, organize, or delete persistent Agent context. Do not change variables merely because a response could be improved.
+
+1. Call read_system_variables immediately before every change batch. Pass keys for only the variables you will change; omit keys only when discovering the full catalog. Include dynamic_context only when changing its references. Use the exact returned revision as base_revision.
+2. Call apply_system_variable_changes with one atomic batch. Use upsert to create a variable or intentionally replace its complete value, patch to change an existing value through one or more exact text replacements, and remove to delete. For upsert include op, key, value, and only the desired definition fields. For patch include only op, key, and edits. For remove include only op and key. A patch old_text must match exactly once in the value at that edit step; include enough surrounding text to make it unique. Never attempt to change a readonly variable.
+3. Use text for literal content. Use prompt_template only for Jinja2 composition through {{ '{{' }} builtin.prompts.variable_key {{ '}}' }}. Keep keys lowercase snake_case and never store credentials or private session data.
+4. The dynamic_context prompt_template is the stable context entry point. When a variable must affect future model turns, update dynamic_context in the same batch so it references that variable. When deleting such a variable, remove its reference from dynamic_context in that same batch.
+5. After applying changes, inspect the compact diff and dependencies. Rendered dynamic_context is returned when that root template changes; otherwise the result confirms it was unchanged. Report only changes confirmed by the tool result.
+
+{% if builtin.prompts.dynamic_context %}
+Active dynamic context:
+{{ builtin.prompts.dynamic_context }}
+{% endif %}

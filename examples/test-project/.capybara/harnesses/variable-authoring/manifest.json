@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "package": "capybara-system",
+  "harnesses": [
+    {
+      "name": "variable-authoring",
+      "description": "Manage system prompt variables through validated runtime tools and keep dynamic context connected.",
+      "type": "model",
+      "entry": "variable-authoring.j2",
+      "priority": 9990,
+      "activation": {
+        "providers": ["*"]
+      },
+      "inputs": ["user_message", "builtin.prompts.dynamic_context"],
+      "requiredTools": []
+    }
+  ]
+}

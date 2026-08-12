@@ -7,7 +7,13 @@ import { test } from 'node:test'
 import type { FastifyInstance } from 'fastify'
 
 import { buildApp } from '#app'
-import { RuntimeLoop, type RuntimeLlm, type RuntimeLoopOptions } from '#core/runtime-loop'
+import {
+  RuntimeLoop,
+  type RuntimeLlm,
+  type RuntimeLoopOptions,
+  type RuntimeSkillMarketplace,
+} from '#core/runtime-loop'
+import type { SkillPreview } from '#core/skills/skill-marketplace'
 import type { LlmChatRequest, LlmChatResponse } from '#util/llm'
 import type {
   CommandPayloadMap,
@@ -250,6 +256,8 @@ test('empty project directories require confirmation and initialize a runnable p
         '.capybara/hooks/hook-authoring.ts',
         '.capybara/harnesses/hook-authoring/manifest.json',
         '.capybara/harnesses/hook-authoring/hook-authoring.j2',
+        '.capybara/harnesses/variable-authoring/manifest.json',
+        '.capybara/harnesses/variable-authoring/variable-authoring.j2',
         'hooks/.gitkeep',
         'tools/files/manifest.json',
         'tools/files/runner.mjs',
@@ -488,12 +496,12 @@ test('runtime connection publishes a complete snapshot and rejects malformed com
     )
     assert.deepEqual(
       snapshot.payload.harnesses.items.map((item) => item.id),
-      ['capybara-system:hook-authoring'],
+      ['capybara-system:hook-authoring', 'capybara-system:variable-authoring'],
     )
     assert.match(snapshot.payload.template.source, /for harness in harnesses/)
     assert.deepEqual(
       snapshot.payload.variables.value.harnesses.map((item) => item.id),
-      ['capybara-system:hook-authoring'],
+      ['capybara-system:hook-authoring', 'capybara-system:variable-authoring'],
     )
     assert.equal(snapshot.payload.timeline.steps.length, 4)
     assert.equal(snapshot.payload.renderResult?.messages[0]?.role, 'system')
@@ -1382,6 +1390,208 @@ test('runtime dispatches native model tool calls and returns results to the next
   }, { llm })
 })
 
+test('runtime Skill marketplace requires frontend confirmation before install and rejects reuse', async () => {
+  const commit = '1234567890abcdef1234567890abcdef12345678'
+  const preview: SkillPreview = {
+    repo: 'example/skills',
+    requestedPath: 'skills/runtime-test/SKILL.md',
+    commit,
+    ref: 'refs/heads/main',
+    skillName: 'runtime-test',
+    description: 'Runtime confirmation test Skill',
+    metadata: {},
+    content: '# Runtime test',
+    files: [
+      { path: 'SKILL.md', size: 20, kind: 'entry' },
+      { path: 'scripts/check.mjs', size: 20, kind: 'script' },
+    ],
+    warnings: [
+      'Skills are not verified by GitHub. Review their instructions and files before installation.',
+      'This Skill contains executable scripts.',
+    ],
+  }
+  let installCalls = 0
+  const marketplace: RuntimeSkillMarketplace = {
+    search: async () => ({ page: 1, items: [] }),
+    preview: async () => preview,
+    installed: () => [],
+    install: async () => { installCalls += 1 },
+    uninstall: async () => undefined,
+  }
+  let modelCalls = 0
+  const llm = fakeLlm(async (request) => {
+    modelCalls += 1
+    if (modelCalls === 1) {
+      assert.ok(request.tools?.some((tool) => tool.name === 'search_skill_marketplace'))
+      assert.ok(request.tools?.some((tool) => tool.name === 'preview_skill_marketplace'))
+      assert.ok(request.tools?.some((tool) => tool.name === 'list_installed_skills'))
+      const requestInstall = request.tools?.find((tool) => tool.name === 'request_skill_install')
+      assert.ok(requestInstall)
+      assert.equal('confirmed' in (requestInstall.parameters.properties as Record<string, unknown>), false)
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: '',
+        toolCalls: [{
+          id: 'request-runtime-skill-install',
+          name: 'request_skill_install',
+          arguments: {
+            repo: preview.repo,
+            path: preview.requestedPath,
+            commit,
+          },
+        }],
+        finishReason: 'tool_calls',
+        raw: {},
+      }
+    }
+    const result = request.messages.find(
+      (message) => message.toolCallId === 'request-runtime-skill-install',
+    )
+    assert.match(result?.content ?? '', /requiresUserConfirmation/)
+    assert.match(result?.content ?? '', /"projectChanged":false/)
+    return {
+      provider: 'custom',
+      model: 'test-model',
+      text: JSON.stringify({ status: 'completed', content: 'Installation awaits confirmation.' }),
+      finishReason: 'stop',
+      raw: {},
+    }
+  })
+
+  await withRuntime(async (client) => {
+    const start = client.events.length
+    client.send('chat.message.send', {
+      clientMessageId: 'runtime-skill-install-message',
+      content: [{ type: 'text', text: 'Install the runtime test Skill.' }],
+      autoStart: true,
+    })
+    await client.waitFor('run.state.changed', (event) => event.payload.status === 'completed', start)
+    const pending = await client.waitFor(
+      'runtime.skills.confirmations.updated',
+      (event) => event.payload.items.some((item) => item.status === 'pending'),
+      start,
+    )
+    const confirmation = pending.payload.items.find((item) => item.status === 'pending')
+    assert.ok(confirmation)
+    assert.equal(installCalls, 0)
+    assert.equal(confirmation.fileCount, 2)
+    assert.equal(confirmation.scriptCount, 1)
+
+    const confirmIndex = client.events.length
+    const confirmId = client.send('runtime.skills.confirm', {
+      confirmationId: confirmation.id,
+    })
+    await client.waitFor(
+      'runtime.skills.confirmations.updated',
+      (event) => event.payload.items.some(
+        (item) => item.id === confirmation.id && item.status === 'completed',
+      ),
+      confirmIndex,
+    )
+    assert.equal(installCalls, 1)
+
+    const reuseIndex = client.events.length
+    client.send('runtime.skills.confirm', { confirmationId: confirmation.id })
+    const rejected = await client.waitFor(
+      'command.rejected',
+      (event) => event.payload.code === 'INVALID_STATE',
+      reuseIndex,
+    )
+    assert.notEqual(rejected.payload.commandId, confirmId)
+    assert.equal(installCalls, 1)
+
+    const missingIndex = client.events.length
+    client.send('runtime.skills.confirm', { confirmationId: 'missing-confirmation' })
+    await client.waitFor(
+      'command.rejected',
+      (event) => event.payload.code === 'NOT_FOUND',
+      missingIndex,
+    )
+  }, { llm, skillMarketplace: marketplace })
+})
+
+test('runtime Skill uninstall request can be cancelled without removing project files', async () => {
+  let uninstallCalls = 0
+  const marketplace: RuntimeSkillMarketplace = {
+    search: async () => ({ page: 1, items: [] }),
+    preview: async () => { throw new Error('preview should not run') },
+    installed: () => [{
+      id: 'local-skill',
+      path: 'skills/local-skill',
+      managed: true,
+      repo: 'example/skills',
+      requestedPath: 'skills/local-skill/SKILL.md',
+      commit: '1234567890abcdef1234567890abcdef12345678',
+      hasLocalChanges: true,
+    }],
+    install: async () => undefined,
+    uninstall: async () => { uninstallCalls += 1 },
+  }
+  let modelCalls = 0
+  const llm = fakeLlm(async (request) => {
+    modelCalls += 1
+    if (modelCalls === 1) {
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: '',
+        toolCalls: [{
+          id: 'request-runtime-skill-uninstall',
+          name: 'request_skill_uninstall',
+          arguments: { skill_id: 'local-skill' },
+        }],
+        finishReason: 'tool_calls',
+        raw: {},
+      }
+    }
+    return {
+      provider: 'custom',
+      model: 'test-model',
+      text: JSON.stringify({ status: 'completed', content: 'Removal awaits confirmation.' }),
+      finishReason: 'stop',
+      raw: {},
+    }
+  })
+
+  await withRuntime(async (client) => {
+    const start = client.events.length
+    client.send('chat.message.send', {
+      clientMessageId: 'runtime-skill-uninstall-message',
+      content: [{ type: 'text', text: 'Remove the local Skill.' }],
+      autoStart: true,
+    })
+    const pending = await client.waitFor(
+      'runtime.skills.confirmations.updated',
+      (event) => event.payload.items.some((item) => item.status === 'pending'),
+      start,
+    )
+    const confirmation = pending.payload.items.find((item) => item.status === 'pending')
+    assert.ok(confirmation)
+    assert.equal(confirmation.hasLocalChanges, true)
+    assert.equal(uninstallCalls, 0)
+
+    const cancelIndex = client.events.length
+    client.send('runtime.skills.cancelConfirmation', { confirmationId: confirmation.id })
+    await client.waitFor(
+      'runtime.skills.confirmations.updated',
+      (event) => event.payload.items.some(
+        (item) => item.id === confirmation.id && item.status === 'cancelled',
+      ),
+      cancelIndex,
+    )
+    assert.equal(uninstallCalls, 0)
+
+    const snapshotIndex = client.events.length
+    client.send('runtime.snapshot.get', {})
+    const snapshot = await client.waitFor('runtime.snapshot', () => true, snapshotIndex)
+    assert.equal(
+      snapshot.payload.skillConfirmations.items.find((item) => item.id === confirmation.id)?.status,
+      'cancelled',
+    )
+  }, { llm, skillMarketplace: marketplace })
+})
+
 test('model-generated workflow chains list, filter, and read without intermediate model turns', async () => {
   const requests: LlmChatRequest[] = []
   const llm = fakeLlm(async (request) => {
@@ -1734,7 +1944,11 @@ test('attaching a tool automatically binds and renders its harness', async () =>
     const fileHarness = harnesses.payload.items.find(
       (item) => item.id === 'filesystem-guidance:file-inspection',
     )
-    assert.equal(harnesses.payload.items.length, 2)
+    assert.deepEqual(harnesses.payload.items.map((item) => item.id), [
+      'capybara-system:hook-authoring',
+      'capybara-system:variable-authoring',
+      'filesystem-guidance:file-inspection',
+    ])
     assert.equal(fileHarness?.bindings[0]?.source, 'tool')
     assert.equal(tools.payload.items.length, 1)
     assert.equal(requests.length, 2)

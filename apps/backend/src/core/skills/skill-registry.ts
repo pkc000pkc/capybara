@@ -29,7 +29,11 @@ function optionalString(value: unknown, field: string, maximum?: number): string
   return normalized
 }
 
-export function parseSkillDocument(content: string, directoryName: string): AgentSkillDefinition {
+export function parseSkillDocument(
+  content: string,
+  directoryName: string,
+  requireDirectoryMatch = true,
+): AgentSkillDefinition {
   const match = FRONTMATTER.exec(content)
   if (!match) throw new Error('SKILL.md must start with YAML frontmatter')
   const frontmatter = match[1] ?? ''
@@ -50,7 +54,9 @@ export function parseSkillDocument(content: string, directoryName: string): Agen
   if (!name || !SKILL_NAME.test(name) || name.length > 64) {
     throw new Error('name must use 1-64 lowercase letters, numbers, and single hyphens')
   }
-  if (name !== directoryName) throw new Error(`name must match skill directory: ${directoryName}`)
+  if (requireDirectoryMatch && name !== directoryName) {
+    throw new Error(`name must match skill directory: ${directoryName}`)
+  }
   if (!description) throw new Error('description is required')
 
   const license = optionalString(value.license, 'license')

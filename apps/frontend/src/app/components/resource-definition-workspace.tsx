@@ -68,14 +68,24 @@ function definitionText(definition: DefinitionResource, draft: string): string {
 export default function ResourceDefinitionWorkspace({
   catalogWidth,
   divider,
+  headerActions,
   kind,
+  listHeaderActions,
+  onCatalogLoaded,
+  preferredModuleName,
   projectPath,
+  refreshKey,
   runtimeTools,
 }: {
   catalogWidth: number;
   divider: ReactNode;
+  headerActions?: (resourceModule: DefinitionResourceModule) => ReactNode;
   kind: DefinitionResourceKind;
+  listHeaderActions?: ReactNode;
+  onCatalogLoaded?: () => void;
+  preferredModuleName?: string;
   projectPath: string;
+  refreshKey?: number;
   runtimeTools?: RuntimeToolsState;
 }) {
   const { t } = useI18n();
@@ -118,10 +128,11 @@ export default function ResourceDefinitionWorkspace({
       const next = catalog.items.filter(
         (item): item is DefinitionResourceModule => item.kind !== "hook" && item.kind === kind,
       );
-      const firstModule = next[0];
+      const firstModule = next.find((item) => item.name === preferredModuleName) ?? next[0];
       const firstDefinition = definitions(firstModule)[0];
       const firstFile = firstModule?.files[0]?.path ?? "";
       setModules(next);
+      onCatalogLoaded?.();
       setSelectedModuleId(firstModule?.id ?? "");
       setSelectedDefinitionId(firstDefinition?.id ?? "");
       setDraft(firstDefinition?.kind === "tool" ? "" : firstDefinition?.content ?? "");
@@ -147,7 +158,7 @@ export default function ResourceDefinitionWorkspace({
       if (active) setLoading(false);
     });
     return () => { active = false; };
-  }, [kind, projectPath]);
+  }, [kind, onCatalogLoaded, preferredModuleName, projectPath, refreshKey]);
 
   useEffect(() => {
     const element = detailArea.current;
@@ -421,6 +432,7 @@ export default function ResourceDefinitionWorkspace({
         countLabel={t("resources.moduleCount", { count: filtered.length })}
         empty={filtered.length === 0}
         emptyLabel={t("resources.noResults")}
+        headerActions={listHeaderActions}
         id={`resource-${kindPath}-list`}
         loading={loading}
         loadingLabel={t("resources.loading")}
@@ -461,18 +473,23 @@ export default function ResourceDefinitionWorkspace({
         {selectedModule ? (
           <>
             <PanelHeader
-              actions={selectedDefinition?.kind !== "tool" && editorTab === "definitions" ? (
-                <button
-                  aria-label={t("resources.save")}
-                  className="flex h-6 items-center gap-1.5 bg-[#0c766e] px-2.5 text-[10px] font-semibold text-white outline-none hover:bg-[#095f59] focus-visible:ring-2 focus-visible:ring-[#0c766e] disabled:cursor-default disabled:bg-[#aebdba]"
-                  disabled={!dirty || saving}
-                  onClick={handleSave}
-                  type="button"
-                >
-                  {saving ? <LoaderCircle aria-hidden="true" className="animate-spin" size={12} /> : <Save aria-hidden="true" size={12} />}
-                  {t("resources.save")}
-                </button>
-              ) : undefined}
+              actions={(
+                <>
+                  {headerActions?.(selectedModule)}
+                  {selectedDefinition?.kind !== "tool" && editorTab === "definitions" && (
+                    <button
+                      aria-label={t("resources.save")}
+                      className="flex h-6 items-center gap-1.5 bg-[#0c766e] px-2.5 text-[10px] font-semibold text-white outline-none hover:bg-[#095f59] focus-visible:ring-2 focus-visible:ring-[#0c766e] disabled:cursor-default disabled:bg-[#aebdba]"
+                      disabled={!dirty || saving}
+                      onClick={handleSave}
+                      type="button"
+                    >
+                      {saving ? <LoaderCircle aria-hidden="true" className="animate-spin" size={12} /> : <Save aria-hidden="true" size={12} />}
+                      {t("resources.save")}
+                    </button>
+                  )}
+                </>
+              )}
               icon={Boxes}
               metadata={selectedModule.kind === "skill"
                 ? countLabel(selectedModule)

@@ -9,6 +9,8 @@ const SYSTEM_MANAGED_PROJECT_FILES = [
   '.capybara/hooks/hook-authoring.ts',
   '.capybara/harnesses/hook-authoring/manifest.json',
   '.capybara/harnesses/hook-authoring/hook-authoring.j2',
+  '.capybara/harnesses/variable-authoring/manifest.json',
+  '.capybara/harnesses/variable-authoring/variable-authoring.j2',
 ] as const
 const INITIAL_PROJECT_TEMPLATE_FILES = [
   'agent.md',
@@ -28,6 +30,8 @@ Selected workspace root: {{ builtin.workspace_path }}
 
 {% set _resource_search_tool_description = builtin.prompts.resource_search_tool_description %}
 {% set _resource_load_tool_description = builtin.prompts.resource_load_tool_description %}
+{% set _system_variable_read_tool_description = builtin.prompts.system_variable_read_tool_description %}
+{% set _system_variable_apply_tool_description = builtin.prompts.system_variable_apply_tool_description %}
 {% set _workflow_execution_tool_description = builtin.prompts.workflow_execution_tool_description %}
 {% set _skill_reference_tool_description = builtin.prompts.skill_reference_tool_description %}
 {% set _skill_script_tool_description = builtin.prompts.skill_script_tool_description %}
@@ -138,6 +142,24 @@ const INITIAL_SYSTEM_VARIABLES = {
       readonly: true,
     },
     {
+      key: 'system_variable_read_tool_description',
+      type: 'text',
+      label: 'System variable reader',
+      description: 'Description injected into the built-in system variable reader.',
+      value: 'Read selected system prompt variables and the current revision before proposing a change.',
+      required: true,
+      readonly: true,
+    },
+    {
+      key: 'system_variable_apply_tool_description',
+      type: 'text',
+      label: 'System variable change tool',
+      description: 'Description injected into the built-in system variable change tool.',
+      value: 'Atomically add, patch, replace, or remove system prompt variables using the latest revision and return the validated diff.',
+      required: true,
+      readonly: true,
+    },
+    {
       key: 'workflow_execution_tool_description',
       type: 'text',
       label: 'Runtime workflow execution',
@@ -182,6 +204,15 @@ const INITIAL_SYSTEM_VARIABLES = {
       required: true,
       readonly: false,
     },
+    {
+      key: 'dynamic_context',
+      type: 'prompt_template',
+      label: 'Dynamic context',
+      description: 'Stable root template for user-approved context assembled from dynamic variables.',
+      value: '',
+      required: false,
+      readonly: false,
+    },
   ],
 }
 
@@ -221,6 +252,32 @@ export function installSystemProjectResources(input: string): string[] {
     fs.mkdirSync(path.dirname(target), { recursive: true })
     fs.writeFileSync(target, source, 'utf8')
     installed.push(relative)
+  }
+  const systemVariablesFile = path.join(projectDir, '.capybara', 'system-variables.json')
+  if (fs.existsSync(systemVariablesFile)) {
+    const parsed = JSON.parse(fs.readFileSync(systemVariablesFile, 'utf8')) as {
+      version?: unknown
+      variables?: unknown
+    }
+    if (parsed.version === 1 && Array.isArray(parsed.variables)) {
+      const builtinVariables = INITIAL_SYSTEM_VARIABLES.variables.filter((variable) => variable.readonly)
+      const builtinByKey = new Map(builtinVariables.map((variable) => [variable.key, variable]))
+      let changed = false
+      const variables = parsed.variables.map((value) => {
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
+        const item = value as Record<string, unknown>
+        if (typeof item.key !== 'string') return value
+        const builtin = builtinByKey.get(item.key)
+        if (!builtin) return value
+        const next = { ...item, ...builtin }
+        if (JSON.stringify(next) !== JSON.stringify(value)) changed = true
+        return next
+      })
+      if (changed) {
+        fs.writeFileSync(systemVariablesFile, `${JSON.stringify({ version: 1, variables }, null, 2)}\n`)
+        installed.push('.capybara/system-variables.json')
+      }
+    }
   }
   return installed
 }

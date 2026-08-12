@@ -7,6 +7,10 @@ dist/
 **/.astro/
 .next/
 **/.next/
+.next-e2e-*/
+**/.next-e2e-*/
+.next-e2e/
+**/.next-e2e/
 coverage/
 **/coverage/
 *.tsbuildinfo

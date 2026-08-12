@@ -1,7 +1,7 @@
 import http from "node:http";
 
 const host = "127.0.0.1";
-const port = 3016;
+const port = Number(process.env.CAPYBARA_E2E_MODEL_PORT ?? 3016);
 const output = JSON.stringify({
   status: "completed",
   content: "Deterministic local response for the Capybara end-to-end test.",
@@ -29,6 +29,16 @@ const server = http.createServer((request, response) => {
   request.setEncoding("utf8");
   request.on("data", (chunk) => { body += chunk; });
   request.on("end", () => {
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      payload = {};
+    }
+    const input = Array.isArray(payload.input) ? payload.input : [];
+    const lastInput = input.at(-1);
+    const uninstallMarker = body.includes("E2E_REQUEST_SKILL_UNINSTALL");
+
     if (body.includes("E2E_RETRY_THEN_SUCCEED")) {
       const attempt = (retryAttempts.get(body) ?? 0) + 1;
       retryAttempts.set(body, attempt);
@@ -55,6 +65,27 @@ const server = http.createServer((request, response) => {
       type: "response.created",
       response: { model: "capybara-e2e", status: "in_progress" },
     });
+
+    if (uninstallMarker && lastInput?.type !== "function_call_output") {
+      const callId = `e2e-uninstall-${Date.now()}`;
+      sendEvent(response, "response.completed", {
+        type: "response.completed",
+        response: {
+          model: "capybara-e2e",
+          status: "completed",
+          output: [{
+            type: "function_call",
+            id: callId,
+            call_id: callId,
+            name: "request_skill_uninstall",
+            arguments: JSON.stringify({ skill_id: "project-files" }),
+          }],
+          usage: { input_tokens: 8, output_tokens: 8, total_tokens: 16 },
+        },
+      });
+      response.end();
+      return;
+    }
 
     const timer = setTimeout(() => {
       if (response.destroyed || response.writableEnded) return;
