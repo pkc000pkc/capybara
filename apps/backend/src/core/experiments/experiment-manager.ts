@@ -503,7 +503,7 @@ export class ExperimentManager {
     this.store.startCase(item.id, startedAt)
     const workspaceDir = this.prepareWorkspace(run.id, item.id)
     if (active.variableOverrides && Object.keys(active.variableOverrides).length > 0) {
-      await new ProjectResources(workspaceDir).updateSharedSystemVariables(
+      await new ProjectResources(workspaceDir).updateExperimentSystemVariables(
         Object.entries(active.variableOverrides).map(([key, value]) => ({ key, value })),
       )
     }

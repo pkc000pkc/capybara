@@ -60,6 +60,7 @@ function log(level, message, data) {
     loop: {
       runId: workerData.runId,
       iteration: workerData.fixture.loopIteration,
+      terminal: workerData.fixture.loopTerminal === true,
     },
     messages: workerData.fixture.messages,
     ...(workerData.fixture.training ? { training: workerData.fixture.training } : {}),
@@ -134,6 +135,40 @@ interface WorkerDone {
   logs?: HookRunResult['logs']
 }
 
+export interface HookRunLimits {
+  maxTotalTokens?: number
+}
+
+class HookAttemptError extends Error {
+  constructor(
+    error: unknown,
+    readonly usage: LlmUsage,
+  ) {
+    super(error instanceof Error ? error.message : String(error), { cause: error })
+    this.name = 'HookAttemptError'
+  }
+}
+
+export class HookRunError extends Error {
+  constructor(
+    error: unknown,
+    readonly usage: LlmUsage,
+    readonly attempts: number,
+  ) {
+    super(error instanceof Error ? error.message : String(error), { cause: error })
+    this.name = 'HookRunError'
+  }
+}
+
+function addUsage(left: LlmUsage, right: LlmUsage): LlmUsage {
+  return {
+    inputTokens: (left.inputTokens ?? 0) + (right.inputTokens ?? 0),
+    outputTokens: (left.outputTokens ?? 0) + (right.outputTokens ?? 0),
+    totalTokens: (left.totalTokens ?? 0) + (right.totalTokens ?? 0),
+    cacheReadTokens: (left.cacheReadTokens ?? 0) + (right.cacheReadTokens ?? 0),
+  }
+}
+
 export class HookRunner {
   constructor(private readonly llm: RuntimeLlm) {}
 
@@ -141,26 +176,37 @@ export class HookRunner {
     hook: RegisteredHook,
     fixture: HookFixture,
     signal?: AbortSignal,
+    limits: HookRunLimits = {},
   ): Promise<HookRunResult> {
     if (!hook.loadable) throw new Error(`Hook is not loadable: ${hook.id}`)
     const attempts = hook.schedule.onError === 'retry' ? 2 : 1
     let lastError: unknown
+    let cumulativeUsage: LlmUsage = {}
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const remainingTokens = limits.maxTotalTokens === undefined
+        ? undefined
+        : limits.maxTotalTokens - (cumulativeUsage.totalTokens ?? 0)
+      if (remainingTokens !== undefined && remainingTokens <= 0) {
+        throw new HookRunError('Hook token budget was exhausted before retry.', cumulativeUsage, attempt - 1)
+      }
       try {
-        const result = await this.runAttempt(hook, fixture, signal)
-        return { ...result, attempts: attempt }
+        const result = await this.runAttempt(hook, fixture, signal, remainingTokens)
+        return { ...result, attempts: attempt, usage: addUsage(cumulativeUsage, result.usage) }
       } catch (error) {
-        lastError = error
+        const attemptUsage = error instanceof HookAttemptError ? error.usage : {}
+        cumulativeUsage = addUsage(cumulativeUsage, attemptUsage)
+        lastError = error instanceof HookAttemptError ? error.cause ?? error : error
         if (signal?.aborted) break
       }
     }
-    throw lastError
+    throw new HookRunError(lastError, cumulativeUsage, attempts)
   }
 
   private runAttempt(
     hook: RegisteredHook,
     fixture: HookFixture,
     signal?: AbortSignal,
+    maxTotalTokens?: number,
   ): Promise<Omit<HookRunResult, 'attempts'>> {
     const started = Date.now()
     const usage: LlmUsage = {}
@@ -187,7 +233,7 @@ export class HookRunner {
         signal?.removeEventListener('abort', abort)
         if (error) attemptController.abort()
         void worker.terminate()
-        if (error) return reject(error)
+        if (error) return reject(new HookAttemptError(error, usage))
         resolve({
           matched: value?.matched === true,
           ...(value?.result === undefined ? {} : { result: value.result as HookRunResult['result'] }),
@@ -205,7 +251,7 @@ export class HookRunner {
       worker.on('message', (message: unknown) => {
         if (!isObject(message)) return
         if (message.type === 'rpc') {
-          void this.handleRpc(message, attemptController.signal, usage).then(
+          void this.handleRpc(message, attemptController.signal, usage, maxTotalTokens).then(
             (result) => {
               if (!settled) worker.postMessage({ type: 'rpc-result', id: message.id, ok: true, result })
             },
@@ -234,16 +280,27 @@ export class HookRunner {
     message: Record<string, unknown>,
     signal: AbortSignal | undefined,
     usage: LlmUsage,
+    maxTotalTokens?: number,
   ): Promise<JsonValue> {
     if (message.method !== 'llm.responses.create' || !isObject(message.params)) {
       throw new Error(`unsupported Hook RPC method: ${String(message.method)}`)
     }
+    const remainingTokens = maxTotalTokens === undefined
+      ? undefined
+      : maxTotalTokens - (usage.totalTokens ?? 0)
+    if (remainingTokens !== undefined && remainingTokens <= 0) {
+      throw new Error('Hook token budget was exhausted.')
+    }
+    const requestedOutputTokens = typeof message.params.max_output_tokens === 'number'
+      ? message.params.max_output_tokens
+      : undefined
+    const maxTokens = remainingTokens === undefined
+      ? requestedOutputTokens
+      : Math.max(1, Math.min(requestedOutputTokens ?? remainingTokens, remainingTokens))
     const request: LlmChatRequest = {
       messages: responseMessages(message.params.input),
       ...(typeof message.params.model === 'string' ? { model: message.params.model } : {}),
-      ...(typeof message.params.max_output_tokens === 'number'
-        ? { maxTokens: message.params.max_output_tokens }
-        : {}),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
       signal,
     }
     const response = await this.llm.chat(request)

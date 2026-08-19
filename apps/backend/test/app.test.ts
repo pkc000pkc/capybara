@@ -7,6 +7,8 @@ import { test } from 'node:test'
 import type { FastifyInstance } from 'fastify'
 
 import { buildApp } from '#app'
+import { initializeProjectDirectory } from '#core/project-initializer'
+import { ProjectResources } from '#core/project-resources'
 import {
   RuntimeLoop,
   type RuntimeLlm,
@@ -1388,6 +1390,300 @@ test('runtime dispatches native model tool calls and returns results to the next
     assert.match(JSON.stringify(effectiveMessages.payload.value), /call-read-config/)
     assert.match(JSON.stringify(effectiveMessages.payload.value), /max_tool_rounds/)
   }, { llm })
+})
+
+test('runtime WebSocket integrates intent-driven variable authoring and generated Hook execution', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-intent-authoring-'))
+  initializeProjectDirectory(projectDir)
+  const resources = new ProjectResources(projectDir)
+  const initialState = resources.readSystemVariablesState()
+  await resources.applySystemVariableChanges(initialState.revision, [{
+    op: 'upsert',
+    key: 'dynamic_context',
+    type: 'prompt_template',
+    value: 'Existing context.',
+  }])
+
+  const hookSource = `import { defineHook } from "@capybara-agent/sdk";
+
+export default defineHook({
+  name: "intent-audit",
+  description: "Record the durable response tone after each completed Loop.",
+  enabled: true,
+  checkpoint: "after_loop",
+  trigger({ loop, variables }) {
+    return loop.terminal && variables.builtin.prompts.response_tone === "concise";
+  },
+  schedule: { priority: 0, timeoutMs: 2000, onError: "continue" },
+  permissions: { artifacts: "write" },
+  run({ loop, variables }) {
+    return {
+      artifacts: [{
+        title: "intent hook executed",
+        value: {
+          tone: variables.builtin.prompts.response_tone,
+          terminal: loop.terminal,
+        },
+      }],
+    };
+  },
+});
+`
+  let modelCalls = 0
+  const llm = fakeLlm(async (request) => {
+    modelCalls += 1
+    const systemPrompt = request.messages[0]?.content ?? ''
+    if (modelCalls === 1) {
+      assert.match(systemPrompt, /Persistent declarative context/)
+      assert.match(systemPrompt, /Recurring lifecycle behavior/)
+      assert.ok(request.tools?.some((tool) => tool.name === 'read_system_variables'))
+      assert.ok(request.tools?.some((tool) => tool.name === 'apply_system_variable_changes'))
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: '',
+        toolCalls: [{
+          id: 'call-read-intent-variables',
+          name: 'read_system_variables',
+          arguments: { keys: ['response_tone', 'dynamic_context'] },
+        }],
+        raw: {},
+      }
+    }
+    if (modelCalls === 2) {
+      const readMessage = request.messages.find(
+        (message) => message.toolCallId === 'call-read-intent-variables',
+      )
+      const readEnvelope = JSON.parse(readMessage?.content ?? '{}') as {
+        result?: {
+          revision?: string
+          missing_keys?: string[]
+          variables?: Array<{ key?: string; value?: string; value_sha256?: string }>
+        }
+      }
+      const revision = readEnvelope.result?.revision
+      const dynamicContext = readEnvelope.result?.variables?.find(
+        (variable) => variable.key === 'dynamic_context',
+      )
+      assert.deepEqual(readEnvelope.result?.missing_keys, ['response_tone'])
+      assert.equal(dynamicContext?.value, 'Existing context.')
+      if (typeof revision !== 'string' || typeof dynamicContext.value_sha256 !== 'string') {
+        throw new Error('read_system_variables did not return revision and value hash')
+      }
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: '',
+        toolCalls: [{
+          id: 'call-apply-intent-variables',
+          name: 'apply_system_variable_changes',
+          arguments: {
+            base_revision: revision,
+            changes: [
+              {
+                op: 'upsert',
+                key: 'response_tone',
+                type: 'text',
+                label: 'Response tone',
+                description: 'Durable response tone requested by the user.',
+                value: 'concise',
+                expected_value_sha256: null,
+                scope: 'project',
+              },
+              {
+                op: 'patch',
+                key: 'dynamic_context',
+                expected_value_sha256: dynamicContext.value_sha256,
+                edits: [{
+                  old_text: 'Existing context.',
+                  new_text: 'Existing context.\nResponse tone: {{ builtin.prompts.response_tone }}',
+                }],
+              },
+            ],
+          },
+        }],
+        raw: {},
+      }
+    }
+    if (modelCalls === 3) {
+      const applyMessage = request.messages.find(
+        (message) => message.toolCallId === 'call-apply-intent-variables',
+      )
+      const applyEnvelope = JSON.parse(applyMessage?.content ?? '{}') as {
+        result?: {
+          dynamic_context?: string
+          dependencies?: Record<string, string[]>
+          diff?: Array<{
+            key?: string
+            change?: { mode?: string; edits?: Array<{ old_text?: string; new_text?: string }> }
+            before?: { value_sha256?: string }
+            after?: { value_sha256?: string }
+          }>
+        }
+      }
+      const dynamicDiff = applyEnvelope.result?.diff?.find(
+        (item) => item.key === 'dynamic_context',
+      )
+      assert.equal(dynamicDiff?.change?.mode, 'patch')
+      assert.deepEqual(dynamicDiff?.change?.edits, [{
+        old_text: 'Existing context.',
+        new_text: 'Existing context.\nResponse tone: {{ builtin.prompts.response_tone }}',
+      }])
+      assert.match(dynamicDiff?.before?.value_sha256 ?? '', /^[a-f0-9]{64}$/)
+      assert.match(dynamicDiff?.after?.value_sha256 ?? '', /^[a-f0-9]{64}$/)
+      assert.deepEqual(applyEnvelope.result?.dependencies?.dynamic_context, ['response_tone'])
+      assert.equal(
+        applyEnvelope.result?.dynamic_context,
+        'Existing context.\nResponse tone: concise',
+      )
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: JSON.stringify({
+          status: 'completed',
+          content: 'The durable response tone was added.',
+        }),
+        finishReason: 'stop',
+        raw: {},
+      }
+    }
+    if (modelCalls === 4) {
+      assert.match(systemPrompt, /Active dynamic context:\s*Existing context\.\s*Response tone: concise/)
+      assert.match(systemPrompt, /durable recurring behavior/)
+      assert.match(systemPrompt, /```capybara-hook name=my-hook/)
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: JSON.stringify({
+          status: 'completed',
+          content: `The recurring behavior was added.\n\n\`\`\`capybara-hook name=intent-audit\n${hookSource}\`\`\``,
+        }),
+        finishReason: 'stop',
+        raw: {},
+      }
+    }
+    if (modelCalls === 5) {
+      assert.match(systemPrompt, /Response tone: concise/)
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: JSON.stringify({
+          status: 'completed',
+          content: 'The generated Hook can now run.',
+        }),
+        finishReason: 'stop',
+        raw: {},
+      }
+    }
+    throw new Error(`unexpected model call ${modelCalls}`)
+  })
+
+  try {
+    await withRuntime(async (client) => {
+      let start = client.events.length
+      client.send('chat.message.send', {
+        clientMessageId: 'author-durable-variable',
+        content: [{
+          type: 'text',
+          text: 'From now on, remember that every response should use a concise tone.',
+        }],
+        autoStart: true,
+      })
+      await client.waitFor(
+        'run.state.changed',
+        (event) => event.payload.status === 'completed',
+        start,
+      )
+      assert.equal(modelCalls, 3)
+      const storedVariables = new Map(
+        resources.readSystemVariables().variables.map((variable) => [variable.key, variable]),
+      )
+      assert.equal(storedVariables.get('response_tone')?.value, 'concise')
+      assert.equal(storedVariables.get('response_tone')?.scope, 'project')
+      assert.equal(
+        storedVariables.get('dynamic_context')?.value,
+        'Existing context.\nResponse tone: {{ builtin.prompts.response_tone }}',
+      )
+
+      const snapshotStart = client.events.length
+      client.send('runtime.snapshot.get', {})
+      const variableSnapshot = await client.waitFor(
+        'runtime.snapshot',
+        () => true,
+        snapshotStart,
+      )
+      assert.equal(
+        variableSnapshot.payload.variables.value.builtin.prompts.dynamic_context,
+        'Existing context.\nResponse tone: concise',
+      )
+
+      start = client.events.length
+      client.send('chat.message.send', {
+        clientMessageId: 'author-recurring-hook',
+        content: [{
+          type: 'text',
+          text: 'After every completed Loop, record the active response tone for later inspection.',
+        }],
+        autoStart: true,
+      })
+      await client.waitFor(
+        'run.state.changed',
+        (event) => event.payload.status === 'completed',
+        start,
+      )
+      assert.equal(modelCalls, 4)
+      assert.equal(
+        fs.readFileSync(path.join(projectDir, 'hooks', 'intent-audit.ts'), 'utf8'),
+        hookSource,
+      )
+      assert.ok(client.events.slice(start).some((event) => (
+        event.type === 'runtime.artifact.created'
+        && event.payload.artifact.label === 'Hook installed · intent-audit'
+      )))
+      assert.equal(client.events.slice(start).some((event) => (
+        event.type === 'runtime.artifact.created'
+        && event.payload.artifact.label === 'intent hook executed'
+      )), false)
+
+      start = client.events.length
+      client.send('chat.message.send', {
+        clientMessageId: 'execute-generated-hook',
+        content: [{ type: 'text', text: 'Confirm the current setup.' }],
+        autoStart: true,
+      })
+      await client.waitFor(
+        'run.state.changed',
+        (event) => event.payload.status === 'completed',
+        start,
+      )
+      assert.equal(modelCalls, 5)
+      const executionArtifact = client.events.slice(start).find(
+        (event): event is EventOf<'runtime.artifact.created'> => (
+          event.type === 'runtime.artifact.created'
+          && event.payload.artifact.label === 'intent hook executed'
+        ),
+      )
+      assert.ok(executionArtifact)
+      const contentStart = client.events.length
+      client.send('runtime.artifact.get', { artifactId: executionArtifact.payload.artifact.id })
+      const artifactContent = await client.waitFor(
+        'runtime.artifact.content',
+        (event) => event.payload.artifact.id === executionArtifact.payload.artifact.id,
+        contentStart,
+      )
+      assert.deepEqual(artifactContent.payload.value, {
+        tone: 'concise',
+        terminal: true,
+      })
+    }, { projectDir, llm })
+  } finally {
+    fs.rmSync(projectDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    })
+  }
 })
 
 test('runtime Skill marketplace requires frontend confirmation before install and rejects reuse', async () => {

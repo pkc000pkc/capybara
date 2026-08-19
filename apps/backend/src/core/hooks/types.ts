@@ -52,6 +52,7 @@ export interface HookTriggerContext {
   loop: {
     runId: string
     iteration: number
+    terminal: boolean
   }
   messages: readonly LlmMessage[]
   training?: HookTrainingContext
@@ -72,10 +73,26 @@ export interface HookResult {
   }>
   metadata?: JsonValue
   experiences?: HookExperienceCandidate[]
+  correction?: HookCorrectionProposal
+  admission?: HookAdmissionDecision
   hookFiles?: Array<{
     name: string
     source: string
   }>
+}
+
+export interface HookCorrectionProposal {
+  summary: string
+  strategy: string
+  variableOverrides: Record<string, string>
+}
+
+export type HookAdmissionVerdict = 'accept' | 'reject' | 'revise' | 'retry_correction'
+
+export interface HookAdmissionDecision {
+  verdict: HookAdmissionVerdict
+  reasons: string[]
+  revisedCandidate?: HookExperienceCandidate
 }
 
 export interface HookVariableDiff {
@@ -126,7 +143,26 @@ export interface HookTrainingContext {
     details?: JsonValue
     reference?: ExperimentReference
   }
+  failureEvidence?: {
+    outcome: 'incorrect'
+    message: string
+    actualAnswer: string
+    actualTools: string[]
+    toolCalls: HookTrainingCase['toolCalls']
+  }
   priorResults?: Record<string, JsonValue>
+  correctionAttempts?: Array<{
+    ordinal: number
+    summary: string
+    strategy: string
+    passed: boolean
+    score: number
+    rationale: string
+    variableOverrides: Record<string, string>
+    actualAnswer: string
+    actualTools: string[]
+    toolCalls: HookTrainingCase['toolCalls']
+  }>
   candidate?: HookExperienceCandidate & { id: string }
 }
 
@@ -170,6 +206,7 @@ export interface HookFixture {
   checkpoint: HookCheckpoint
   runId: string
   loopIteration: number
+  loopTerminal?: boolean
   status: HookStatusSnapshot
   changedVariables: string[]
   variables: RuntimeVariables

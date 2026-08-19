@@ -18,6 +18,7 @@ import {
   type SystemVariableChange,
   type SystemVariableDefinition,
   type SystemVariablesResource,
+  systemVariableValueHash,
 } from '#core/project-resources'
 import {
   resolveSystemPromptVariables,
@@ -156,6 +157,8 @@ interface Checkpoint {
   workflows?: RuntimeWorkflowsState
   toolRound: number
   continuationRound: number
+  loopIteration?: number
+  loopVariableBaseline?: RuntimeVariables
   usage: LlmUsage
 }
 
@@ -179,6 +182,8 @@ export interface RuntimeLoopState {
   assistantCounter: number
   toolRound: number
   continuationRound: number
+  loopIteration?: number
+  loopVariableBaseline?: RuntimeVariables
   runUsage: LlmUsage
 }
 
@@ -311,11 +316,18 @@ const INTERNAL_RESOURCE_TOOLS: InternalResourceToolDefinition[] = [
                   label: { type: 'string' },
                   description: { type: 'string' },
                   value: { type: 'string' },
+                  expected_value_sha256: {
+                    oneOf: [
+                      { type: 'string', pattern: '^[a-f0-9]{64}$' },
+                      { type: 'null' },
+                    ],
+                    description: 'Use null to assert creation, or the hash returned by read_system_variables to replace an existing value.',
+                  },
                   required: { type: 'boolean' },
                   show_in_status: { type: 'boolean' },
                   scope: { type: 'string', enum: ['session', 'project'] },
                 },
-                required: ['op', 'key', 'value'],
+                required: ['op', 'key', 'value', 'expected_value_sha256'],
                 additionalProperties: false,
               },
               {
@@ -324,6 +336,7 @@ const INTERNAL_RESOURCE_TOOLS: InternalResourceToolDefinition[] = [
                 properties: {
                   op: { type: 'string', enum: ['patch'] },
                   key: { type: 'string', pattern: '^[a-z][a-z0-9_]*$' },
+                  expected_value_sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
                   edits: {
                     type: 'array',
                     minItems: 1,
@@ -339,7 +352,7 @@ const INTERNAL_RESOURCE_TOOLS: InternalResourceToolDefinition[] = [
                     },
                   },
                 },
-                required: ['op', 'key', 'edits'],
+                required: ['op', 'key', 'expected_value_sha256', 'edits'],
                 additionalProperties: false,
               },
               {
@@ -348,8 +361,9 @@ const INTERNAL_RESOURCE_TOOLS: InternalResourceToolDefinition[] = [
                 properties: {
                   op: { type: 'string', enum: ['remove'] },
                   key: { type: 'string', pattern: '^[a-z][a-z0-9_]*$' },
+                  expected_value_sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
                 },
-                required: ['op', 'key'],
+                required: ['op', 'key', 'expected_value_sha256'],
                 additionalProperties: false,
               },
             ],
@@ -809,8 +823,8 @@ export class RuntimeLoop extends Loop {
   private continuationRound = 0
   private runUsage: LlmUsage = {}
   private variables = { revision: 1, value: clone(INITIAL_VARIABLES) }
+  private loopIteration = 0
   private loopVariableBaseline = clone(INITIAL_VARIABLES)
-  private afterLoopProcessedRunId?: string
   private template: TemplateState = {
     id: 'context-prompt',
     language: 'jinja2+markdown',
@@ -1040,6 +1054,8 @@ export class RuntimeLoop extends Loop {
       assistantCounter: this.assistantCounter,
       toolRound: this.toolRound,
       continuationRound: this.continuationRound,
+      loopIteration: this.loopIteration,
+      loopVariableBaseline: this.loopVariableBaseline,
       runUsage: this.runUsage,
     })
   }
@@ -1077,6 +1093,7 @@ export class RuntimeLoop extends Loop {
     this.assistantCounter = state.assistantCounter
     this.toolRound = state.toolRound
     this.continuationRound = state.continuationRound
+    this.loopIteration = state.loopIteration ?? 0
     this.runUsage = clone(state.runUsage)
 
     this.messages.splice(0, this.messages.length, ...snapshot.conversation.messages.map((message) => (
@@ -1109,6 +1126,7 @@ export class RuntimeLoop extends Loop {
       revision: snapshot.variables.revision + 1,
       value: clone(snapshot.variables.value),
     }
+    this.loopVariableBaseline = clone(state.loopVariableBaseline ?? this.variables.value)
     const allowedContextKeys = new Set([
       'files',
       'history_summary',
@@ -1687,7 +1705,7 @@ export class RuntimeLoop extends Loop {
     this.toolRound = 0
     this.continuationRound = 0
     this.runUsage = {}
-    this.afterLoopProcessedRunId = undefined
+    this.loopIteration = 0
     const latestContext = this.pendingContextRevisionId ?? this.contextItems.at(-1)?.id
     if (latestContext) this.applyContextRevision(latestContext, correlationId)
     this.publishRenderedMessages(correlationId)
@@ -1861,7 +1879,9 @@ export class RuntimeLoop extends Loop {
       this.run = this.withRun({ status: 'waiting', failure })
       this.updateRuntimeStatus({ model: 'ready' }, correlationId)
       this.emitRun(correlationId)
-      await this.runAfterLoopHooks('failed', correlationId, generation)
+      if (this.isLoopStep(runningStep)) {
+        await this.runAfterLoopHooks('failed', correlationId, generation, true)
+      }
       if (this.generation === generation && this.run.status === 'waiting') {
         this.run = this.withRun({ status: 'failed', failure })
         this.emitRun(correlationId)
@@ -1887,6 +1907,15 @@ export class RuntimeLoop extends Loop {
     this.updateTimeline(completedStep, correlationId)
     const nextStep = index + 1
     const isComplete = nextStep >= this.timeline.length
+    if (this.endsLoopIteration(completedStep, this.timeline[nextStep])) {
+      const terminalLoop = !this.timeline.slice(nextStep).some(
+        (step) => step.type === 'model' && step.status === 'pending',
+      )
+      await this.runAfterLoopHooks('completed', correlationId, generation, terminalLoop)
+      if (this.generation !== generation || ['interrupted', 'cancelled'].includes(this.run.status)) {
+        return false
+      }
+    }
     const pauseRequested = this.run.status === 'pause_requested'
     const pauseAfterBreakpoint = !isComplete &&
       this.run.mode === 'continuous' &&
@@ -1900,13 +1929,7 @@ export class RuntimeLoop extends Loop {
           ? 'paused'
           : this.run.status,
     })
-    if (isComplete) {
-      await this.runAfterLoopHooks('completed', correlationId, generation)
-      if (this.generation !== generation || ['interrupted', 'cancelled'].includes(this.run.status)) {
-        return false
-      }
-      this.run = this.withRun({ status: 'completed' })
-    }
+    if (isComplete) this.run = this.withRun({ status: 'completed' })
     this.pushCheckpoint(nextStep, completedStep.id, correlationId, afterCheckpointId)
     this.emitRun(pauseRequested ? this.pauseCorrelationId ?? correlationId : correlationId)
     if (pauseAfterBreakpoint) {
@@ -2124,6 +2147,8 @@ export class RuntimeLoop extends Loop {
     this.workflowRevision = this.workflows.revision
     this.toolRound = checkpoint.toolRound
     this.continuationRound = checkpoint.continuationRound
+    this.loopIteration = checkpoint.loopIteration ?? 0
+    this.loopVariableBaseline = clone(checkpoint.loopVariableBaseline ?? checkpoint.variables)
     this.runUsage = clone(checkpoint.usage)
     this.renderResult = clone(checkpoint.renderResult)
     this.activeContextRevisionId = checkpoint.contextRevisionId
@@ -3794,6 +3819,8 @@ export class RuntimeLoop extends Loop {
       workflows: clone(this.workflows),
       toolRound: this.toolRound,
       continuationRound: this.continuationRound,
+      loopIteration: this.loopIteration,
+      loopVariableBaseline: clone(this.loopVariableBaseline),
       usage: clone(this.runUsage),
     }
   }
@@ -3851,9 +3878,14 @@ export class RuntimeLoop extends Loop {
     source: 'user' | 'runtime' | 'tool' | 'hook' | 'restore',
     correlationId: string,
   ): void {
-    const sharedPatch = patch.filter((operation) =>
-      operation.path.startsWith('/builtin/prompts/'),
-    )
+    const projectKeys = new Set(this.systemVariables.variables
+      .filter((variable) => variable.scope === 'project')
+      .map((variable) => variable.key))
+    const sharedPatch = patch.filter((operation) => {
+      if (!operation.path.startsWith('/builtin/prompts/')) return false
+      const tokens = decodePointer(operation.path)
+      return tokens.length === 3 && projectKeys.has(tokens[2] ?? '')
+    })
     if (sharedPatch.length > 0) {
       try {
         const updates = this.sharedVariableUpdates(sharedPatch)
@@ -4056,10 +4088,11 @@ export class RuntimeLoop extends Loop {
     outcome: 'completed' | 'failed' | 'cancelled',
     correlationId: string,
     generation: number,
+    terminal = false,
   ): Promise<void> {
     const runId = this.run.runId
-    if (!runId || this.afterLoopProcessedRunId === runId) return
-    this.afterLoopProcessedRunId = runId
+    if (!runId) return
+    this.loopIteration += 1
     this.syncSystemMessages(correlationId)
     const changedVariables = [...changedVariablePaths(
       this.loopVariableBaseline,
@@ -4068,7 +4101,8 @@ export class RuntimeLoop extends Loop {
     const fixture: HookFixture = {
       checkpoint: 'after_loop',
       runId,
-      loopIteration: this.runCounter,
+      loopIteration: this.loopIteration,
+      loopTerminal: terminal,
       status: this.hookStatus(outcome),
       changedVariables,
       variables: clone(this.variables.value),
@@ -4096,6 +4130,7 @@ export class RuntimeLoop extends Loop {
               hookId: hook.id,
               hookRevision: hook.revision,
               checkpoint: 'after_loop',
+              loopIteration: this.loopIteration,
               changedVariables,
               matched: execution.matched,
               attempts: execution.attempts,
@@ -4139,6 +4174,18 @@ export class RuntimeLoop extends Loop {
         utilization: Math.min(usedTokens / maxTokens, 1),
       },
     }, correlationId)
+    this.loopVariableBaseline = clone(this.variables.value)
+  }
+
+  private isLoopStep(step: TimelineStep): boolean {
+    return step.type === 'model' || step.type === 'tool' || step.type === 'workflow'
+  }
+
+  private endsLoopIteration(step: TimelineStep, next?: TimelineStep): boolean {
+    if (step.type === 'model') {
+      return step.detail?.loopStatus === 'running' || step.detail?.loopStatus === 'completed'
+    }
+    return (step.type === 'tool' || step.type === 'workflow') && next?.type === 'model'
   }
 
   private async applyHookResult(
@@ -5492,9 +5539,12 @@ export class RuntimeLoop extends Loop {
     const resolved = resolveSystemPromptVariables(allVariables)
     const selectedKeys = requestedKeys as string[] | undefined
     const selected = selectedKeys ? new Set(selectedKeys) : undefined
-    const variables = selected
+    const variables = (selected
       ? allVariables.filter((variable) => selected.has(variable.key))
-      : allVariables
+      : allVariables).map((variable) => ({
+        ...variable,
+        value_sha256: systemVariableValueHash(variable.value),
+      }))
     const dependencies = Object.fromEntries(
       variables.map((variable) => [variable.key, resolved.dependencies[variable.key] ?? []]),
     )
@@ -5539,13 +5589,27 @@ export class RuntimeLoop extends Loop {
         throw new Error(`changes[${index}].key must use lowercase snake_case`)
       }
       if (value.op === 'remove') {
-        const unknown = Object.keys(value).find((key) => key !== 'op' && key !== 'key')
+        const unknown = Object.keys(value).find((key) => (
+          key !== 'op' && key !== 'key' && key !== 'expected_value_sha256'
+        ))
         if (unknown) throw new Error(`changes[${index}] remove does not accept ${unknown}`)
-        return { op: 'remove', key: value.key }
+        if (typeof value.expected_value_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.expected_value_sha256)) {
+          throw new Error(`changes[${index}].expected_value_sha256 must be the hash returned by read_system_variables`)
+        }
+        return {
+          op: 'remove',
+          key: value.key,
+          expected_value_sha256: value.expected_value_sha256,
+        }
       }
       if (value.op === 'patch') {
-        const unknown = Object.keys(value).find((key) => key !== 'op' && key !== 'key' && key !== 'edits')
+        const unknown = Object.keys(value).find((key) => (
+          key !== 'op' && key !== 'key' && key !== 'expected_value_sha256' && key !== 'edits'
+        ))
         if (unknown) throw new Error(`changes[${index}] patch does not accept ${unknown}`)
+        if (typeof value.expected_value_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.expected_value_sha256)) {
+          throw new Error(`changes[${index}].expected_value_sha256 must be the hash returned by read_system_variables`)
+        }
         if (!Array.isArray(value.edits) || value.edits.length === 0 || value.edits.length > 50) {
           throw new Error(`changes[${index}].edits must contain 1-50 text replacements`)
         }
@@ -5563,16 +5627,28 @@ export class RuntimeLoop extends Loop {
           }
           return { old_text: edit.old_text, new_text: edit.new_text }
         })
-        return { op: 'patch', key: value.key, edits }
+        return {
+          op: 'patch',
+          key: value.key,
+          expected_value_sha256: value.expected_value_sha256,
+          edits,
+        }
       }
       const allowed = new Set([
         'op', 'key', 'type', 'label', 'description', 'value',
-        'required', 'show_in_status', 'scope',
+        'expected_value_sha256', 'required', 'show_in_status', 'scope',
       ])
       const unknown = Object.keys(value).find((key) => !allowed.has(key))
       if (unknown) throw new Error(`changes[${index}] does not accept ${unknown}`)
       if (typeof value.value !== 'string') {
         throw new Error(`changes[${index}].value must be a string for upsert`)
+      }
+      if (
+        value.expected_value_sha256 !== null
+        && (typeof value.expected_value_sha256 !== 'string'
+          || !/^[a-f0-9]{64}$/.test(value.expected_value_sha256))
+      ) {
+        throw new Error(`changes[${index}].expected_value_sha256 must be null or the hash returned by read_system_variables`)
       }
       if (value.type !== undefined && value.type !== 'text' && value.type !== 'prompt_template') {
         throw new Error(`changes[${index}].type must be text or prompt_template`)
@@ -5594,6 +5670,7 @@ export class RuntimeLoop extends Loop {
         op: 'upsert',
         key: value.key,
         value: value.value,
+        expected_value_sha256: value.expected_value_sha256,
         ...(value.type ? { type: value.type } : {}),
         ...(typeof value.label === 'string' ? { label: value.label } : {}),
         ...(typeof value.description === 'string' ? { description: value.description } : {}),
@@ -5618,6 +5695,7 @@ export class RuntimeLoop extends Loop {
     )
     this.refreshSystemVariablesResource(result.resource, correlationId, result.revision)
     const resolved = resolveSystemPromptVariables(result.resource.variables)
+    const changesByKey = new Map(input.changes.map((change) => [change.key, change]))
     const summarize = (variable: SystemVariableDefinition) => ({
       key: variable.key,
       type: variable.type,
@@ -5630,6 +5708,13 @@ export class RuntimeLoop extends Loop {
     const diff = result.diff.map((item) => ({
       op: item.op,
       key: item.key,
+      change: (() => {
+        const change = changesByKey.get(item.key)
+        if (!change) return undefined
+        return change.op === 'patch'
+          ? { mode: 'patch', edits: change.edits }
+          : { mode: change.op }
+      })(),
       ...(item.before ? { before: summarize(item.before) } : {}),
       ...(item.after ? { after: summarize(item.after) } : {}),
     }))

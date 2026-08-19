@@ -5,9 +5,10 @@ import path from 'node:path'
 import { test } from 'node:test'
 
 import { HookRegistry } from '#core/hooks/hook-registry'
-import { HookRunner } from '#core/hooks/hook-runner'
+import { HookRunError, HookRunner } from '#core/hooks/hook-runner'
 import type { HookFixture } from '#core/hooks/types'
 import { initializeProjectDirectory } from '#core/project-initializer'
+import { ProjectResources } from '#core/project-resources'
 import { ProjectResourceRegistry } from '#core/resources/resource-registry'
 import type { RuntimeLlm } from '#core/runtime-loop'
 import { RuntimeLoop } from '#core/runtime-loop'
@@ -257,14 +258,24 @@ test('Runtime installs a generated user Hook and executes it on the next Loop', 
     `Created the Hook.\n\n\`\`\`capybara-hook name=generated-a\n${generatedHookSource('generated-a')}\`\`\``,
     'Second response without a generated file.',
   ]
+  let inspectedAuthoringProtocol = false
   const llm: RuntimeLlm = {
-    chat: async () => ({
-      provider: 'custom',
-      model: 'hook-model',
-      text: JSON.stringify({ status: 'completed', content: responses.shift() ?? 'done' }),
-      usage: { inputTokens: 8, outputTokens: 4, totalTokens: 12 },
-      raw: {},
-    }),
+    chat: async (request) => {
+      if (!inspectedAuthoringProtocol) {
+        const systemPrompt = request.messages[0]?.content ?? ''
+        assert.match(systemPrompt, /durable recurring behavior/)
+        assert.match(systemPrompt, /loop\.terminal/)
+        assert.match(systemPrompt, /Prefer a system variable when static context is sufficient/)
+        inspectedAuthoringProtocol = true
+      }
+      return {
+        provider: 'custom',
+        model: 'hook-model',
+        text: JSON.stringify({ status: 'completed', content: responses.shift() ?? 'done' }),
+        usage: { inputTokens: 8, outputTokens: 4, totalTokens: 12 },
+        raw: {},
+      }
+    },
     getConfig: () => ({
       provider: 'custom', protocol: 'responses', model: 'hook-model',
       baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
@@ -273,6 +284,7 @@ test('Runtime installs a generated user Hook and executes it on the next Loop', 
   const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
   try {
     await runLoopOnce(loop, 'install-generated-hook', 1)
+    assert.equal(inspectedAuthoringProtocol, true)
     const generatedFile = path.join(projectDir, 'hooks', 'generated-a.ts')
     assert.equal(fs.readFileSync(generatedFile, 'utf8'), generatedHookSource('generated-a'))
     assert.equal(new HookRegistry(projectDir).getProject('generated-a')?.loadable, true)
@@ -403,7 +415,40 @@ test('Hook runner evaluates after-Loop triggers and proxies the project LLM', as
   }
 })
 
-test('Runtime checks Hooks once after the Loop and applies message and variable results', async () => {
+test('Hook runner preserves LLM usage from failed retry attempts', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-retry-usage-'))
+  const source = SOURCE
+    .replace('onError: "continue"', 'onError: "retry"')
+    .replace('return {\n      patches:', 'throw new Error("fail after LLM usage");\n    return {\n      patches:')
+  const hook = new HookRegistry(projectDir).validateContent('summary-hook', source)
+  const llm: RuntimeLlm = {
+    chat: async () => ({
+      provider: 'custom', model: 'hook-model', text: 'unused',
+      usage: { inputTokens: 8, outputTokens: 3, totalTokens: 11, cacheReadTokens: 2 }, raw: {},
+    }),
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'hook-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
+    }),
+  }
+  try {
+    await assert.rejects(
+      () => new HookRunner(llm).run(hook, fixture()),
+      (error: unknown) => {
+        assert.ok(error instanceof HookRunError)
+        assert.equal(error.attempts, 2)
+        assert.deepEqual(error.usage, {
+          inputTokens: 16, outputTokens: 6, totalTokens: 22, cacheReadTokens: 4,
+        })
+        return true
+      },
+    )
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('Runtime runs ordinary Hooks after every model iteration and exposes results to the next iteration', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-runtime-'))
   initializeProjectDirectory(projectDir)
   const hookFile = path.join(projectDir, 'hooks', 'test-context-compression.ts')
@@ -417,17 +462,25 @@ test('Runtime checks Hooks once after the Loop and applies message and variable 
     .replace('conversation.slice(-6)', 'conversation.slice(-1)')
     .replace('conversation.slice(0, -6)', 'conversation.slice(0, -1)')
   fs.writeFileSync(hookFile, source)
-  let calls = 0
+  let runtimeCalls = 0
+  let hookCalls = 0
+  const runtimeRequests: Parameters<RuntimeLlm['chat']>[0][] = []
   const llm: RuntimeLlm = {
     chat: async (request) => {
-      calls += 1
       const hookCall = request.messages.some((message) => message.content.includes('Compress the earlier'))
+      if (hookCall) hookCalls += 1
+      else {
+        runtimeCalls += 1
+        runtimeRequests.push(structuredClone({ ...request, signal: undefined }))
+      }
       return {
         provider: 'custom',
         model: 'hook-model',
         text: hookCall
-          ? 'summary produced by Hook'
-          : JSON.stringify({ status: 'completed', content: 'runtime answer' }),
+          ? `summary produced by Hook ${hookCalls}`
+          : JSON.stringify(runtimeCalls === 1
+            ? { status: 'running', content: 'continue after the first Hook' }
+            : { status: 'completed', content: 'runtime answer' }),
         usage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 },
         raw: {},
       }
@@ -469,9 +522,207 @@ test('Runtime checks Hooks once after the Loop and applies message and variable 
     loop.execute(command, 1)
     await completed
     const snapshot = loop.getSnapshot(0)
-    assert.equal(calls, 2, JSON.stringify(loop.exportState().artifacts, null, 2))
-    assert.equal(snapshot.variables.value.context.history_summary, 'summary produced by Hook')
-    assert.ok(snapshot.artifacts.items.some((artifact) => artifact.kind === 'hook-result'))
+    const state = loop.exportState()
+    const hookArtifacts = state.artifacts.filter((artifact) => (
+      artifact.meta.kind === 'hook-result'
+      && (artifact.value as { hookId?: string }).hookId === 'test-context-compression'
+    ))
+    assert.equal(runtimeCalls, 2, JSON.stringify(state.artifacts, null, 2))
+    assert.equal(hookCalls, 2, JSON.stringify(state.artifacts, null, 2))
+    assert.match(runtimeRequests[1]?.messages[0]?.content ?? '', /summary produced by Hook 1/)
+    assert.equal(snapshot.variables.value.context.history_summary, 'summary produced by Hook 2')
+    assert.deepEqual(hookArtifacts.map((artifact) => (
+      (artifact.value as { loopIteration?: number }).loopIteration
+    )), [1, 2])
+  } finally {
+    loop.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('Runtime runs an ordinary Hook once after a multi-tool batch and once after the final model iteration', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-tool-batch-'))
+  initializeProjectDirectory(projectDir)
+  fs.writeFileSync(path.join(projectDir, 'hooks', 'batch-hook.ts'), generatedHookSource('batch-hook'))
+  let runtimeCalls = 0
+  const llm: RuntimeLlm = {
+    chat: async () => {
+      runtimeCalls += 1
+      return runtimeCalls === 1
+        ? {
+            provider: 'custom',
+            model: 'hook-model',
+            text: '',
+            toolCalls: [
+              { id: 'search-tools', name: 'search_resources', arguments: { query: 'file', kinds: ['tool'] } },
+              { id: 'search-hooks', name: 'search_resources', arguments: { query: 'context', kinds: ['hook'] } },
+            ],
+            raw: {},
+          }
+        : {
+            provider: 'custom',
+            model: 'hook-model',
+            text: JSON.stringify({ status: 'completed', content: 'tool batch complete' }),
+            raw: {},
+          }
+    },
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'hook-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
+    }),
+  }
+  const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
+  try {
+    await runLoopOnce(loop, 'hook-tool-batch', 1)
+    const hookArtifacts = loop.exportState().artifacts.filter((artifact) => (
+      artifact.meta.kind === 'hook-result'
+      && (artifact.value as { hookId?: string }).hookId === 'batch-hook'
+    ))
+    assert.equal(runtimeCalls, 2)
+    assert.deepEqual(hookArtifacts.map((artifact) => (
+      (artifact.value as { loopIteration?: number }).loopIteration
+    )), [1, 2])
+  } finally {
+    loop.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('Runtime exposes terminal loop state and keeps session Hook patches out of project variables', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-terminal-session-'))
+  initializeProjectDirectory(projectDir)
+  const resources = new ProjectResources(projectDir)
+  const projectValue = resources.readSystemVariables().variables.find(
+    (variable) => variable.key === 'agent_identity',
+  )?.value
+  fs.writeFileSync(path.join(projectDir, 'hooks', 'terminal-session.ts'), `import { defineHook } from "@capybara-agent/sdk";
+
+export default defineHook({
+  name: "terminal-session",
+  description: "Record terminal state and patch a session-only variable.",
+  enabled: true,
+  trigger() { return true; },
+  schedule: { priority: 0, timeoutMs: 2000, onError: "continue" },
+  permissions: { variables: "patch", artifacts: "write" },
+  run({ loop }) {
+    const value = "loop-" + loop.iteration + "-terminal-" + loop.terminal;
+    return {
+      patches: [{ op: "replace", path: "/builtin/prompts/agent_identity", value }],
+      artifacts: [{ title: "terminal state", value: { iteration: loop.iteration, terminal: loop.terminal } }],
+    };
+  },
+});
+`)
+  let runtimeCalls = 0
+  const llm: RuntimeLlm = {
+    chat: async () => {
+      runtimeCalls += 1
+      return {
+        provider: 'custom',
+        model: 'hook-model',
+        text: JSON.stringify(runtimeCalls === 1
+          ? { status: 'running', content: 'continue' }
+          : { status: 'completed', content: 'done' }),
+        raw: {},
+      }
+    },
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'hook-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
+    }),
+  }
+  const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
+  try {
+    await runLoopOnce(loop, 'hook-terminal-session', 1)
+    const hookArtifacts = loop.exportState().artifacts.filter((artifact) => (
+      artifact.meta.kind === 'hook-result'
+      && (artifact.value as { hookId?: string }).hookId === 'terminal-session'
+    ))
+    const executions = hookArtifacts.map((artifact) => artifact.value as {
+      loopIteration?: number
+      result?: { artifacts?: Array<{ value?: { terminal?: boolean } }> }
+    })
+    assert.equal(runtimeCalls, 2)
+    assert.deepEqual(executions.map((execution) => execution.loopIteration), [1, 2])
+    assert.deepEqual(executions.map((execution) => (
+      execution.result?.artifacts?.[0]?.value?.terminal
+    )), [false, true])
+    assert.equal(
+      loop.getSnapshot(0).variables.value.builtin.prompts.agent_identity,
+      'loop-2-terminal-true',
+    )
+    assert.equal(
+      resources.readSystemVariables().variables.find((variable) => variable.key === 'agent_identity')?.value,
+      projectValue,
+    )
+  } finally {
+    loop.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('Runtime runs an ordinary Hook once for a failed model iteration', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-failed-iteration-'))
+  initializeProjectDirectory(projectDir)
+  fs.writeFileSync(path.join(projectDir, 'hooks', 'failed-iteration.ts'), `import { defineHook } from "@capybara-agent/sdk";
+
+export default defineHook({
+  name: "failed-iteration",
+  description: "Observe failed Loop iterations.",
+  enabled: true,
+  trigger({ status }) { return status.run.status === "failed"; },
+  schedule: { priority: 0, timeoutMs: 2000, onError: "continue" },
+  permissions: { artifacts: "write" },
+  run({ loop }) { return { artifacts: [{ title: "failed iteration", value: loop.iteration }] }; },
+});
+`)
+  const llm: RuntimeLlm = {
+    chat: async () => ({
+      provider: 'custom',
+      model: 'hook-model',
+      text: 'invalid model output',
+      raw: {},
+    }),
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'hook-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
+    }),
+  }
+  const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
+  const failed = new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('failed iteration test timed out')), 5000)
+    const unsubscribe = loop.onEvent((event) => {
+      if (event.type === 'run.state.changed' && event.payload.status === 'failed') {
+        clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      }
+    })
+  })
+  const command: ClientCommand = {
+    version: 1,
+    kind: 'command',
+    id: 'failed-iteration-command',
+    type: 'chat.message.send',
+    sessionId: 'test-session',
+    timestamp: new Date().toISOString(),
+    payload: {
+      clientMessageId: 'failed-iteration-message',
+      content: [{ type: 'text', text: 'Fail this iteration.' }],
+      autoStart: true,
+    },
+  }
+  try {
+    loop.validate(command)
+    loop.execute(command, 1)
+    await failed
+    const hookArtifacts = loop.exportState().artifacts.filter((artifact) => (
+      artifact.meta.kind === 'hook-result'
+      && (artifact.value as { hookId?: string }).hookId === 'failed-iteration'
+    ))
+    assert.equal(hookArtifacts.length, 1)
+    assert.equal((hookArtifacts[0]?.value as { matched?: boolean }).matched, true)
+    assert.equal((hookArtifacts[0]?.value as { loopIteration?: number }).loopIteration, 1)
   } finally {
     loop.close()
     fs.rmSync(projectDir, { recursive: true, force: true })

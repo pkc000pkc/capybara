@@ -9,6 +9,7 @@ import type {
   TrainingCase,
   TrainingCaseStatus,
   TrainingConfig,
+  TrainingCorrectionAttempt,
   TrainingEvent,
   TrainingRun,
   TrainingRunStatus,
@@ -22,6 +23,13 @@ const EMPTY_USAGE: ExperimentUsage = {
   totalTokens: 0,
   cacheReadTokens: 0,
 }
+
+const TRAINING_CONFIG_DEFAULTS = {
+  maxCorrectionAttempts: 4,
+  maxCorrectionTokens: 40_000,
+  maxCorrectionWallTimeMs: 20 * 60_000,
+  maxReplayRevisions: 2,
+} as const
 
 type RunRow = {
   id: string
@@ -84,6 +92,32 @@ type ExperienceRow = {
   replay_rationale: string | null
   created_at: string
   updated_at: string
+}
+
+type CorrectionAttemptRow = {
+  id: string
+  run_id: string
+  source_case_id: string
+  ordinal: number
+  hook_id: string
+  summary: string
+  strategy: string
+  variable_overrides_json: string
+  experiment_run_id: string | null
+  experiment_case_id: string | null
+  actual_answer: string
+  actual_tools_json: string
+  tool_calls_json: string
+  usage_json: string
+  hook_usage_json: string
+  score: number
+  passed: number
+  rationale: string
+  evaluation_json: string | null
+  failure_json: string | null
+  terminal_reason: TrainingCorrectionAttempt['terminalReason'] | null
+  started_at: string
+  completed_at: string
 }
 
 function parseJson<T>(value: string | null, fallback: T): T {
@@ -159,6 +193,32 @@ export class TrainingStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS training_correction_attempts (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES training_runs(id) ON DELETE CASCADE,
+        source_case_id TEXT NOT NULL REFERENCES training_cases(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL,
+        hook_id TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        variable_overrides_json TEXT NOT NULL,
+        experiment_run_id TEXT,
+        experiment_case_id TEXT,
+        actual_answer TEXT NOT NULL,
+        actual_tools_json TEXT NOT NULL,
+        tool_calls_json TEXT NOT NULL,
+        usage_json TEXT NOT NULL,
+        hook_usage_json TEXT NOT NULL,
+        score REAL NOT NULL,
+        passed INTEGER NOT NULL,
+        rationale TEXT NOT NULL,
+        evaluation_json TEXT,
+        failure_json TEXT,
+        terminal_reason TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT NOT NULL,
+        UNIQUE(source_case_id, ordinal)
+      );
       CREATE TABLE IF NOT EXISTS experience_patches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         candidate_id TEXT NOT NULL REFERENCES experience_candidates(id) ON DELETE CASCADE,
@@ -212,6 +272,7 @@ export class TrainingStore {
       CREATE INDEX IF NOT EXISTS training_runs_status_time ON training_runs(status, updated_at DESC);
       CREATE INDEX IF NOT EXISTS training_cases_run_phase_ordinal ON training_cases(run_id, phase, ordinal);
       CREATE INDEX IF NOT EXISTS experiences_run_status ON experience_candidates(run_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS correction_attempts_case_ordinal ON training_correction_attempts(source_case_id, ordinal);
     `)
     const caseColumns = new Set((this.database.prepare('PRAGMA table_info(training_cases)').all() as Array<{ name: string }>).map((column) => column.name))
     if (!caseColumns.has('evaluation_json')) {
@@ -405,7 +466,73 @@ export class TrainingStore {
     const now = new Date().toISOString()
     this.database.prepare(`
       UPDATE training_cases SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?
-    `).run(status, ['completed', 'error'].includes(status) ? now : null, now, id)
+    `).run(status, ['completed', 'unresolved', 'error'].includes(status) ? now : null, now, id)
+  }
+
+  createCorrectionAttempt(item: TrainingCorrectionAttempt): void {
+    this.database.prepare(`
+      INSERT INTO training_correction_attempts (
+        id, run_id, source_case_id, ordinal, hook_id, summary, strategy,
+        variable_overrides_json, experiment_run_id, experiment_case_id, actual_answer,
+        actual_tools_json, tool_calls_json, usage_json, hook_usage_json, score, passed,
+        rationale, evaluation_json, failure_json, terminal_reason, started_at, completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      item.id, item.runId, item.sourceCaseId, item.ordinal, item.hookId, item.summary,
+      item.strategy, JSON.stringify(item.variableOverrides), item.experimentRunId ?? null,
+      item.experimentCaseId ?? null, item.actualAnswer, JSON.stringify(item.actualTools),
+      JSON.stringify(item.toolCalls), JSON.stringify(item.usage), JSON.stringify(item.hookUsage),
+      item.score, Number(item.passed), item.rationale,
+      item.evaluation ? JSON.stringify(item.evaluation) : null,
+      item.failure ? JSON.stringify(item.failure) : null, item.terminalReason ?? null,
+      item.startedAt, item.completedAt,
+    )
+    this.event(item.runId, 'correction.attempted', {
+      sourceCaseId: item.sourceCaseId,
+      ordinal: item.ordinal,
+      passed: item.passed,
+      score: item.score,
+      terminalReason: item.terminalReason ?? null,
+      totalTokens: item.usage.totalTokens ?? 0,
+      hookTokens: item.hookUsage.totalTokens ?? 0,
+    })
+  }
+
+  listCorrectionAttempts(runId: string, sourceCaseId?: string): TrainingCorrectionAttempt[] {
+    this.getRun(runId)
+    const rows = sourceCaseId
+      ? this.database.prepare(`
+          SELECT * FROM training_correction_attempts
+          WHERE run_id = ? AND source_case_id = ? ORDER BY ordinal
+        `).all(runId, sourceCaseId)
+      : this.database.prepare(`
+          SELECT * FROM training_correction_attempts WHERE run_id = ? ORDER BY source_case_id, ordinal
+        `).all(runId)
+    return (rows as CorrectionAttemptRow[]).map((row) => ({
+      id: row.id,
+      runId: row.run_id,
+      sourceCaseId: row.source_case_id,
+      ordinal: row.ordinal,
+      hookId: row.hook_id,
+      summary: row.summary,
+      strategy: row.strategy,
+      variableOverrides: parseJson(row.variable_overrides_json, {}),
+      ...(row.experiment_run_id ? { experimentRunId: row.experiment_run_id } : {}),
+      ...(row.experiment_case_id ? { experimentCaseId: row.experiment_case_id } : {}),
+      actualAnswer: row.actual_answer,
+      actualTools: parseJson(row.actual_tools_json, []),
+      toolCalls: parseJson(row.tool_calls_json, []),
+      usage: { ...EMPTY_USAGE, ...parseJson(row.usage_json, EMPTY_USAGE) },
+      hookUsage: { ...EMPTY_USAGE, ...parseJson(row.hook_usage_json, EMPTY_USAGE) },
+      score: row.score,
+      passed: Boolean(row.passed),
+      rationale: row.rationale,
+      ...(row.evaluation_json ? { evaluation: parseJson(row.evaluation_json, undefined) } : {}),
+      ...(row.failure_json ? { failure: parseJson(row.failure_json, undefined) } : {}),
+      ...(row.terminal_reason ? { terminalReason: row.terminal_reason } : {}),
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+    }))
   }
 
   acknowledgeFailurePause(id: string): void {
@@ -653,7 +780,7 @@ export class TrainingStore {
     const counts = this.database.prepare(`
       SELECT
         SUM(CASE WHEN phase = 'training' THEN 1 ELSE 0 END) AS train_total,
-        SUM(CASE WHEN phase = 'training' AND status IN ('completed', 'error') THEN 1 ELSE 0 END) AS train_completed,
+        SUM(CASE WHEN phase = 'training' AND status IN ('completed', 'unresolved', 'error') THEN 1 ELSE 0 END) AS train_completed,
         SUM(CASE WHEN phase = 'testing' THEN 1 ELSE 0 END) AS test_total,
         SUM(CASE WHEN phase = 'testing' AND status IN ('completed', 'error') THEN 1 ELSE 0 END) AS test_completed
       FROM training_cases WHERE run_id = ?
@@ -669,7 +796,10 @@ export class TrainingStore {
       id: row.id,
       name: row.name,
       status: row.status,
-      config: parseJson<TrainingConfig>(row.config_json, {} as TrainingConfig),
+      config: {
+        ...TRAINING_CONFIG_DEFAULTS,
+        ...parseJson<TrainingConfig>(row.config_json, {} as TrainingConfig),
+      },
       progress: {
         training: { total: Number(counts.train_total ?? 0), completed: Number(counts.train_completed ?? 0) },
         testing: { total: Number(counts.test_total ?? 0), completed: Number(counts.test_completed ?? 0) },

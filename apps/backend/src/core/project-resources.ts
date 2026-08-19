@@ -29,7 +29,11 @@ export interface SystemVariablesResource {
   variables: SystemVariableDefinition[]
 }
 
-export type SystemVariableChange = {
+type SystemVariableChangeExpectation = {
+  expected_value_sha256?: string | null
+}
+
+export type SystemVariableChange = ({
   op: 'upsert'
   key: string
   type?: SystemPromptVariableType
@@ -49,7 +53,7 @@ export type SystemVariableChange = {
 } | {
   op: 'remove'
   key: string
-}
+}) & SystemVariableChangeExpectation
 
 export interface SystemVariableDiff {
   op: 'add' | 'replace' | 'remove'
@@ -131,6 +135,10 @@ function systemVariablesRevision(resource: SystemVariablesResource): string {
   const persisted = persistedSystemVariables(resource)
   const value = persisted.variables.map(({ source: _source, ...variable }) => variable)
   return createHash('sha256').update(JSON.stringify({ version: 1, variables: value })).digest('hex')
+}
+
+export function systemVariableValueHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
 }
 
 export class ProjectResources {
@@ -325,6 +333,24 @@ export class ProjectResources {
         }
         const existing = after.get(change.key)
         if (existing?.readonly) throw new Error(`system variable is read-only: ${change.key}`)
+        if (change.expected_value_sha256 !== undefined) {
+          const expected = change.expected_value_sha256
+          if (expected === null) {
+            if (existing) {
+              throw new Error(`system variable already exists but absence was expected: ${change.key}`)
+            }
+          } else {
+            if (!/^[a-f0-9]{64}$/.test(expected)) {
+              throw new Error(`system variable expected_value_sha256 must be a lowercase SHA-256: ${change.key}`)
+            }
+            if (!existing) {
+              throw new Error(`system variable was not found but an existing value was expected: ${change.key}`)
+            }
+            if (systemVariableValueHash(existing.value) !== expected) {
+              throw new Error(`system variable value changed since it was read: ${change.key}`)
+            }
+          }
+        }
         if (change.op === 'remove') {
           if (!existing) throw new Error(`system variable was not found: ${change.key}`)
           after.delete(change.key)
@@ -410,6 +436,25 @@ export class ProjectResources {
         if (variable.scope !== 'project') {
           throw new Error(`system variable is session-scoped: ${update.key}`)
         }
+        variable.value = update.value
+      }
+      const resource = { version: 1 as const, variables: [...byKey.values()] }
+      resolveSystemPromptVariables(resource.variables)
+      this.writeSystemVariablesFile(resource)
+      return resource
+    })
+  }
+
+  updateExperimentSystemVariables(
+    updates: readonly { key: string; value: string }[],
+  ): Promise<SystemVariablesResource> {
+    return enqueueProjectWrite(this.projectDir, () => {
+      const current = this.readProjectSystemVariables()
+      const byKey = new Map(current.variables.map((variable) => [variable.key, variable]))
+      for (const update of updates) {
+        const variable = byKey.get(update.key)
+        if (!variable) throw new Error(`system variable was not found: ${update.key}`)
+        if (variable.readonly) throw new Error(`system variable is read-only: ${update.key}`)
         variable.value = update.value
       }
       const resource = { version: 1 as const, variables: [...byKey.values()] }

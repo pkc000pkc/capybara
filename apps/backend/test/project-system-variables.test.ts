@@ -5,7 +5,7 @@ import path from 'node:path'
 import { test } from 'node:test'
 
 import { initializeProjectDirectory, installSystemProjectResources } from '#core/project-initializer'
-import { ProjectResources } from '#core/project-resources'
+import { ProjectResources, systemVariableValueHash } from '#core/project-resources'
 import { RuntimeLoop, type RuntimeLlm } from '#core/runtime-loop'
 import type { ClientCommand } from '#protocol/runtime-protocol'
 import type { LlmChatRequest } from '#util/llm'
@@ -297,6 +297,16 @@ test('system variable patches are sequential, preserve metadata, and reject inva
       },
     )
 
+    await assert.rejects(
+      resources.applySystemVariableChanges(applied.revision, [{
+        op: 'patch',
+        key: 'run_progress',
+        expected_value_sha256: systemVariableValueHash('committed=5\nnext=6\nstatus=idle'),
+        edits: [{ old_text: 'status=committed', new_text: 'status=complete' }],
+      }]),
+      /value changed since it was read/,
+    )
+
     const beforeInvalid = fs.readFileSync(resources.systemVariablesFile, 'utf8')
     await assert.rejects(
       resources.applySystemVariableChanges(applied.revision, [{
@@ -356,6 +366,15 @@ test('system variable patches are sequential, preserve metadata, and reject inva
 test('model tools author variables and inject dynamic context into the next model turn', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-variable-authoring-'))
   initializeProjectDirectory(projectDir)
+  const authoringResources = new ProjectResources(projectDir)
+  const initialAuthoringState = authoringResources.readSystemVariablesState()
+  await authoringResources.applySystemVariableChanges(initialAuthoringState.revision, [{
+    op: 'upsert',
+    key: 'dynamic_context',
+    type: 'prompt_template',
+    value: 'Base context.',
+    expected_value_sha256: systemVariableValueHash(''),
+  }])
   const requests: LlmChatRequest[] = []
   const llm: RuntimeLlm = {
     chat: async (request) => {
@@ -369,7 +388,10 @@ test('model tools author variables and inject dynamic context into the next mode
         const applySchema = JSON.stringify(applyTool.parameters)
         assert.ok(applySchema.includes('oneOf'))
         assert.ok(applySchema.includes('patch'))
+        assert.ok(applySchema.includes('expected_value_sha256'))
         assert.match(request.messages[0]?.content ?? '', /System variable authoring protocol/)
+        assert.match(request.messages[0]?.content ?? '', /Persistent declarative context/)
+        assert.match(request.messages[0]?.content ?? '', /Recurring lifecycle behavior/)
         return {
           provider: 'custom',
           model: 'variable-model',
@@ -390,7 +412,7 @@ test('model tools author variables and inject dynamic context into the next mode
         const readResult = JSON.parse(readMessage?.content ?? '{}') as {
           result?: {
             revision?: string
-            variables?: Array<{ key: string }>
+            variables?: Array<{ key: string; value_sha256?: string }>
             selected_keys?: string[]
             missing_keys?: string[]
             dynamic_context?: string
@@ -401,6 +423,10 @@ test('model tools author variables and inject dynamic context into the next mode
         assert.deepEqual(readResult.result?.selected_keys, ['dynamic_context', 'missing_context'])
         assert.deepEqual(readResult.result?.missing_keys, ['missing_context'])
         assert.equal(typeof readResult.result?.dynamic_context, 'string')
+        const dynamicContextHash = readResult.result?.variables?.find(
+          (variable) => variable.key === 'dynamic_context',
+        )?.value_sha256
+        assert.match(dynamicContextHash ?? '', /^[a-f0-9]{64}$/)
         return {
           provider: 'custom',
           model: 'variable-model',
@@ -417,13 +443,16 @@ test('model tools author variables and inject dynamic context into the next mode
                   type: 'text',
                   label: 'Customer name',
                   value: 'Ada',
+                  expected_value_sha256: null,
                 },
                 {
-                  op: 'upsert',
+                  op: 'patch',
                   key: 'dynamic_context',
-                  type: 'prompt_template',
-                  label: 'Dynamic context',
-                  value: 'Customer name: {{ builtin.prompts.customer_name }}',
+                  expected_value_sha256: dynamicContextHash,
+                  edits: [{
+                    old_text: 'Base context.',
+                    new_text: 'Base context.\nCustomer name: {{ builtin.prompts.customer_name }}',
+                  }],
                 },
               ],
             },
@@ -432,7 +461,10 @@ test('model tools author variables and inject dynamic context into the next mode
           raw: {},
         }
       }
-      assert.match(request.messages[0]?.content ?? '', /Active dynamic context:\s*Customer name: Ada/)
+      assert.match(
+        request.messages[0]?.content ?? '',
+        /Active dynamic context:\s*Base context\.\s*Customer name: Ada/,
+      )
       const applyMessage = request.messages.find(
         (message) => message.role === 'tool' && message.name === 'apply_system_variable_changes',
       )
@@ -441,6 +473,10 @@ test('model tools author variables and inject dynamic context into the next mode
           context_updated?: boolean
           diff?: Array<{
             key: string
+            change?: {
+              mode?: string
+              edits?: Array<{ old_text?: string; new_text?: string }>
+            }
             before?: { value_length?: number; value_sha256?: string; value?: string }
             after?: { value_length?: number; value_sha256?: string; value?: string }
           }>
@@ -451,6 +487,28 @@ test('model tools author variables and inject dynamic context into the next mode
         'customer_name',
         'dynamic_context',
       ])
+      assert.deepEqual(
+        applyResult.result?.diff?.map((item) => [item.key, item.change?.mode]),
+        [
+          ['customer_name', 'upsert'],
+          ['dynamic_context', 'patch'],
+        ],
+      )
+      const dynamicContextDiff = applyResult.result?.diff?.find(
+        (item) => item.key === 'dynamic_context',
+      )
+      assert.deepEqual(dynamicContextDiff?.change?.edits, [{
+        old_text: 'Base context.',
+        new_text: 'Base context.\nCustomer name: {{ builtin.prompts.customer_name }}',
+      }])
+      assert.equal(
+        dynamicContextDiff?.before?.value_sha256,
+        systemVariableValueHash('Base context.'),
+      )
+      assert.equal(
+        dynamicContextDiff?.after?.value_sha256,
+        systemVariableValueHash('Base context.\nCustomer name: {{ builtin.prompts.customer_name }}'),
+      )
       for (const item of applyResult.result?.diff ?? []) {
         assert.equal(item.before?.value, undefined)
         assert.equal(item.after?.value, undefined)
@@ -487,7 +545,7 @@ test('model tools author variables and inject dynamic context into the next mode
     assert.equal(variables.get('dynamic_context')?.type, 'prompt_template')
     assert.equal(
       loop.getSnapshot(0).variables.value.builtin.prompts.dynamic_context,
-      'Customer name: Ada',
+      'Base context.\nCustomer name: Ada',
     )
   } finally {
     loop.close()
@@ -514,7 +572,7 @@ test('system resource installation upgrades only built-in variable definitions',
           return { ...variable, value: 'Custom project agent identity.' }
         }
         return variable
-      }),
+      }).filter((variable) => variable.key !== 'system_variable_apply_tool_description'),
     }))
 
     const installed = installSystemProjectResources(projectDir)
@@ -525,6 +583,10 @@ test('system resource installation upgrades only built-in variable definitions',
     assert.equal(
       upgraded.get('system_variable_read_tool_description'),
       'Read selected system prompt variables and the current revision before proposing a change.',
+    )
+    assert.equal(
+      upgraded.get('system_variable_apply_tool_description'),
+      'Atomically add, patch, replace, or remove system prompt variables using the latest revision and return the validated diff.',
     )
     assert.equal(upgraded.get('agent_identity'), 'Custom project agent identity.')
   } finally {
@@ -607,12 +669,11 @@ test('runtime resolves and refreshes nested prompt_template values with transiti
       'level1(level2(leaf-value))',
     )
     assert.equal(snapshot.renderResult?.messages[0]?.content, 'level1(level2(leaf-value))')
-    assert.equal(
-      snapshot.renderResult?.diagnostics.some(
-        (diagnostic) => diagnostic.code === 'MISSING_SYSTEM_VARIABLE_REFERENCE',
-      ),
-      false,
-    )
+    const missingCustomReferences = snapshot.renderResult?.diagnostics.filter((diagnostic) => (
+      diagnostic.code === 'MISSING_SYSTEM_VARIABLE_REFERENCE'
+      && /template_parameter|template_level_1|template_level_2/.test(diagnostic.message)
+    ))
+    assert.deepEqual(missingCustomReferences, [])
     await new ProjectResources(projectDir).updateSharedSystemVariables([
       { key: 'template_parameter', value: 'updated-leaf' },
     ])

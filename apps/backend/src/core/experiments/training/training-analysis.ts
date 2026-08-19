@@ -39,7 +39,7 @@ export function aggregateTrainingCases(items: TrainingCase[]): TrainingCaseMetri
   }, 0)
   return {
     total: items.length,
-    completed: items.filter((item) => ['completed', 'error'].includes(item.status)).length,
+    completed: items.filter((item) => ['completed', 'unresolved', 'error'].includes(item.status)).length,
     evaluated: evaluated.length,
     passed,
     failed: evaluated.length - passed,

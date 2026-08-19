@@ -561,6 +561,24 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
   })
+  app.get('/api/experiments/training/:id/correction-attempts', async (request, reply) => {
+    try {
+      const query = request.query as { sourceCaseId?: unknown }
+      if (query.sourceCaseId !== undefined && typeof query.sourceCaseId !== 'string') {
+        throw new Error('sourceCaseId must be a string')
+      }
+      return {
+        items: getTrainingManager(requestProject(request).path).correctionAttempts(
+          (request.params as { id: string }).id,
+          typeof query.sourceCaseId === 'string' && query.sourceCaseId.trim()
+            ? query.sourceCaseId.trim()
+            : undefined,
+        ),
+      }
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
   app.get('/api/experiments/training/:id/variables', async (request, reply) => {
     try {
       return getTrainingManager(requestProject(request).path).variables((request.params as { id: string }).id)

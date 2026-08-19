@@ -37,6 +37,7 @@ export type TrainingCaseStatus =
   | 'replaying'
   | 'waiting_review'
   | 'completed'
+  | 'unresolved'
   | 'error'
 
 export type ExperienceStatus =
@@ -67,6 +68,10 @@ export interface TrainingConfig {
   evaluationOnly?: boolean
   snapshotSourceRunId?: string
   correctionHook?: TrainingHookBinding
+  maxCorrectionAttempts: number
+  maxCorrectionTokens: number
+  maxCorrectionWallTimeMs: number
+  maxReplayRevisions: number
   experienceExtractorHook: TrainingHookBinding
   timeoutMs: number
   concurrency: 1
@@ -84,6 +89,10 @@ export interface CreateTrainingInput {
   variableSource?: unknown
   variableSourceRunId?: unknown
   correctionHook?: unknown
+  maxCorrectionAttempts?: unknown
+  maxCorrectionTokens?: unknown
+  maxCorrectionWallTimeMs?: unknown
+  maxReplayRevisions?: unknown
   experienceExtractorHook?: unknown
   timeoutMs?: unknown
 }
@@ -177,6 +186,41 @@ export interface ExperienceCandidate {
   replayRationale?: string
   createdAt: string
   updatedAt: string
+}
+
+export type CorrectionTerminalReason =
+  | 'succeeded'
+  | 'max_attempts'
+  | 'max_tokens'
+  | 'max_wall_time'
+  | 'hook_error'
+  | 'execution_error'
+  | 'evaluation_error'
+
+export interface TrainingCorrectionAttempt {
+  id: string
+  runId: string
+  sourceCaseId: string
+  ordinal: number
+  hookId: string
+  summary: string
+  strategy: string
+  variableOverrides: Record<string, string>
+  experimentRunId?: string
+  experimentCaseId?: string
+  actualAnswer: string
+  actualTools: string[]
+  toolCalls: ExperimentToolCall[]
+  usage: ExperimentUsage
+  hookUsage: ExperimentUsage
+  score: number
+  passed: boolean
+  rationale: string
+  evaluation?: ExperimentCaseDetail['evaluation']
+  failure?: ExperimentFailure
+  terminalReason?: CorrectionTerminalReason
+  startedAt: string
+  completedAt: string
 }
 
 export interface VariableWriteAudit {
@@ -291,6 +335,7 @@ export interface TrainingLineageReport {
 
 export interface TrainingRunAnalysis extends TrainingRunAnalysisSummary {
   cases: TrainingCaseView[]
+  correctionAttempts: TrainingCorrectionAttempt[]
   experienceCandidates: ExperienceCandidate[]
   variableItems: TrainingVariableView[]
   snapshot?: TestSnapshot

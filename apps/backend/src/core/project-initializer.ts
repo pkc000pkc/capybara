@@ -262,6 +262,12 @@ export function installSystemProjectResources(input: string): string[] {
     if (parsed.version === 1 && Array.isArray(parsed.variables)) {
       const builtinVariables = INITIAL_SYSTEM_VARIABLES.variables.filter((variable) => variable.readonly)
       const builtinByKey = new Map(builtinVariables.map((variable) => [variable.key, variable]))
+      const existingKeys = new Set(parsed.variables.flatMap((value) => (
+        typeof value === 'object' && value !== null && !Array.isArray(value)
+          && typeof (value as Record<string, unknown>).key === 'string'
+          ? [String((value as Record<string, unknown>).key)]
+          : []
+      )))
       let changed = false
       const variables = parsed.variables.map((value) => {
         if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
@@ -273,6 +279,11 @@ export function installSystemProjectResources(input: string): string[] {
         if (JSON.stringify(next) !== JSON.stringify(value)) changed = true
         return next
       })
+      for (const builtin of builtinVariables) {
+        if (existingKeys.has(builtin.key)) continue
+        variables.push(builtin)
+        changed = true
+      }
       if (changed) {
         fs.writeFileSync(systemVariablesFile, `${JSON.stringify({ version: 1, variables }, null, 2)}\n`)
         installed.push('.capybara/system-variables.json')
