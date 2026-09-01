@@ -2,20 +2,23 @@
 
 import {
   AlertCircle,
+  Activity,
   ArchiveX,
   Check,
   ChevronDown,
   Database,
-  Eye,
-  EyeOff,
   FolderPlus,
   FolderOpen,
   FolderX,
+  Braces,
+  HardDrive,
   PackageCheck,
   PackagePlus,
   PencilLine,
   Plus,
   RefreshCw,
+  Radio,
+  ShieldCheck,
   Square,
   Trash2,
   X,
@@ -29,17 +32,30 @@ import ExperimentsWorkspace from "./components/experiments-workspace";
 import MarkdownContent from "./components/markdown-content";
 import {
   PanelHeader,
+  SearchField,
   WorkspaceTabs,
   type WorkspaceTab,
 } from "./components/workspace-ui";
 import ResourcesWorkspace, {
   type ResourceSection,
 } from "./components/resources-workspace";
+import {
+  matchesVariableFilter,
+  RuntimePluginsSection,
+  VariableNode,
+  VariableOwnerBadge,
+  type RuntimeVariableOwnerFilter,
+} from "./components/runtime-variable-tree";
 import { I18nProvider, useI18n, type Locale } from "./i18n";
 import {
   type RuntimeVariables,
   type RuntimeVariablePath,
 } from "./runtime-context";
+import {
+  buildRuntimePluginViews,
+  resolveRuntimeVariableOwner,
+  type RuntimeVariableOwner,
+} from "./runtime-plugin-view";
 import { RuntimeProvider, useRuntime } from "./runtime-websocket";
 import {
   UserPreferencesProvider,
@@ -48,7 +64,8 @@ import {
 } from "./user-preferences";
 import type {
   JsonValue,
-  RuntimeObservationsState,
+  RuntimeVariablePage,
+  RuntimePluginsState,
   RuntimeSkillConfirmation,
   RuntimeStatusState,
 } from "./runtime-protocol";
@@ -69,8 +86,15 @@ const CONTEXT_DEFAULT_WIDTH = 320;
 const PROGRAM_DEFAULT_WIDTH = 380;
 const VARIABLES_DEFAULT_HEIGHT = 340;
 const APP_VIEWS = ["runtime", "resources", "experiments", "recall"] as const;
+type InspectorTab = "variables" | "plugins" | "research" | "status";
 
 type AppView = (typeof APP_VIEWS)[number];
+
+function formatStorageBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
 
 function useThemeMode() {
   const { color_theme: mode, setColorTheme: selectMode } = useUserPreferences();
@@ -182,7 +206,7 @@ function ProjectSessionSettings() {
         </div>
         <button
           className="flex h-7 items-center gap-1.5 px-2 text-[10px] font-semibold text-[#843d3d] outline-none hover:bg-[#f4e5e5] focus-visible:ring-2 focus-visible:ring-[#9b4141] disabled:cursor-not-allowed disabled:text-[#a9b9b9]"
-          disabled={!runtime.sessionStorage?.sessionCount}
+          disabled={runtime.runnerMode || !runtime.sessionStorage?.sessionCount}
           onClick={clearSessions}
           type="button"
         >
@@ -302,7 +326,7 @@ function ProjectSelector() {
       <button
         aria-expanded={open}
         className="flex h-7 max-w-[240px] items-center gap-1.5 px-1.5 text-left text-[11px] font-semibold text-[#29484c] outline-none hover:bg-[#e8f0ef] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-not-allowed disabled:text-[#9aa9ab]"
-        disabled={busy}
+        disabled={busy || runtime.runnerMode}
         onClick={openSelector}
         title={runtime.project?.path ?? t("project.select")}
         type="button"
@@ -397,7 +421,7 @@ function ConversationPanel({
   const submitDraft = () => {
     const content = draft.trim();
 
-    if (!content || connection !== "connected") return;
+    if (!content || connection !== "connected" || runtime.runnerMode) return;
 
     sendChatMessage(content);
     setDraft("");
@@ -484,7 +508,7 @@ function ConversationPanel({
                 <select
                   aria-label={t("sessions.select")}
                   className="h-6 max-w-44 border border-[#c5d4d3] bg-white px-1.5 text-[10px] text-[#35555a] outline-none focus:border-[#0c766e] disabled:text-[#9aa9ab]"
-                  disabled={requestSelectionLocked || !runtime.activeSession}
+                  disabled={runtime.runnerMode || requestSelectionLocked || !runtime.activeSession}
                   onChange={(event) => runtime.selectSession(event.target.value)}
                   value={runtime.activeSession?.id ?? ""}
                 >
@@ -495,7 +519,7 @@ function ConversationPanel({
                 <button
                   aria-label={t("sessions.rename")}
                   className="flex h-6 w-6 items-center justify-center text-[#45666a] outline-none hover:bg-[#dce8e6] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-not-allowed disabled:text-[#a9b9b9]"
-                  disabled={requestSelectionLocked || !runtime.activeSession}
+                  disabled={runtime.runnerMode || requestSelectionLocked || !runtime.activeSession}
                   onClick={startRenamingSession}
                   title={t("sessions.rename")}
                   type="button"
@@ -507,7 +531,7 @@ function ConversationPanel({
             <button
               aria-label={t("sessions.new")}
               className="flex h-6 w-6 items-center justify-center text-[#45666a] outline-none hover:bg-[#dce8e6] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-not-allowed disabled:text-[#a9b9b9]"
-              disabled={requestSelectionLocked || !runtime.project}
+              disabled={runtime.runnerMode || requestSelectionLocked || !runtime.project}
               onClick={() => void runtime.createSession()}
               title={t("sessions.new")}
               type="button"
@@ -628,12 +652,12 @@ function ConversationPanel({
                         {modelRetry.phase === "waiting"
                           ? t("chat.retryWaiting", {
                               attempt: modelRetry.attempt,
-                              maxAttempts: modelRetry.maxAttempts,
+                              maxAttempts: modelRetry.maxAttempts === -1 ? "∞" : modelRetry.maxAttempts,
                               delay: (modelRetry.delayMs / 1_000).toFixed(1),
                             })
                           : t("chat.retryAttempting", {
                               attempt: modelRetry.attempt,
-                              maxAttempts: modelRetry.maxAttempts,
+                              maxAttempts: modelRetry.maxAttempts === -1 ? "∞" : modelRetry.maxAttempts,
                             })}
                       </p>
                       <p className="break-words font-mono text-[9px] leading-4 text-[#80602e]">
@@ -688,7 +712,8 @@ function ConversationPanel({
                 {message.status === "streaming" && (
                   <button
                     aria-label={t("chat.stop")}
-                    className="mt-3 inline-flex h-7 w-7 items-center justify-center text-[#9b4141] outline-none hover:bg-[#f4e5e5] focus-visible:ring-2 focus-visible:ring-[#0c766e]"
+                    className="mt-3 inline-flex h-7 w-7 items-center justify-center text-[#9b4141] outline-none hover:bg-[#f4e5e5] focus-visible:ring-2 focus-visible:ring-[#0c766e] disabled:cursor-not-allowed disabled:text-[#a9b9b9]"
+                    disabled={runtime.runnerMode}
                     onClick={() => cancelResponse(message.id)}
                     title={t("chat.stop")}
                     type="button"
@@ -723,12 +748,13 @@ function ConversationPanel({
             onChange={setDraft}
             onSubmit={submitDraft}
             placeholder={t("chat.placeholder")}
+            readOnly={runtime.runnerMode}
             statusBar={false}
             value={draft}
           />
           <button
             className="h-10 shrink-0 rounded-md bg-[#0c766e] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#095f59] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0c766e] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-[#a9b9b9]"
-            disabled={!draft.trim() || connection !== "connected"}
+            disabled={runtime.runnerMode || !draft.trim() || connection !== "connected"}
             type="submit"
           >
             {t("chat.send")}
@@ -843,7 +869,7 @@ function SkillConfirmationCard({
             <div className="mt-3 flex items-center gap-2">
               <button
                 className="inline-flex h-8 items-center gap-1.5 bg-[#0c766e] px-3 text-[10px] font-semibold text-white outline-none hover:bg-[#095f59] focus-visible:ring-2 focus-visible:ring-[#0c766e] focus-visible:ring-offset-2 disabled:cursor-wait disabled:bg-[#8fa9a6]"
-                disabled={!pending || runtime.connection !== "connected"}
+                disabled={runtime.runnerMode || !pending || runtime.connection !== "connected"}
                 onClick={() => runtime.confirmSkillOperation(confirmation.id)}
                 type="button"
               >
@@ -856,7 +882,7 @@ function SkillConfirmationCard({
               </button>
               <button
                 className="h-8 px-3 text-[10px] font-semibold text-[#5b7074] outline-none hover:bg-white focus-visible:ring-2 focus-visible:ring-[#0c766e] disabled:text-[#9facad]"
-                disabled={!pending || runtime.connection !== "connected"}
+                disabled={runtime.runnerMode || !pending || runtime.connection !== "connected"}
                 onClick={() => runtime.cancelSkillOperation(confirmation.id)}
                 type="button"
               >
@@ -870,166 +896,88 @@ function SkillConfirmationCard({
   );
 }
 
-type VariableValueProps = {
-  name: string;
-  type: string;
-  value: string;
-  path: RuntimeVariablePath;
-  kind?: "string" | "json";
-  depth?: number;
-  onInspect: (
-    path: RuntimeVariablePath,
-    name: string,
-    value: string,
-    kind: "string" | "json",
-  ) => void;
-};
-
-function valueType(value: JsonValue): string {
-  if (value === null) return "null";
-  if (Array.isArray(value)) return "Array";
-  if (typeof value === "object") return "Object";
-  return typeof value;
-}
-
-function VariableNode({
-  name,
-  value,
-  path,
-  depth,
-  onInspect,
-}: {
-  name: string;
-  value: JsonValue;
-  path: RuntimeVariablePath;
-  depth: number;
-  onInspect: VariableValueProps["onInspect"];
-}) {
-  if (value !== null && typeof value === "object") {
-    const entries = Object.entries(value);
-    return (
-      <details open={depth < 2}>
-        <summary
-          className="flex min-h-7 cursor-pointer select-none items-center gap-2 border-b border-[#dfe7e7] pr-2 text-xs text-[#28454a] outline-none hover:bg-[#e3efed] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e]"
-          style={{ paddingLeft: `${12 + depth * 16}px` }}
-        >
-          <span>{name}</span>
-          <span className="truncate font-mono text-[11px] text-[#72868a]">
-            {valueType(value)} {Array.isArray(value) ? `[${entries.length}]` : `{${entries.length}}`}
-          </span>
-        </summary>
-        {entries.map(([key, child]) => (
-          <VariableNode
-            depth={depth + 1}
-            key={key}
-            name={Array.isArray(value) ? `[${key}]` : key}
-            onInspect={onInspect}
-            path={[...path, key]}
-            value={child}
-          />
-        ))}
-      </details>
-    );
-  }
-
-  return (
-    <VariableValue
-      depth={depth}
-      kind={typeof value === "string" ? "string" : "json"}
-      name={name}
-      onInspect={onInspect}
-      path={path}
-      type={valueType(value)}
-      value={typeof value === "string" ? value : JSON.stringify(value)}
-    />
-  );
-}
-
-function VariableValue({
-  name,
-  type,
-  value,
-  path,
-  kind = "string",
-  depth = 0,
-  onInspect,
-}: VariableValueProps) {
-  const { t } = useI18n();
-  return (
-    <div
-      className="grid min-h-7 grid-cols-[minmax(72px,auto)_1fr] items-center gap-2 border-b border-[#dfe7e7] pr-2 text-xs hover:bg-[#e3efed]"
-      style={{ paddingLeft: `${12 + depth * 16}px` }}
-    >
-      <span className="truncate text-[#28454a]">{name}</span>
-      <button
-        className="min-w-0 truncate text-left font-mono text-[11px] text-[#76531b] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e]"
-        onClick={() => onInspect(path, name, value, kind)}
-        title={t("inspector.viewValue", { name })}
-        type="button"
-      >
-        <span className="mr-1 text-[#72868a]">{type}</span>
-        {value}
-      </button>
-    </div>
-  );
-}
-
 function VariableStatusPanel({
-  artifactContents,
   canEditVariables,
   connection,
-  observations,
-  onGetArtifact,
+  plugins: runtimePlugins,
   runtimeVariables,
   runtimeStatus,
   onVariableChange,
 }: {
-  artifactContents: Record<string, JsonValue>;
   canEditVariables: boolean;
   connection: "connecting" | "connected" | "reconnecting" | "disconnected";
-  observations: RuntimeObservationsState;
-  onGetArtifact: (artifactId: string) => void;
+  plugins: RuntimePluginsState;
   runtimeVariables: RuntimeVariables;
   runtimeStatus: RuntimeStatusState;
   onVariableChange: (path: RuntimeVariablePath, value: unknown) => void;
 }) {
   const { t } = useI18n();
-  const [activeTab, setActiveTab] = useState<"variables" | "observations" | "status">(
-    "variables",
+  const runtime = useRuntime();
+  const runtimeArtifactContents = runtime.artifactContents;
+  const getRuntimeArtifact = runtime.getArtifact;
+  const [activeTab, setActiveTab] = useState<InspectorTab>(
+    runtime.runnerMode ? "research" : "variables",
   );
   const [detail, setDetail] = useState<{
     path: RuntimeVariablePath;
     name: string;
     value: string;
     kind: "string" | "json";
+    owner: RuntimeVariableOwner;
   } | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
-  const [showSystemVariables, setShowSystemVariables] = useState(true);
-  const [selectedObservationId, setSelectedObservationId] = useState<string | null>(null);
-  const selectedObservation = observations.items.find(
-    (item) => item.id === selectedObservationId,
+  const [detailPageNumber, setDetailPageNumber] = useState(1);
+  const [detailDirty, setDetailDirty] = useState(false);
+  const [variableQuery, setVariableQuery] = useState("");
+  const [ownerFilter, setOwnerFilter] = useState<RuntimeVariableOwnerFilter>("all");
+  const plugins = buildRuntimePluginViews(runtimePlugins);
+  const resolveOwner = (path: RuntimeVariablePath) =>
+    resolveRuntimeVariableOwner(path, runtimeVariables, runtimePlugins);
+  const ownerOptions = ["capybara-system", "project", ...plugins.map((plugin) => plugin.id)]
+    .filter((owner, index, owners) => owners.indexOf(owner) === index);
+  const visibleVariables = Object.entries(runtimeVariables).filter(([name, value]) =>
+    matchesVariableFilter(
+      name,
+      value,
+      [name],
+      variableQuery,
+      ownerFilter,
+      resolveOwner,
+    ),
   );
 
-  useEffect(() => {
-    const artifactId = selectedObservation?.resultArtifactId;
-    if (artifactId && !(artifactId in artifactContents)) onGetArtifact(artifactId);
-  }, [artifactContents, onGetArtifact, selectedObservation?.resultArtifactId]);
-
-  const selectTab = (tab: "variables" | "observations" | "status") => {
+  const selectTab = (tab: InspectorTab) => {
     setActiveTab(tab);
     setDetail(null);
-    setSelectedObservationId(null);
+    setDetailDirty(false);
   };
+
+  const variablePointer = (path: RuntimeVariablePath) => `/${path
+    .map((token) => token.replaceAll("~", "~0").replaceAll("/", "~1"))
+    .join("/")}`;
 
   const inspectValue = (
     path: RuntimeVariablePath,
     name: string,
     value: string,
     kind: "string" | "json",
+    owner: RuntimeVariableOwner,
   ) => {
-    setDetail({ path, name, value, kind });
+    setDetail({ path, name, value, kind, owner });
+    setDetailPageNumber(1);
+    setDetailDirty(false);
     setDetailError(null);
+    runtime.getVariablePage(variablePointer(path), 1, 2_000);
   };
+
+  const detailPointer = detail ? variablePointer(detail.path) : null;
+  const detailRevision = runtime.snapshot?.variables.revision;
+  const detailPageKey = detailPointer && detailRevision !== undefined
+    ? `${detailPointer}:${detailRevision}:${detailPageNumber}:2000`
+    : null;
+  const detailPage: RuntimeVariablePage | null = detailPageKey
+    ? runtime.variablePages[detailPageKey] ?? null
+    : null;
 
   const applyDetail = () => {
     const sharedVariable = detail !== null && detail.path[0] === "builtin" &&
@@ -1069,6 +1017,80 @@ function VariableStatusPanel({
       typeof detail.path[2] === "string" &&
       (runtimeVariables.builtin.shared_prompts ?? []).includes(detail.path[2])
     ));
+  const loopStatus = runtimeStatus.loopStatus ?? "idle";
+  const currentStep = runtime.snapshot?.timeline.steps[runtime.snapshot.run.currentStep];
+  const unknownToolOutcome = currentStep?.type === "tool" && currentStep.detail?.unknownOutcome === true;
+  const latestModelStep = [...(runtime.snapshot?.timeline.steps ?? [])]
+    .reverse()
+    .find((step) => step.type === "model" && typeof step.detail?.responseArtifactId === "string");
+  const latestModelResponseArtifactId = typeof latestModelStep?.detail?.responseArtifactId === "string"
+    && runtime.snapshot?.artifacts.items.some(
+      (artifact) => artifact.id === latestModelStep.detail?.responseArtifactId,
+    )
+    ? latestModelStep.detail.responseArtifactId
+    : undefined;
+
+  useEffect(() => {
+    if (
+      activeTab === "research" &&
+      latestModelResponseArtifactId &&
+      !(latestModelResponseArtifactId in runtimeArtifactContents)
+    ) {
+      getRuntimeArtifact(latestModelResponseArtifactId);
+    }
+  }, [activeTab, getRuntimeArtifact, latestModelResponseArtifactId, runtimeArtifactContents]);
+
+  const latestAssistantOutput = [...(runtime.snapshot?.conversation.messages ?? [])]
+    .reverse()
+    .filter((message) => message.role === "assistant")
+    .map((message) => (
+      message.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("\n")
+        .trim()
+      || message.thinkingSummary?.trim()
+      || ""
+    ))
+    .find(Boolean) ?? "";
+  const latestModelResponse = latestModelResponseArtifactId
+    ? runtime.artifactContents[latestModelResponseArtifactId]
+    : undefined;
+  const latestModelResponseObject = latestModelResponse
+    && typeof latestModelResponse === "object"
+    && !Array.isArray(latestModelResponse)
+    ? latestModelResponse
+    : undefined;
+  const latestModelResponseText = typeof latestModelResponseObject?.text === "string"
+    ? latestModelResponseObject.text.trim()
+    : "";
+  const latestModelToolCalls = Array.isArray(latestModelResponseObject?.toolCalls)
+    ? latestModelResponseObject.toolCalls
+    : [];
+  const latestModelArtifactOutput = latestModelResponseText || (latestModelToolCalls.length > 0
+    ? JSON.stringify({
+        model: latestModelResponseObject?.model ?? null,
+        finishReason: latestModelResponseObject?.finishReason ?? null,
+        toolCalls: latestModelToolCalls,
+        usage: latestModelResponseObject?.usage ?? null,
+      }, null, 2)
+    : "");
+  const latestModelOutput = latestModelArtifactOutput || latestAssistantOutput;
+  const cacheTokens = runtimeStatus.context.cacheTokens
+    ?? runtimeStatus.variableTokens?.find((variable) => variable.key === "cache")?.tokens
+    ?? 0;
+  const contextWindowTokens = runtimeStatus.context.contextWindowTokens
+    ?? runtimeStatus.context.maxTokens;
+  const cacheUtilization = contextWindowTokens > 0
+    ? cacheTokens / contextWindowTokens
+    : 0;
+  const cachePercentage = cacheUtilization === 0
+    ? "0%"
+    : cacheUtilization < 0.001
+      ? `${(cacheUtilization * 100).toFixed(2)}%`
+      : cacheUtilization < 0.01
+        ? `${(cacheUtilization * 100).toFixed(1)}%`
+        : `${Math.round(cacheUtilization * 100)}%`;
   const statusRows = [
     [
       t("status.runtime"),
@@ -1091,10 +1113,21 @@ function VariableStatusPanel({
       runtimeStatus.model === "ready" ? "bg-[#25806f]" : "bg-[#c58a27]",
     ],
     [
-      t("status.context"),
-      `${Math.round(runtimeStatus.context.utilization * 100)}%`,
+      t("status.loop"),
+      t(`debug.status.${loopStatus}` as Parameters<typeof t>[0]),
       t("status.now"),
-      "bg-[#c58a27]",
+      loopStatus === "completed"
+        ? "bg-[#25806f]"
+        : loopStatus === "running" ? "bg-[#c58a27]" : "bg-[#6b858b]",
+    ],
+    [
+      t("status.context"),
+      cachePercentage,
+      t("status.now"),
+      cacheUtilization >= 1
+        ? "bg-[#9b4141]"
+        : cacheUtilization >= 0.8 ? "bg-[#c58a27]" : "bg-[#25806f]",
+      t("status.cacheUsage", { used: cacheTokens, total: contextWindowTokens }),
     ],
     [
       t("status.messages"),
@@ -1120,7 +1153,7 @@ function VariableStatusPanel({
     ]),
   ];
 
-  const inspectorTabs: WorkspaceTab<"variables" | "observations" | "status">[] = [
+  const inspectorTabs: WorkspaceTab<InspectorTab>[] = [
     {
       controls: "variables-tabpanel",
       id: "variables",
@@ -1128,10 +1161,33 @@ function VariableStatusPanel({
       tabId: "variables-tab",
     },
     {
-      controls: "observations-tabpanel",
-      id: "observations",
-      label: t("inspector.observations"),
-      tabId: "observations-tab",
+      badge: (
+        <span className="min-w-4 bg-[#e4edeb] px-1 font-mono text-[8px] text-[#5d7478]">
+          {plugins.length}
+        </span>
+      ),
+      controls: "plugins-tabpanel",
+      id: "plugins",
+      label: t("inspector.plugins"),
+      tabId: "plugins-tab",
+    },
+    {
+      badge: runtime.runnerMonitor ? (
+        <span
+          aria-hidden="true"
+          className={`h-1.5 w-1.5 rounded-full ${
+            runtime.connection === "connected" && runtime.runnerMonitor.active
+              ? "bg-[#25806f]"
+              : runtime.connection === "connecting" || runtime.connection === "reconnecting"
+                ? "bg-[#c58a27]"
+                : "bg-[#9b4141]"
+          }`}
+        />
+      ) : undefined,
+      controls: "research-tabpanel",
+      id: "research",
+      label: t("inspector.research"),
+      tabId: "research-tab",
     },
     {
       controls: "status-tabpanel",
@@ -1149,27 +1205,6 @@ function VariableStatusPanel({
       id="variables-panel"
     >
       <WorkspaceTabs
-        actions={activeTab === "variables" ? (
-          <button
-            aria-label={showSystemVariables
-              ? t("inspector.hideSystemVariables")
-              : t("inspector.showSystemVariables")}
-            aria-pressed={showSystemVariables}
-            className="flex h-7 w-7 shrink-0 items-center justify-center text-[#63777b] outline-none hover:bg-[#dce8e6] hover:text-[#164f4a] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e]"
-            onClick={() => {
-              setShowSystemVariables((current) => !current);
-              setDetail(null);
-            }}
-            title={showSystemVariables
-              ? t("inspector.hideSystemVariables")
-              : t("inspector.showSystemVariables")}
-            type="button"
-          >
-            {showSystemVariables
-              ? <Eye aria-hidden="true" size={14} />
-              : <EyeOff aria-hidden="true" size={14} />}
-          </button>
-        ) : undefined}
         activeTab={activeTab}
         ariaLabel={t("inspector.view")}
         idPrefix="inspector"
@@ -1180,57 +1215,84 @@ function VariableStatusPanel({
       {activeTab === "variables" ? (
         <div
           aria-labelledby="variables-tab"
-          className="minimal-scrollbar min-h-0 overflow-auto py-1"
+          className="grid min-h-0 grid-rows-[36px_minmax(0,1fr)]"
           id="variables-tabpanel"
           role="tabpanel"
         >
-          <details open>
-            <summary className="flex min-h-7 cursor-pointer select-none items-center gap-1 px-2 text-xs font-semibold text-[#2a454a] outline-none hover:bg-[#dfecea] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e]">
-              {t("inspector.locals")}
-              <span className="font-mono text-[10px] font-normal text-[#73868a]">
-                Scope
-              </span>
-            </summary>
-            {Object.entries(runtimeVariables)
-              .filter(([name]) => showSystemVariables || name !== "builtin")
-              .map(([name, value]) => (
-              <VariableNode
-                depth={0}
-                key={name}
-                name={name}
-                onInspect={inspectValue}
-                path={[name]}
-                value={value}
-              />
-              ))}
-          </details>
+          <div className="grid grid-cols-[minmax(0,1fr)_116px] items-center gap-1.5 border-b border-[#cbd8d9] bg-[#edf3f2] px-1.5">
+            <SearchField
+              compact
+              label={t("inspector.filterVariables")}
+              onChange={(value) => {
+                setVariableQuery(value);
+                setDetail(null);
+              }}
+              value={variableQuery}
+            />
+            <label className="min-w-0">
+              <span className="sr-only">{t("inspector.filterSource")}</span>
+              <select
+                aria-label={t("inspector.filterSource")}
+                className="h-6 w-full border border-[#c6d4d4] bg-white px-1.5 text-[9px] text-[#486267] outline-none focus:border-[#0c766e] focus:ring-1 focus:ring-[#0c766e]"
+                onChange={(event) => {
+                  setOwnerFilter(event.target.value as RuntimeVariableOwnerFilter);
+                  setDetail(null);
+                }}
+                value={ownerFilter}
+              >
+                <option value="all">{t("inspector.allSources")}</option>
+                {ownerOptions.map((owner) => (
+                  <option key={owner} value={owner}>
+                    {owner === "system" || owner === "capybara-system"
+                      ? t("inspector.ownerSystem")
+                      : owner === "project"
+                        ? t("inspector.ownerProject")
+                        : owner}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="minimal-scrollbar min-h-0 overflow-auto py-1">
+            {visibleVariables.length > 0 ? (
+              <details open>
+                <summary className="flex min-h-7 cursor-pointer select-none items-center gap-1 px-2 text-xs font-semibold text-[#2a454a] outline-none hover:bg-[#dfecea] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e]">
+                  {t("inspector.locals")}
+                  <span className="font-mono text-[10px] font-normal text-[#73868a]">
+                    Scope
+                  </span>
+                </summary>
+                {visibleVariables.map(([name, value]) => (
+                  <VariableNode
+                    depth={0}
+                    key={name}
+                    name={name}
+                    onInspect={inspectValue}
+                    ownerFilter={ownerFilter}
+                    path={[name]}
+                    query={variableQuery}
+                    resolveOwner={resolveOwner}
+                    value={value}
+                  />
+                ))}
+              </details>
+            ) : (
+              <div className="flex min-h-20 items-center justify-center px-3 text-center text-[10px] text-[#718488]">
+                {t("inspector.noVariables")}
+              </div>
+            )}
+          </div>
         </div>
-      ) : activeTab === "observations" ? (
+      ) : activeTab === "plugins" ? (
         <div
-          aria-labelledby="observations-tab"
-          className="minimal-scrollbar min-h-0 overflow-auto py-1"
-          id="observations-tabpanel"
+          aria-labelledby="plugins-tab"
+          className="minimal-scrollbar min-h-0 overflow-auto"
+          id="plugins-tabpanel"
           role="tabpanel"
         >
-          {observations.items.length > 0 ? observations.items.map((observation) => (
-            <button
-              className="grid min-h-9 w-full grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-2 border-b border-[#dfe7e7] px-3 text-left outline-none hover:bg-[#e3efed] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e]"
-              data-observation={observation.toolName}
-              key={observation.id}
-              onClick={() => setSelectedObservationId(observation.id)}
-              type="button"
-            >
-              <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${observation.status === "failed" ? "bg-[#9b4141]" : observation.status === "running" ? "bg-[#c58a27]" : "bg-[#25806f]"}`} />
-              <span className="min-w-0 truncate font-mono text-[11px] text-[#29484c]">{observation.toolName}</span>
-              <span className="text-[9px] text-[#718488]">{observation.durationMs === undefined ? observation.status : `${observation.durationMs} ms`}</span>
-            </button>
-          )) : (
-            <div className="flex h-full min-h-20 items-center justify-center px-3 text-center text-[10px] text-[#718488]">
-              {t("inspector.noObservations")}
-            </div>
-          )}
+          <RuntimePluginsSection plugins={plugins} />
         </div>
-      ) : (
+      ) : activeTab === "status" ? (
         <div
           aria-labelledby="status-tab"
           className="minimal-scrollbar min-h-0 overflow-auto"
@@ -1252,15 +1314,22 @@ function VariableStatusPanel({
               </tr>
             </thead>
             <tbody className="text-[#2e494e]">
-              {statusRows.map(([name, status, updated, color], index) => (
-                <tr className="hover:bg-[#e3efed]" key={`${name}-${index}`}>
+              {statusRows.map(([name, status, updated, color, detail], index) => (
+                <tr
+                  className="hover:bg-[#e3efed]"
+                  data-status-item={name}
+                  key={`${name}-${index}`}
+                >
                   <td
                     className="break-words border-b border-[#dfe7e7] px-3 py-2.5 leading-5"
                     title={name}
                   >
                     {name}
                   </td>
-                  <td className="border-b border-[#dfe7e7] px-2 py-2.5">
+                  <td
+                    className="border-b border-[#dfe7e7] px-2 py-2.5"
+                    title={detail}
+                  >
                     <span className="flex items-center gap-1.5">
                       <span
                         aria-hidden="true"
@@ -1277,49 +1346,124 @@ function VariableStatusPanel({
             </tbody>
           </table>
         </div>
-      )}
-
-      {selectedObservation && (
-        <div className="absolute inset-x-0 bottom-0 z-10 grid h-[62%] grid-rows-[34px_1fr] border-t border-[#8eaaa9] bg-[#f8fbfa] shadow-[0_-8px_20px_rgba(23,45,51,0.08)]">
-          <div className="flex min-w-0 items-center justify-between border-b border-[#d8e2e2] px-3">
-            <span className="truncate font-mono text-xs font-semibold text-[#28484d]">
-              {selectedObservation.toolName} · {t("inspector.observationResult")}
-            </span>
-            <button
-              aria-label={t("inspector.close")}
-              className="flex h-7 w-7 items-center justify-center text-lg leading-none text-[#60777b] outline-none hover:bg-[#e1ecea] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e]"
-              onClick={() => setSelectedObservationId(null)}
-              type="button"
+      ) : (
+        <div
+          aria-labelledby="research-tab"
+          className="minimal-scrollbar min-h-0 overflow-auto bg-[#f3f7f6]"
+          id="research-tabpanel"
+          role="tabpanel"
+        >
+          {unknownToolOutcome && (
+            <div
+              className="flex items-start gap-2 border-b border-[#d7b56f] bg-[#fff5dd] px-3 py-2 text-[10px] leading-4 text-[#704f18]"
+              data-unknown-tool-outcome
+              role="alert"
             >
-              ×
-            </button>
+              <AlertCircle aria-hidden="true" className="mt-0.5 shrink-0" size={13} />
+              <span>{t("research.unknownOutcome")}</span>
+            </div>
+          )}
+          <div className="grid grid-cols-2 border-b border-[#cad8d8] bg-white sm:grid-cols-4">
+            {[
+              [Radio, t("research.connection"), t(`connection.${runtime.connection}` as Parameters<typeof t>[0])],
+              [Activity, t("research.run"), t(`debug.status.${runtime.snapshot?.run.status ?? "idle"}` as Parameters<typeof t>[0])],
+              [Braces, t("research.variableRevision"), String(runtime.snapshot?.variables.revision ?? 0)],
+              [HardDrive, t("research.snapshot"), formatStorageBytes(runtime.activeSession?.stateBytes ?? 0)],
+            ].map(([Icon, label, value]) => {
+              const MetricIcon = Icon as typeof Activity;
+              return (
+                <div className="min-w-0 border-r border-[#e0e8e8] px-3 py-2 last:border-r-0" key={String(label)}>
+                  <div className="flex items-center gap-1 text-[9px] font-semibold text-[#687e82]">
+                    <MetricIcon aria-hidden="true" size={11} />
+                    <span className="truncate">{String(label)}</span>
+                  </div>
+                  <p className="mt-1 truncate font-mono text-[11px] font-semibold text-[#29484c]" title={String(value)}>
+                    {String(value)}
+                  </p>
+                </div>
+              );
+            })}
           </div>
-          <CodeSurface
-            ariaLabel={t("inspector.observationResult")}
-            language="JSON"
-            lineNumbers
-            lineWrapping
-            readOnly
-            statusBar={false}
-            value={JSON.stringify({
-              arguments: selectedObservation.arguments,
-              result: selectedObservation.resultArtifactId
-                ? artifactContents[selectedObservation.resultArtifactId] ?? t("debug.loadingArtifact")
-                : selectedObservation.error ?? null,
-              consumedByRequestArtifactId: selectedObservation.consumedByRequestArtifactId ?? t("inspector.notConsumed"),
-              consumedByStepId: selectedObservation.consumedByStepId ?? null,
-            }, null, 2)}
-          />
+          <div className="grid min-w-0 lg:grid-cols-2">
+            <section className="min-w-0 border-b border-[#d8e2e2] lg:border-r" aria-label={t("research.ledger")}>
+              <div className="flex h-7 items-center gap-1.5 border-b border-[#d8e2e2] bg-[#eaf1f0] px-3 text-[10px] font-semibold text-[#3d5c61]">
+                <ShieldCheck aria-hidden="true" size={12} />
+                {t("research.ledger")}
+                <span className={`ml-auto h-1.5 w-1.5 rounded-full ${runtime.runnerMonitor?.ledger.valid ? "bg-[#25806f]" : "bg-[#9b4141]"}`} />
+              </div>
+              <dl className="grid grid-cols-[112px_minmax(0,1fr)] text-[10px]">
+                <dt className="border-b border-[#e2e9e9] px-3 py-2 text-[#6b8084]">{t("research.ledgerEvents")}</dt>
+                <dd className="border-b border-[#e2e9e9] px-3 py-2 font-mono text-[#29484c]">{runtime.runnerMonitor?.ledger.totalEvents ?? "--"}</dd>
+                <dt className="px-3 py-2 text-[#6b8084]">{t("research.ledgerHead")}</dt>
+                <dd className="truncate px-3 py-2 font-mono text-[#29484c]" title={runtime.runnerMonitor?.ledger.head}>{runtime.runnerMonitor?.ledger.head || "--"}</dd>
+              </dl>
+            </section>
+            <section className="min-w-0 border-b border-[#d8e2e2]" aria-label={t("research.persistence")}>
+              <div className="flex h-7 items-center border-b border-[#d8e2e2] bg-[#eaf1f0] px-3 text-[10px] font-semibold text-[#3d5c61]">
+                {t("research.persistence")}
+              </div>
+              <dl className="grid grid-cols-[112px_minmax(0,1fr)] text-[10px]">
+                <dt className="border-b border-[#e2e9e9] px-3 py-2 text-[#6b8084]">{t("research.lastSaved")}</dt>
+                <dd className="truncate border-b border-[#e2e9e9] px-3 py-2 font-mono text-[#29484c]">
+                  {runtime.runnerMonitor?.persistence.lastSavedAt
+                    ? new Date(runtime.runnerMonitor.persistence.lastSavedAt).toLocaleTimeString()
+                    : "--"}
+                </dd>
+                <dt className="border-b border-[#e2e9e9] px-3 py-2 text-[#6b8084]">{t("research.lastEvent")}</dt>
+                <dd className="truncate border-b border-[#e2e9e9] px-3 py-2 font-mono text-[#29484c]" data-runtime-last-event={runtime.lastEventAt ?? ""}>
+                  {runtime.lastEventAt
+                    ? new Date(runtime.lastEventAt).toLocaleTimeString()
+                    : "--"}
+                </dd>
+                <dt className="px-3 py-2 text-[#6b8084]">{t("status.value")}</dt>
+                <dd className={`truncate px-3 py-2 ${runtime.runnerMonitor?.persistence.lastError ? "text-[#9b4141]" : "text-[#25806f]"}`} title={runtime.runnerMonitor?.persistence.lastError}>
+                  {runtime.runnerMonitor?.persistence.lastError ?? t("research.valid")}
+                </dd>
+              </dl>
+            </section>
+          </div>
+          <section className="border-b border-[#d8e2e2]" aria-label={t("research.variableDiffs")}>
+            <div className="flex h-7 items-center border-b border-[#d8e2e2] bg-[#eaf1f0] px-3 text-[10px] font-semibold text-[#3d5c61]">
+              {t("research.variableDiffs")}
+              <span className="ml-auto font-mono text-[9px] font-normal text-[#71868a]">{runtime.recentVariableUpdates.length}</span>
+            </div>
+            {runtime.recentVariableUpdates.length === 0 ? (
+              <p className="px-3 py-3 text-[10px] text-[#718488]">{t("research.noPatches")}</p>
+            ) : runtime.recentVariableUpdates.slice(0, 8).map((update) => (
+              <div className="grid grid-cols-[62px_50px_minmax(0,1fr)] border-b border-[#e1e9e8] px-3 py-1.5 text-[9px] last:border-b-0" key={update.sequence}>
+                <span className="font-mono text-[#718488]">r{update.revision}</span>
+                <span className="font-semibold text-[#48666b]">{update.source}</span>
+                <span className="truncate font-mono text-[#29484c]" title={update.patch.map((item) => `${item.op} ${item.path}`).join(", ")}>
+                  {update.patch.map((item) => `${item.op} ${item.path}`).join(", ")}
+                </span>
+              </div>
+            ))}
+          </section>
+          <section aria-label={t("research.modelOutput")}>
+            <div className="flex h-7 items-center border-b border-[#d8e2e2] bg-[#eaf1f0] px-3 text-[10px] font-semibold text-[#3d5c61]">
+              {t("research.modelOutput")}
+              {runtime.snapshot?.run.modelRetry && (
+                <span className="ml-auto flex items-center gap-1 text-[#815d21]">
+                  <RefreshCw aria-hidden="true" className="motion-safe:animate-spin" size={10} />
+                  {runtime.snapshot.run.modelRetry.attempt}/{runtime.snapshot.run.modelRetry.maxAttempts === -1 ? "∞" : runtime.snapshot.run.modelRetry.maxAttempts}
+                </span>
+              )}
+            </div>
+            <pre className="max-h-32 whitespace-pre-wrap break-words px-3 py-2 font-mono text-[9px] leading-4 text-[#304e53]">
+              {latestModelOutput.slice(-2_000) || t("research.noOutput")}
+            </pre>
+          </section>
         </div>
       )}
 
       {detail && (
-        <div className="absolute inset-x-0 bottom-0 grid h-[56%] grid-rows-[34px_1fr_36px] border-t border-[#8eaaa9] bg-[#f8fbfa] shadow-[0_-8px_20px_rgba(23,45,51,0.08)]">
+        <div className="absolute inset-x-0 bottom-0 grid h-[56%] grid-rows-[34px_1fr_auto] border-t border-[#8eaaa9] bg-[#f8fbfa] shadow-[0_-8px_20px_rgba(23,45,51,0.08)]">
           <div className="flex min-w-0 items-center justify-between border-b border-[#d8e2e2] px-3">
             <span className="truncate font-mono text-xs font-semibold text-[#28484d]">
               {detail.name}
             </span>
             <div className="flex items-center gap-1.5">
+              <VariableOwnerBadge owner={detail.owner} />
               <span className="text-[9px] text-[#6d8185]">
                 {canEditVariables
                   ? detail.path[0] === "tools"
@@ -1343,17 +1487,62 @@ function VariableStatusPanel({
             language={detail.kind === "json" ? "JSON" : "Text"}
             lineNumbers={detail.kind === "json"}
             lineWrapping
-            onChange={(value) =>
-              canEditDetail &&
-              setDetail((current) =>
-                current ? { ...current, value } : current,
-              )
+            onChange={(value) => {
+              if (
+                !canEditDetail ||
+                (runtime.supportsPagination && detailPage?.totalPages !== 1)
+              ) return;
+              setDetail((current) => current ? { ...current, value } : current);
+              setDetailDirty(true);
+            }}
+            readOnly={
+              !canEditDetail ||
+              (runtime.supportsPagination && !detailPage) ||
+              Boolean(detailPage && detailPage.totalPages > 1)
             }
-            readOnly={!canEditDetail}
             statusBar={false}
-            value={detail.value}
+            value={detailDirty
+              ? detail.value
+              : detailPage?.value ?? (runtime.supportsPagination ? "" : detail.value)}
           />
-          <div className="flex items-center justify-between border-t border-[#d8e2e2] px-2.5">
+          <div className="border-t border-[#d8e2e2]">
+            {detailPage && detailPage.totalPages > 1 && (
+              <div className="flex h-8 items-center justify-center gap-2 border-b border-[#e3ebea] px-2.5">
+                <button
+                  aria-label={t("inspector.variablePreviousPage")}
+                  title={t("inspector.variablePreviousPage")}
+                  className="flex h-6 w-6 items-center justify-center text-[#536d72] outline-none hover:bg-[#e1ecea] disabled:text-[#aab7b8]"
+                  disabled={detailPage.page <= 1}
+                  onClick={() => {
+                    const page = detailPage.page - 1;
+                    setDetailPageNumber(page);
+                    runtime.getVariablePage(variablePointer(detail.path), page, detailPage.pageSize);
+                  }}
+                  type="button"
+                >
+                  <ChevronDown aria-hidden="true" className="rotate-90" size={13} />
+                </button>
+                <span className="font-mono text-[9px] text-[#5f7377]">{detailPage.page} / {detailPage.totalPages}</span>
+                <button
+                  aria-label={t("inspector.variableNextPage")}
+                  title={t("inspector.variableNextPage")}
+                  className="flex h-6 w-6 items-center justify-center text-[#536d72] outline-none hover:bg-[#e1ecea] disabled:text-[#aab7b8]"
+                  disabled={detailPage.page >= detailPage.totalPages}
+                  onClick={() => {
+                    const page = detailPage.page + 1;
+                    setDetailPageNumber(page);
+                    runtime.getVariablePage(variablePointer(detail.path), page, detailPage.pageSize);
+                  }}
+                  type="button"
+                >
+                  <ChevronDown aria-hidden="true" className="-rotate-90" size={13} />
+                </button>
+                <span className="text-[9px] text-[#718488]">
+                  {t("inspector.variableCharacters", { count: detailPage.totalCharacters.toLocaleString() })}
+                </span>
+              </div>
+            )}
+            <div className="flex min-h-9 items-center justify-between px-2.5 py-1">
             <span
               className={`truncate text-[10px] ${
                 detailError ? "text-[#843d3d]" : "text-[#6d8185]"
@@ -1366,12 +1555,17 @@ function VariableStatusPanel({
             </span>
             <button
               className="h-7 bg-[#0c766e] px-3 text-[11px] font-semibold text-white outline-none hover:bg-[#095f59] focus-visible:ring-2 focus-visible:ring-[#0c766e] disabled:cursor-not-allowed disabled:bg-[#a9b9b9]"
-              disabled={!canEditDetail}
+              disabled={
+                !canEditDetail ||
+                (runtime.supportsPagination && !detailPage) ||
+                Boolean(detailPage && detailPage.totalPages > 1)
+              }
               onClick={applyDetail}
               type="button"
             >
               {t("inspector.apply")}
             </button>
+            </div>
           </div>
         </div>
       )}
@@ -1405,10 +1599,6 @@ function HomeContent() {
     : requestSelection.sessionId === runtime.sessionId
       ? requestSelection.requestId ?? latestRequestId
       : latestRequestId;
-  const currentObservations = snapshot ? {
-    ...snapshot.observations,
-    items: snapshot.observations.items.filter((item) => item.runId === snapshot.run.runId),
-  } : undefined;
   const currentEffectiveContexts = snapshot
     ? snapshot.effectiveContexts.items.filter((item) => item.runId === snapshot.run.runId)
     : [];
@@ -1420,7 +1610,7 @@ function HomeContent() {
     return () => window.clearTimeout(timer);
   }, []);
 
-  const canEditVariables = snapshot?.run.variablesEditable ?? false;
+  const canEditVariables = !runtime.runnerMode && (snapshot?.run.variablesEditable ?? false);
   const connectionLabel =
     runtime.connection === "connected"
       ? t("connection.connected")
@@ -1459,7 +1649,7 @@ function HomeContent() {
   };
 
   const runPrimaryAction = () => {
-    if (!snapshot) return;
+    if (!snapshot || runtime.runnerMode) return;
     const { run } = snapshot;
     const terminal = ["idle", "ready", "completed", "failed", "cancelled"].includes(
       run.status,
@@ -1510,12 +1700,7 @@ function HomeContent() {
   };
 
   const openHarnessResources = () => {
-    setResourceSection("harnesses");
-    setActiveView("resources");
-  };
-
-  const openSkillResources = () => {
-    setResourceSection("skills");
+    setResourceSection("plugins");
     setActiveView("resources");
   };
 
@@ -1587,24 +1772,22 @@ function HomeContent() {
             }}
           >
           <ContextWorkspace
+            activeRunId={snapshot.run.runId}
             artifactContents={runtime.artifactContents}
+            artifactPages={runtime.artifactPages}
+            artifacts={snapshot.artifacts}
             contexts={snapshot.contexts}
             effectiveContexts={snapshot.effectiveContexts}
             error={runtime.error}
             harnesses={snapshot.harnesses}
-            skills={snapshot.skills}
             onAttachHarness={runtime.attachHarness}
-            onAttachSkill={runtime.attachSkill}
             onAttachTool={runtime.attachTool}
             onDetachHarness={runtime.detachHarness}
-            onDetachSkill={runtime.detachSkill}
             onDetachTool={runtime.detachTool}
             onGetArtifact={runtime.getArtifact}
+            onGetArtifactPage={runtime.getArtifactPage}
             onOpenHarnessResources={openHarnessResources}
-            onOpenSkillResources={openSkillResources}
             onOpenToolResources={openToolResources}
-            onLoadSkillReference={runtime.loadSkillReference}
-            onRunSkillScript={runtime.runSkillScript}
             onUpdateTemplate={runtime.updateTemplate}
             renderResult={snapshot.renderResult}
             selectedRequestId={visibleRequestId}
@@ -1654,12 +1837,10 @@ function HomeContent() {
             }}
           >
             <VariableStatusPanel
-              artifactContents={runtime.artifactContents}
               canEditVariables={canEditVariables}
               connection={runtime.connection}
-              observations={currentObservations ?? snapshot.observations}
-              onGetArtifact={runtime.getArtifact}
               onVariableChange={updateRuntimeVariable}
+              plugins={snapshot.plugins}
               runtimeStatus={snapshot.status}
               runtimeVariables={snapshot.variables.value}
             />
@@ -1694,6 +1875,7 @@ function HomeContent() {
               onRestoreCheckpoint={runtime.restoreCheckpoint}
               onRestorePrevious={runtime.restorePrevious}
               onUpsertBreakpoint={runtime.upsertBreakpoint}
+              readOnly={runtime.runnerMode}
               run={snapshot.run}
               timeline={snapshot.timeline.steps}
               workflows={snapshot.workflows ?? { revision: 0, items: [] }}

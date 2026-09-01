@@ -7,12 +7,12 @@ export function learningFixture(
   checkpoint: HookFixture['checkpoint'],
   training: HookTrainingContext,
   variables: SystemVariableDefinition[],
-  variableValues: Record<string, string> = {},
+  variableValues: Record<string, import('#core/system-prompt-templates').SystemPromptVariableValue> = {},
 ): HookFixture {
-  const prompts = resolveSystemPromptVariables(variables.map((variable) => ({
+  const resolved = resolveSystemPromptVariables(variables.map((variable) => ({
     ...variable,
     value: variableValues[variable.key] ?? variable.value,
-  }))).prompts
+  })))
   const runtimeVariables = {
     builtin: {
       project_path: '',
@@ -21,10 +21,19 @@ export function learningFixture(
       main_template: 'main.j2',
       initialized_at: new Date().toISOString(),
       system_variables_revision: '',
-      prompts,
+      prompts: resolved.prompts,
+      variables: resolved.values,
       shared_prompts: variables.filter((item) => item.scope === 'project').map((item) => item.key),
       missing_prompts: [],
       sys_message: [],
+      cache: {
+        version: 1,
+        summary: '',
+        messages: [],
+        loop: { run_id: training.runId, iteration: 1, tool_round: 0, continuation_round: 0 },
+        compression_count: 0,
+        compressed_at: '',
+      },
     },
     task: { title: training.case.question },
     agent: { name: 'training' },

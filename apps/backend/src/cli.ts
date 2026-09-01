@@ -100,7 +100,9 @@ async function serve(args: string[]): Promise<void> {
   console.log(`Capybara Runner started`)
   console.log(`Agent project: ${options.projectDir}`)
   console.log(`Server: ${address}`)
-  console.log(`Access token: ${options.token}${options.generatedToken ? ' (generated)' : ''}`)
+  console.log(options.generatedToken
+    ? `Access token: ${options.token} (generated)`
+    : 'Access token: configured')
   if (options.allowedOrigins.length > 0) {
     console.log(`Allowed origins: ${options.allowedOrigins.join(', ')}`)
   }

@@ -218,10 +218,10 @@ function configureCorrectionFixture(projectDir: string): void {
     ],
   })
   fs.appendFileSync(path.join(projectDir, 'main.j2'), '\n{{ builtin.prompts.correction_context }}\n')
-  fs.mkdirSync(path.join(projectDir, 'hooks'), { recursive: true })
-  fs.writeFileSync(path.join(projectDir, 'hooks', 'iterative-correction.ts'), ITERATIVE_CORRECTION_HOOK)
-  fs.writeFileSync(path.join(projectDir, 'hooks', 'correction-extractor.ts'), CORRECTION_EXTRACTOR_HOOK)
-  fs.writeFileSync(path.join(projectDir, 'hooks', 'revising-admission.ts'), REVISING_ADMISSION_HOOK)
+  fs.mkdirSync(path.join(projectDir, 'training-hooks'), { recursive: true })
+  fs.writeFileSync(path.join(projectDir, 'training-hooks', 'iterative-correction.ts'), ITERATIVE_CORRECTION_HOOK)
+  fs.writeFileSync(path.join(projectDir, 'training-hooks', 'correction-extractor.ts'), CORRECTION_EXTRACTOR_HOOK)
+  fs.writeFileSync(path.join(projectDir, 'training-hooks', 'revising-admission.ts'), REVISING_ADMISSION_HOOK)
   fs.mkdirSync(path.join(projectDir, 'experiments'), { recursive: true })
   fs.writeFileSync(path.join(projectDir, '.capybara', 'experiment-adapter.json'), `${JSON.stringify({
     version: 1,
@@ -305,8 +305,8 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
       ? { ...variable, scope: 'project', show_in_status: true }
       : variable),
   })
-  fs.mkdirSync(path.join(projectDir, '.capybara', 'hooks'), { recursive: true })
-  fs.writeFileSync(path.join(projectDir, 'hooks', 'experience-extractor.ts'), EXPERIENCE_HOOK)
+  fs.mkdirSync(path.join(projectDir, 'training-hooks'), { recursive: true })
+  fs.writeFileSync(path.join(projectDir, 'training-hooks', 'experience-extractor.ts'), EXPERIENCE_HOOK)
   fs.mkdirSync(path.join(projectDir, 'experiments'), { recursive: true })
   fs.writeFileSync(path.join(projectDir, '.capybara', 'experiment-adapter.json'), `${JSON.stringify({
     version: 1,
@@ -424,7 +424,7 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     await assert.rejects(() => training.promote(snapshotEvaluation.id), /evaluation-only runs cannot promote/)
     const promoted = await training.promote(created.id)
     assert.match(promoted.variables.agent_identity ?? '', /learned replay rule/)
-    assert.match(resources.readSystemVariables().variables.find((item) => item.key === 'agent_identity')?.value ?? '', /learned replay rule/)
+    assert.match(String(resources.readSystemVariables().variables.find((item) => item.key === 'agent_identity')?.value ?? ''), /learned replay rule/)
     const currentResources = resources.readSystemVariables()
     resources.saveSystemVariables({
       ...currentResources,
@@ -953,7 +953,7 @@ test('automatic training resolves admission Hook conflicts without waiting for h
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-training-auto-conflict-'))
   initializeProjectDirectory(projectDir)
   configureCorrectionFixture(projectDir)
-  const admissionPath = path.join(projectDir, 'hooks', 'revising-admission.ts')
+  const admissionPath = path.join(projectDir, 'training-hooks', 'revising-admission.ts')
   fs.writeFileSync(admissionPath, fs.readFileSync(admissionPath, 'utf8').replace(
     'run({ training }) {',
     'run({ training }) { throw new Error("admission infrastructure failed");',
@@ -1006,7 +1006,7 @@ test('correction token budget stops before a clean execution after the Hook exha
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-training-correction-budget-'))
   initializeProjectDirectory(projectDir)
   configureCorrectionFixture(projectDir)
-  const correctionPath = path.join(projectDir, 'hooks', 'iterative-correction.ts')
+  const correctionPath = path.join(projectDir, 'training-hooks', 'iterative-correction.ts')
   fs.writeFileSync(correctionPath, fs.readFileSync(correctionPath, 'utf8')
     .replace('permissions: { variables: "patch" }', 'permissions: { llm: "project", variables: "patch" }')
     .replace('run({ training }) {', 'async run({ llm, training }) { await llm.responses.create({ input: "diagnose" });'))

@@ -41,6 +41,7 @@ type Props = {
   checkpoints: RuntimeCheckpointMeta[];
   contexts: RuntimeContextRevision[];
   effectiveContexts: RuntimeEffectiveContextRevision[];
+  readOnly?: boolean;
   run: RunState;
   timeline: TimelineStep[];
   workflows: RuntimeWorkflowsState;
@@ -131,6 +132,7 @@ export default function DebugControlPanel(props: Props) {
     checkpoints,
     contexts,
     effectiveContexts,
+    readOnly = false,
     run,
     timeline,
     workflows,
@@ -215,6 +217,7 @@ export default function DebugControlPanel(props: Props) {
     t(`timeline.type.${kind}` as Parameters<typeof t>[0]);
 
   const handleExecutionModeKeyDown = (event: KeyboardEvent<HTMLButtonElement>, mode: ExecutionMode) => {
+    if (readOnly) return;
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     const nextMode = mode === "step" ? "continuous" : "step";
@@ -223,6 +226,7 @@ export default function DebugControlPanel(props: Props) {
   };
 
   const toggleBreakpoint = (step: TimelineStep, position: "before" | "after") => {
+    if (readOnly) return;
     const existing = breakpoints.find((item) => item.stepId === step.id && item.position === position);
     if (existing) onRemoveBreakpoint(existing.id);
     else onUpsertBreakpoint({
@@ -258,7 +262,7 @@ export default function DebugControlPanel(props: Props) {
               <button
                 aria-checked={selected}
                 className={`h-[22px] px-2 text-[10px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:opacity-50 ${selected ? "bg-[#d8e9e6] text-[#164f4a]" : "text-[#64787c] hover:bg-[#e3edeb]"}`}
-                disabled={active}
+                disabled={readOnly || active}
                 id={`debug-mode-${mode}`}
                 key={mode}
                 onClick={() => onExecutionModeChange(mode)}
@@ -272,11 +276,11 @@ export default function DebugControlPanel(props: Props) {
             );
           })}
         </div>
-        <ActionButton action={run.mode === "step" ? "next-step" : "run-continuous"} disabled={active} icon={run.mode === "step" ? StepForward : Play} label={run.mode === "step" ? t("debug.nextStep") : t("debug.startContinuous")} onClick={onPrimaryAction} />
-        <ActionButton action="pause" disabled={!canPause} icon={Pause} label={t("debug.pause")} onClick={onPause} pressed={run.status === "pause_requested" || run.status === "paused"} />
-        <ActionButton action="interrupt" disabled={!canInterrupt} icon={Square} label={t("debug.interrupt")} onClick={onInterrupt} tone="danger" />
+        <ActionButton action={run.mode === "step" ? "next-step" : "run-continuous"} disabled={readOnly || active} icon={run.mode === "step" ? StepForward : Play} label={run.mode === "step" ? t("debug.nextStep") : t("debug.startContinuous")} onClick={onPrimaryAction} />
+        <ActionButton action="pause" disabled={readOnly || !canPause} icon={Pause} label={t("debug.pause")} onClick={onPause} pressed={run.status === "pause_requested" || run.status === "paused"} />
+        <ActionButton action="interrupt" disabled={readOnly || !canInterrupt} icon={Square} label={t("debug.interrupt")} onClick={onInterrupt} tone="danger" />
         <span aria-hidden="true" className="mx-1 h-5 w-px bg-[#d5dfdf]" />
-        <ActionButton action="restore-previous" disabled={!canRestore} icon={Undo2} label={t("debug.restorePrevious")} onClick={onRestorePrevious} />
+        <ActionButton action="restore-previous" disabled={readOnly || !canRestore} icon={Undo2} label={t("debug.restorePrevious")} onClick={onRestorePrevious} />
         {run.modelRetry ? (
           <span
             className="ml-auto flex min-w-0 max-w-[48%] items-center gap-1 px-1 text-[9px] font-semibold text-[#815d21]"
@@ -295,7 +299,7 @@ export default function DebugControlPanel(props: Props) {
                   : "debug.modelRetryAttempting",
                 {
                   attempt: run.modelRetry.attempt,
-                  maxAttempts: run.modelRetry.maxAttempts,
+                  maxAttempts: run.modelRetry.maxAttempts === -1 ? "∞" : run.modelRetry.maxAttempts,
                 },
               )}
             </span>
@@ -353,7 +357,7 @@ export default function DebugControlPanel(props: Props) {
                   <td className="border-b border-[#dfe7e7] px-1 py-1"><span className="flex justify-center">
                     {(["before", "after"] as const).map((position) => {
                       const set = position === "before" ? before : after;
-                      return <button aria-label={t(`debug.breakpoint.${position}` as Parameters<typeof t>[0])} className={`flex h-7 w-5 items-center justify-center outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] ${set ? "text-[#b43e3e]" : "text-[#9aa9ab] hover:text-[#b43e3e]"}`} key={position} onClick={() => toggleBreakpoint(step, position)} title={t(`debug.breakpoint.${position}` as Parameters<typeof t>[0])} type="button"><Circle aria-hidden="true" fill={set ? "currentColor" : "none"} size={10} /></button>;
+                      return <button aria-label={t(`debug.breakpoint.${position}` as Parameters<typeof t>[0])} className={`flex h-7 w-5 items-center justify-center outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-not-allowed disabled:text-[#b3bfc1] ${set ? "text-[#b43e3e]" : "text-[#9aa9ab] hover:text-[#b43e3e]"}`} disabled={readOnly} key={position} onClick={() => toggleBreakpoint(step, position)} title={t(`debug.breakpoint.${position}` as Parameters<typeof t>[0])} type="button"><Circle aria-hidden="true" fill={set ? "currentColor" : "none"} size={10} /></button>;
                     })}
                     <button aria-label={t("timeline.viewDetail", { step: label })} className="flex h-7 w-7 items-center justify-center text-[#557176] outline-none hover:bg-[#d9e8e5] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e]" onClick={() => { setSelectedStepId(step.id); setDetailTab("overview"); }} title={t("timeline.viewDetail", { step: label })} type="button"><Eye aria-hidden="true" size={14} /></button>
                   </span></td>
@@ -382,9 +386,9 @@ export default function DebugControlPanel(props: Props) {
           </div>
           <CodeSurface ariaLabel={t("timeline.stepDetail")} language="JSON" lineWrapping readOnly value={JSON.stringify(detailValue, null, 2)} />
           <div className="flex items-center gap-1 border-t border-[#d8e2e2] px-2">
-            <button className="flex h-7 items-center gap-1 px-2 text-[10px] text-[#31575c] hover:bg-[#e1ecea] disabled:text-[#a3b0b2]" disabled={active || !detailString(selectedStep, "beforeCheckpointId")} onClick={() => restart(selectedStep)} type="button"><RotateCcw size={13} />{t("debug.restartStep")}</button>
+            <button className="flex h-7 items-center gap-1 px-2 text-[10px] text-[#31575c] hover:bg-[#e1ecea] disabled:text-[#a3b0b2]" disabled={readOnly || active || !detailString(selectedStep, "beforeCheckpointId")} onClick={() => restart(selectedStep)} type="button"><RotateCcw size={13} />{t("debug.restartStep")}</button>
             {nextModel && <button className="h-7 px-2 text-[10px] text-[#31575c] hover:bg-[#e1ecea]" onClick={() => { setSelectedStepId(nextModel.id); setDetailTab("input"); }} type="button">{t("debug.nextModelRequest")}</button>}
-            <select aria-label={t("debug.restoreCheckpoint")} className="ml-auto h-7 max-w-[130px] border border-[#c5d4d3] bg-white px-1 text-[9px] text-[#506a6f]" disabled={active} onChange={(event) => event.target.value && onRestoreCheckpoint(event.target.value)} value="">
+            <select aria-label={t("debug.restoreCheckpoint")} className="ml-auto h-7 max-w-[130px] border border-[#c5d4d3] bg-white px-1 text-[9px] text-[#506a6f]" disabled={readOnly || active} onChange={(event) => event.target.value && onRestoreCheckpoint(event.target.value)} value="">
               <option value="">{t("debug.restoreCheckpoint")}</option>
               {checkpoints.map((checkpoint, index) => <option key={checkpoint.id} value={checkpoint.id}>#{index} · step {checkpoint.currentStep}</option>)}
             </select>

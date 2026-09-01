@@ -1,9 +1,14 @@
+import { randomUUID } from 'node:crypto'
+import type WebSocket from 'ws'
+
 import { Loop } from '#core/loop'
 import { WebSocketChannel } from '#transport/websocket-channel'
 import {
   CommandError,
+  parseClientCommand,
   type ChannelEvent,
   type ClientCommand,
+  type ServerEvent,
 } from '#protocol/runtime-protocol'
 
 export interface AgentSessionOptions {
@@ -16,6 +21,7 @@ export interface AgentSessionOptions {
 
 export class AgentSession {
   private readonly outcomes = new Map<string, ChannelEvent>()
+  private readonly observers = new Set<WebSocket>()
   private closed = false
 
   constructor(
@@ -26,13 +32,13 @@ export class AgentSession {
   ) {
     loop.onEvent((event) => {
       if (this.closed) return
-      channel.publish(event)
+      this.publish(event)
       options.onChange?.()
     })
     channel.onCommand((command) => this.handle(command))
     channel.onClose(() => this.finish(true))
 
-    channel.publish({
+    this.publish({
       type: 'session.attached',
       payload: {
         protocolVersion: 1,
@@ -42,7 +48,7 @@ export class AgentSession {
         serverTime: new Date().toISOString(),
       },
     })
-    channel.publish({
+    this.publish({
       type: 'runtime.snapshot',
       payload: loop.getSnapshot(channel.getNextSequence()),
     })
@@ -53,9 +59,50 @@ export class AgentSession {
     this.finish(persist)
   }
 
+  attachObserver(
+    socket: WebSocket,
+    allowedCommands?: ReadonlySet<ClientCommand['type']>,
+  ): void {
+    if (this.closed) {
+      socket.close(1013, 'session is not active')
+      return
+    }
+    this.observers.add(socket)
+    const sequence = this.channel.getCurrentSequence()
+    const snapshot: ServerEvent = {
+      version: 1,
+      kind: 'event',
+      id: randomUUID(),
+      sessionId: this.id,
+      sequence,
+      timestamp: new Date().toISOString(),
+      type: 'runtime.snapshot',
+      payload: this.loop.getSnapshot(sequence),
+    }
+    socket.send(JSON.stringify(snapshot))
+    socket.on('message', (data) => {
+      try {
+        const command = parseClientCommand(JSON.parse(data.toString()) as unknown, this.id)
+        if (allowedCommands && !allowedCommands.has(command.type)) {
+          socket.close(1008, 'observer connection is read-only')
+          return
+        }
+        this.handle(command)
+      } catch (error) {
+        socket.close(1008, error instanceof Error ? error.message : String(error))
+      }
+    })
+    socket.once('close', () => this.observers.delete(socket))
+  }
+
   private finish(persist: boolean): void {
     if (this.closed) return
     this.closed = true
+    // Observers are passive monitoring clients. The owning Agent connection may
+    // be replaced or resumed, so tell them to reconnect instead of treating the
+    // close as a permanent, normal shutdown.
+    for (const observer of this.observers) observer.close(1012, 'session connection restarting')
+    this.observers.clear()
     this.options.onClose?.(persist)
     this.loop.close()
   }
@@ -63,7 +110,7 @@ export class AgentSession {
   private handle(command: ClientCommand): void {
     const previousOutcome = this.outcomes.get(command.id)
     if (previousOutcome) {
-      this.channel.publish(previousOutcome)
+      this.publish(previousOutcome)
       return
     }
 
@@ -89,7 +136,7 @@ export class AgentSession {
         },
       }
       this.outcomes.set(command.id, rejected)
-      this.channel.publish(rejected)
+      this.publish(rejected)
       return
     }
 
@@ -102,12 +149,12 @@ export class AgentSession {
       },
     }
     this.outcomes.set(command.id, accepted)
-    this.channel.publish(accepted)
+    this.publish(accepted)
 
     try {
       this.loop.execute(command, this.channel.getNextSequence())
     } catch (error) {
-      this.channel.publish({
+      this.publish({
         type: 'protocol.error',
         correlationId: command.id,
         payload: {
@@ -115,6 +162,15 @@ export class AgentSession {
           message: error instanceof Error ? error.message : String(error),
         },
       })
+    }
+  }
+
+  private publish(event: ChannelEvent): void {
+    const published = this.channel.publish(event)
+    if (!published) return
+    const encoded = JSON.stringify(published)
+    for (const observer of this.observers) {
+      if (observer.readyState === observer.OPEN) observer.send(encoded)
     }
   }
 }

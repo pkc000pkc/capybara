@@ -25,6 +25,7 @@ export interface ProjectToolDefinition {
 export interface ToolManifest {
   version: 1
   package: string
+  packageVersion?: string
   runner: ToolRunnerDefinition
   tools: ProjectToolDefinition[]
 }
@@ -32,6 +33,7 @@ export interface ToolManifest {
 export interface RegisteredTool extends ProjectToolDefinition {
   id: string
   packageName: string
+  packageVersion: string
   manifestVersion: number
   manifestFile: string
   runnerEntry: string

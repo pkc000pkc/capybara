@@ -84,7 +84,7 @@ const MANIFEST_SCHEMA = {
         properties: {
           name: { type: 'string', pattern: '^[a-zA-Z][a-zA-Z0-9_-]*$' },
           description: { type: 'string', minLength: 1 },
-          type: { enum: ['model', 'tool', 'experience'] },
+          type: { enum: ['model', 'tool', 'experience', 'persistent'] },
           entry: { type: 'string', minLength: 1 },
           priority: { type: 'integer', minimum: -10_000, maximum: 10_000 },
           activation: { type: 'object' },
@@ -173,7 +173,7 @@ export class HarnessRegistry {
     if (!isObject(activation)) throw new Error(`harness ${id} activation must be an object`)
     const allowed = type === 'model'
       ? ['providers', 'models', 'modelFamilies']
-      : type === 'tool' ? ['tools'] : ['keywords', 'tags']
+      : type === 'tool' ? ['tools'] : type === 'experience' ? ['keywords', 'tags'] : []
     const unknown = Object.keys(activation).find((key) => !allowed.includes(key))
     if (unknown) throw new Error(`harness ${id} has unsupported activation field: ${unknown}`)
     if (type === 'model') {
@@ -182,6 +182,7 @@ export class HarnessRegistry {
       }
       return
     }
+    if (type === 'persistent') return
     const required = type === 'tool' ? 'tools' : 'keywords'
     if (!stringList(activation[required])) {
       throw new Error(`${type} harness ${id} requires activation.${required}`)

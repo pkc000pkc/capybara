@@ -1,20 +1,20 @@
 
-{{ builtin.prompts.agent_identity }}
-{{ builtin.prompts.execution_policy }}
-{{ builtin.prompts.resource_loading }}
-{{ builtin.prompts.completion_status }}
-{{ builtin.prompts.workspace_boundary }}
-Nested prompt template: {{ builtin.prompts.template_level_1 }}
+{{ builtin.variables.agent_identity }}
+{{ builtin.variables.execution_policy }}
+{{ builtin.variables.resource_loading }}
+{{ builtin.variables.completion_status }}
+{{ builtin.variables.workspace_boundary }}
+Nested prompt template: {{ builtin.variables.template_level_1 }}
 
 Selected workspace root: {{ builtin.workspace_path }}
 
-{% set _resource_search_tool_description = builtin.prompts.resource_search_tool_description %}
-{% set _resource_load_tool_description = builtin.prompts.resource_load_tool_description %}
-{% set _system_variable_read_tool_description = builtin.prompts.system_variable_read_tool_description %}
-{% set _system_variable_apply_tool_description = builtin.prompts.system_variable_apply_tool_description %}
-{% set _workflow_execution_tool_description = builtin.prompts.workflow_execution_tool_description %}
-{% set _skill_reference_tool_description = builtin.prompts.skill_reference_tool_description %}
-{% set _skill_script_tool_description = builtin.prompts.skill_script_tool_description %}
+{% set _resource_search_tool_description = builtin.variables.resource_search_tool_description %}
+{% set _resource_load_tool_description = builtin.variables.resource_load_tool_description %}
+{% set _system_variable_read_tool_description = builtin.variables.system_variable_read_tool_description %}
+{% set _system_variable_apply_tool_description = builtin.variables.system_variable_apply_tool_description %}
+{% set _workflow_execution_tool_description = builtin.variables.workflow_execution_tool_description %}
+{% set _skill_reference_tool_description = builtin.variables.skill_reference_tool_description %}
+{% set _skill_script_tool_description = builtin.variables.skill_script_tool_description %}
 
 Agent: {{ agent.name }}
 Task: {{ task.title }}

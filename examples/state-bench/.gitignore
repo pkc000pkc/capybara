@@ -1,0 +1,17 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.capybara/secrets.json
+.capybara/*.sqlite*
+.capybara/worktrees/
+.capybara/runtime/
+.capybara/*.log
+datasets/
+runs/
+snapshots/
+reports/
+outputs/
+correction_smoke/

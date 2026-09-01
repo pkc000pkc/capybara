@@ -22,6 +22,7 @@ import {
   isInitializableProjectDirectory,
 } from '#core/project-initializer'
 import { ProjectResources } from '#core/project-resources'
+import { PluginMutationService } from '#core/plugins/plugin-mutation-service'
 import { resolveSystemPromptVariables } from '#core/system-prompt-templates'
 import {
   ProjectResourceRegistry,
@@ -865,6 +866,128 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   })
   app.get('/api/resources/catalog', async (request) =>
     new ProjectResourceRegistry(requestProject(request).path).list())
+  app.post('/api/resources/plugins', async (request, reply) => {
+    try {
+      const body = (request.body ?? {}) as { name?: unknown }
+      const result = await new PluginMutationService(requestProject(request).path).create(body.name)
+      return reply.code(201).send(result)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/resources/plugins/install/preview', async (request, reply) => {
+    try {
+      const body = (request.body ?? {}) as { source?: unknown }
+      return new PluginMutationService(requestProject(request).path).preview(body.source)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/resources/plugins/install', async (request, reply) => {
+    try {
+      const body = (request.body ?? {}) as { source?: unknown }
+      const result = await new PluginMutationService(requestProject(request).path).install(body.source)
+      return reply.code(201).send(result)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.patch('/api/resources/plugins/:id', async (request, reply) => {
+    try {
+      const body = (request.body ?? {}) as { enabled?: unknown }
+      return await new PluginMutationService(requestProject(request).path)
+        .setEnabled((request.params as { id: string }).id, body.enabled)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.put('/api/resources/plugins/:id/variables', async (request, reply) => {
+    try {
+      return await new PluginMutationService(requestProject(request).path)
+        .saveVariables((request.params as { id: string }).id, request.body)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.delete('/api/resources/plugins/:id/variable-dependencies/:key', async (request, reply) => {
+    try {
+      const params = request.params as { id: string; key: string }
+      return await new PluginMutationService(requestProject(request).path)
+        .removeVariableDependency(params.id, params.key, request.body)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/resources/plugins/:id/harnesses', async (request, reply) => {
+    try {
+      const result = await new PluginMutationService(requestProject(request).path)
+        .createHarness((request.params as { id: string }).id, request.body)
+      return reply.code(201).send(result)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.put('/api/resources/plugins/:id/harnesses/:harnessId', async (request, reply) => {
+    try {
+      const params = request.params as { id: string; harnessId: string }
+      return await new PluginMutationService(requestProject(request).path)
+        .saveHarness(params.id, params.harnessId, request.body)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.delete('/api/resources/plugins/:id/harnesses/:harnessId', async (request, reply) => {
+    try {
+      const params = request.params as { id: string; harnessId: string }
+      return await new PluginMutationService(requestProject(request).path)
+        .deleteHarness(params.id, params.harnessId, request.body)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/resources/plugins/:id/hooks', async (request, reply) => {
+    try {
+      const result = await new PluginMutationService(requestProject(request).path)
+        .createHook((request.params as { id: string }).id, request.body)
+      return reply.code(201).send(result)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.put('/api/resources/plugins/:id/hooks/:hookId', async (request, reply) => {
+    try {
+      const params = request.params as { id: string; hookId: string }
+      return await new PluginMutationService(requestProject(request).path)
+        .saveHook(params.id, params.hookId, request.body)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.delete('/api/resources/plugins/:id/hooks/:hookId', async (request, reply) => {
+    try {
+      const params = request.params as { id: string; hookId: string }
+      return await new PluginMutationService(requestProject(request).path)
+        .deleteHook(params.id, params.hookId, request.body)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.delete('/api/resources/plugins/:id', async (request, reply) => {
+    try {
+      return await new PluginMutationService(requestProject(request).path)
+        .uninstall((request.params as { id: string }).id)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.delete('/api/resources/tools/packages/:package', async (request, reply) => {
+    try {
+      return await new PluginMutationService(requestProject(request).path)
+        .uninstallTool((request.params as { package: string }).package)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
   app.get('/api/resources/file', async (request, reply) => {
     try {
       const file = (request.query as { path?: unknown }).path
@@ -1043,13 +1166,22 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       activeSessions.get(key)?.shutdown(true, 4001, 'session attached in another client')
 
       let persistTimer: NodeJS.Timeout | undefined
-      const save = () => store.save(session.id, loop.exportState(), loop.getRequestCount())
+      const save = () => {
+        try {
+          store.save(session.id, loop.exportState(), loop.getRequestCount())
+        } catch (error) {
+          app.log.error({
+            sessionId: session.id,
+            error: error instanceof Error ? error.message : String(error),
+          }, 'session persistence failed')
+        }
+      }
       const scheduleSave = () => {
-        if (persistTimer) clearTimeout(persistTimer)
+        if (persistTimer) return
         persistTimer = setTimeout(() => {
           persistTimer = undefined
           save()
-        }, 100)
+        }, 1_000)
       }
       const channel = new WebSocketChannel(socket, session.id)
       const agentSession = new AgentSession(session.id, loop, channel, {

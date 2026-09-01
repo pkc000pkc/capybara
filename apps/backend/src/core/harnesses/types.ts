@@ -1,4 +1,5 @@
-export type HarnessType = 'model' | 'tool' | 'experience'
+/** Harness activation modes. Persistent harnesses are always present while enabled. */
+export type HarnessType = 'model' | 'tool' | 'experience' | 'persistent'
 
 export interface ModelHarnessActivation {
   providers?: string[]
@@ -15,10 +16,13 @@ export interface ExperienceHarnessActivation {
   tags?: string[]
 }
 
+export interface PersistentHarnessActivation {}
+
 export type HarnessActivation =
   | ModelHarnessActivation
   | ToolHarnessActivation
   | ExperienceHarnessActivation
+  | PersistentHarnessActivation
 
 export interface ProjectHarnessDefinition {
   name: string

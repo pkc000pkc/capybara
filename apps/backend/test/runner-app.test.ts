@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import WebSocket from 'ws'
 
 import { buildRunnerApp } from '../src/runner-app.ts'
 import type { ServerEvent } from '#protocol/runtime-protocol'
@@ -87,6 +88,7 @@ test('Runner exposes only authenticated runtime APIs and isolates session data',
       'hooks',
       'skills',
       'harnesses',
+      'pagination',
     ])
 
     const platformApi = await app.inject({ method: 'GET', url: '/api/preferences', headers })
@@ -106,6 +108,22 @@ test('Runner exposes only authenticated runtime APIs and isolates session data',
     })
     assert.equal(allowedOrigin.statusCode, 200)
     assert.equal(allowedOrigin.headers['access-control-allow-origin'], 'http://localhost:3000')
+
+    const readOnlyMonitor = await app.inject({
+      method: 'GET',
+      url: '/v1/project',
+      headers: { origin: 'http://localhost:3000' },
+    })
+    assert.equal(readOnlyMonitor.statusCode, 200)
+    assert.equal(readOnlyMonitor.headers['access-control-allow-origin'], 'http://localhost:3000')
+
+    const protectedMutation = await app.inject({
+      method: 'POST',
+      url: '/v1/sessions',
+      headers: { origin: 'http://localhost:3000' },
+      payload: { name: 'must not be created' },
+    })
+    assert.equal(protectedMutation.statusCode, 401)
 
     const created = await app.inject({
       method: 'POST',
@@ -134,6 +152,7 @@ test('Runner attaches and restores a session through its WebSocket endpoint', as
     projectDir: fixture.projectDir,
     dataDir: fixture.dataDir,
     token: TOKEN,
+    allowedOrigins: ['http://localhost:3000'],
     runtimeLoop: { llm: testLlm(), streamDelayMs: 0, stepDelayMs: 0 },
   })
   try {
@@ -169,6 +188,111 @@ test('Runner attaches and restores a session through its WebSocket endpoint', as
       const attached = events[0]
       assert.equal(attached?.sessionId, sessionId)
       assert.equal(attached?.type === 'session.attached' && attached.payload.resumeMode, 'new')
+
+      const readOnlyObserver = new WebSocket(
+        `ws://127.0.0.1:${address.port}/v1/sessions/${sessionId}/observe`,
+        { origin: 'http://localhost:3000' },
+      )
+      try {
+        const observerSnapshot = await new Promise<ServerEvent>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('timed out waiting for read-only snapshot')), 4_000)
+          readOnlyObserver.addEventListener('error', () => reject(new Error('read-only observer failed')), { once: true })
+          readOnlyObserver.addEventListener('message', (event) => {
+            const value = JSON.parse(String(event.data)) as ServerEvent
+            if (value.type !== 'runtime.snapshot') return
+            clearTimeout(timeout)
+            resolve(value)
+          })
+        })
+        const commandId = crypto.randomUUID()
+        const accepted = new Promise<ServerEvent>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('timed out waiting for read-only command')), 4_000)
+          readOnlyObserver.addEventListener('message', (event) => {
+            const value = JSON.parse(String(event.data)) as ServerEvent
+            if (value.type !== 'command.accepted' || value.payload.commandId !== commandId) return
+            clearTimeout(timeout)
+            resolve(value)
+          })
+        })
+        readOnlyObserver.send(JSON.stringify({
+          version: 1,
+          kind: 'command',
+          id: commandId,
+          type: 'runtime.snapshot.get',
+          sessionId,
+          timestamp: new Date().toISOString(),
+          payload: { afterSequence: observerSnapshot.sequence },
+        }))
+        assert.equal((await accepted).type, 'command.accepted')
+        assert.equal(socket.readyState, WebSocket.OPEN)
+        const policyClose = new Promise<number>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('timed out waiting for read-only rejection')), 4_000)
+          readOnlyObserver.addEventListener('close', (event) => {
+            clearTimeout(timeout)
+            resolve(event.code)
+          }, { once: true })
+        })
+        readOnlyObserver.send(JSON.stringify({
+          version: 1,
+          kind: 'command',
+          id: crypto.randomUUID(),
+          type: 'run.mode.set',
+          sessionId,
+          timestamp: new Date().toISOString(),
+          payload: { mode: 'step' },
+        }))
+        assert.equal(await policyClose, 1008)
+      } finally {
+        readOnlyObserver.close()
+      }
+
+      const observer = new WebSocket(
+        `ws://127.0.0.1:${address.port}/v1/sessions/${sessionId}/observe?access_token=${TOKEN}`,
+      )
+      try {
+        const observerSnapshot = await new Promise<ServerEvent>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('timed out waiting for observer snapshot')), 4_000)
+          observer.addEventListener('error', () => reject(new Error('Runner observer failed')), { once: true })
+          observer.addEventListener('message', (event) => {
+            const value = JSON.parse(String(event.data)) as ServerEvent
+            if (value.type !== 'runtime.snapshot') return
+            clearTimeout(timeout)
+            resolve(value)
+          })
+        })
+        const commandId = crypto.randomUUID()
+        const accepted = new Promise<ServerEvent>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('timed out waiting for observer command')), 4_000)
+          observer.addEventListener('message', (event) => {
+            const value = JSON.parse(String(event.data)) as ServerEvent
+            if (value.type !== 'command.accepted' || value.payload.commandId !== commandId) return
+            clearTimeout(timeout)
+            resolve(value)
+          })
+        })
+        observer.send(JSON.stringify({
+          version: 1,
+          kind: 'command',
+          id: commandId,
+          type: 'runtime.snapshot.get',
+          sessionId,
+          timestamp: new Date().toISOString(),
+          payload: { afterSequence: observerSnapshot.sequence },
+        }))
+        assert.equal((await accepted).type, 'command.accepted')
+        assert.equal(socket.readyState, WebSocket.OPEN)
+        const observerClosed = new Promise<number>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('timed out waiting for observer reconnect close')), 4_000)
+          observer.addEventListener('close', (event) => {
+            clearTimeout(timeout)
+            resolve(event.code)
+          }, { once: true })
+        })
+        socket.close()
+        assert.equal(await observerClosed, 1012)
+      } finally {
+        observer.close()
+      }
     } finally {
       socket.close()
       await new Promise((resolve) => setTimeout(resolve, 150))

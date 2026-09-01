@@ -38,7 +38,7 @@ test('project file API browses, edits, creates, renames, and removes project dir
       url: `/api/resources/files/content?projectPath=${projectPath}&path=main.j2`,
     })
     assert.equal(initialFile.statusCode, 200)
-    assert.match(initialFile.json().content, /builtin\.prompts\.agent_identity/)
+    assert.match(initialFile.json().content, /builtin\.variables\.agent_identity/)
 
     const agentGuide = await app.inject({
       method: 'GET',

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "package": "state-bench-memory",
+  "harnesses": [
+    {
+      "name": "learned-memory",
+      "description": "Injects core runtime guards plus bounded guard/advice memory for the next model loop.",
+      "type": "model",
+      "entry": "learned-memory.j2",
+      "priority": 90,
+      "activation": { "models": ["*"] },
+      "inputs": ["builtin.prompts.memory_runtime_context"],
+      "requiredTools": []
+    }
+  ]
+}

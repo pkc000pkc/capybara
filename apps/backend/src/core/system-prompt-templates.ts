@@ -1,15 +1,56 @@
 import nunjucks from 'nunjucks'
 
-export type SystemPromptVariableType = 'text' | 'prompt_template'
+export const SYSTEM_PROMPT_VARIABLE_TYPES = [
+  'text',
+  'prompt_template',
+  'boolean',
+  'integer',
+  'number',
+  'date',
+  'datetime',
+  'array',
+  'object',
+  'secret_ref',
+] as const
+
+export type SystemPromptVariableType = (typeof SYSTEM_PROMPT_VARIABLE_TYPES)[number]
+
+export type SystemPromptVariableValue =
+  | string
+  | boolean
+  | number
+  | SystemPromptVariableValue[]
+  | { [key: string]: SystemPromptVariableValue }
+
+/**
+ * Normalize the optional external source for a prompt_template variable.
+ * The path is intentionally POSIX-like because it is persisted in plugin
+ * manifests and must behave consistently on Windows and Unix hosts.
+ */
+export function normalizeSystemPromptVariableTemplatePath(value: unknown, name = 'template'): string {
+  if (typeof value !== 'string') throw new Error(`${name} must be a string`)
+  const normalized = value.trim().replace(/\\/g, '/')
+  if (
+    !normalized
+    || normalized.startsWith('/')
+    || /^[A-Za-z]:[\\/]/.test(value.trim())
+    || normalized.split('/').some((segment) => segment === '..')
+    || !/\.j2$/i.test(normalized)
+  ) {
+    throw new Error(`${name} must be a relative .j2 path inside the plugin`)
+  }
+  return normalized
+}
 
 export interface SystemPromptVariableSource {
   key: string
-  value: string
+  value: SystemPromptVariableValue
   type?: SystemPromptVariableType
 }
 
 export interface ResolvedSystemPromptVariables {
   prompts: Record<string, string>
+  values: Record<string, SystemPromptVariableValue>
   dependencies: Record<string, string[]>
 }
 
@@ -22,6 +63,76 @@ type TemplateNode = {
 }
 
 const DEFAULT_MAX_TEMPLATE_DEPTH = 64
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isVariableValue(value: unknown): value is SystemPromptVariableValue {
+  if (typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (Array.isArray(value)) return value.every(isVariableValue)
+  return isPlainObject(value) && Object.values(value).every(isVariableValue)
+}
+
+function validDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const [year = 0, month = 0, day = 0] = value.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+}
+
+function validDateTime(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return false
+  return Number.isFinite(Date.parse(value))
+}
+
+export function isSystemPromptVariableType(value: unknown): value is SystemPromptVariableType {
+  return typeof value === 'string' && (SYSTEM_PROMPT_VARIABLE_TYPES as readonly string[]).includes(value)
+}
+
+export function validateSystemPromptVariableValue(
+  type: SystemPromptVariableType,
+  value: unknown,
+  name = 'system variable value',
+): asserts value is SystemPromptVariableValue {
+  if (!isVariableValue(value)) {
+    throw new Error(`${name} must be finite JSON-compatible data without null values`)
+  }
+  switch (type) {
+    case 'text':
+    case 'prompt_template':
+    case 'secret_ref':
+      if (typeof value !== 'string') throw new Error(`${name} must be a string for ${type}`)
+      if (type === 'secret_ref' && !value.trim()) throw new Error(`${name} must be a non-empty secret reference`)
+      return
+    case 'boolean':
+      if (typeof value !== 'boolean') throw new Error(`${name} must be boolean`)
+      return
+    case 'integer':
+      if (typeof value !== 'number' || !Number.isInteger(value)) throw new Error(`${name} must be an integer`)
+      return
+    case 'number':
+      if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${name} must be a finite number`)
+      return
+    case 'date':
+      if (typeof value !== 'string' || !validDate(value)) throw new Error(`${name} must use a valid YYYY-MM-DD date`)
+      return
+    case 'datetime':
+      if (typeof value !== 'string' || !validDateTime(value)) throw new Error(`${name} must use an RFC 3339 datetime with timezone`)
+      return
+    case 'array':
+      if (!Array.isArray(value)) throw new Error(`${name} must be an array`)
+      return
+    case 'object':
+      if (!isPlainObject(value)) throw new Error(`${name} must be an object`)
+      return
+  }
+}
+
+export function canonicalSystemPromptVariableValue(value: SystemPromptVariableValue): string {
+  return typeof value === 'string' ? value : JSON.stringify(value)
+}
 
 export function templateVariablePaths(source: string): Set<string> {
   const api = nunjucks as unknown as {
@@ -53,7 +164,7 @@ function promptDependencies(key: string, source: string): string[] {
   }
   return [...new Set(
     [...paths]
-      .filter((path) => path.startsWith('builtin.prompts.'))
+      .filter((path) => path.startsWith('builtin.prompts.') || path.startsWith('builtin.variables.'))
       .map((path) => path.split('.')[2])
       .filter((dependency): dependency is string => Boolean(dependency)),
   )]
@@ -75,8 +186,11 @@ export function resolveSystemPromptVariables(
   )
   const dependencies: Record<string, string[]> = {}
   for (const variable of sources.values()) {
+    const type = variable.type ?? 'text'
+    if (!isSystemPromptVariableType(type)) throw new Error(`unsupported system variable type: ${String(variable.type)}`)
+    validateSystemPromptVariableValue(type, variable.value, `system variable "${variable.key}" value`)
     const directDependencies = variable.type === 'prompt_template'
-      ? promptDependencies(variable.key, variable.value)
+      ? promptDependencies(variable.key, variable.value as string)
       : []
     dependencies[variable.key] = directDependencies
     for (const dependency of directDependencies) {
@@ -114,6 +228,9 @@ export function resolveSystemPromptVariables(
     throwOnUndefined: true,
   })
   const prompts: Record<string, string> = {}
+  const values: Record<string, SystemPromptVariableValue> = Object.fromEntries(
+    [...sources].map(([key, variable]) => [key, variable.value]),
+  )
   const resolving = new Set<string>()
 
   const resolve = (key: string, chain: string[]): string => {
@@ -122,8 +239,8 @@ export function resolveSystemPromptVariables(
     const variable = sources.get(key)
     if (!variable) throw new Error(`system variable was not found: ${key}`)
     if (variable.type !== 'prompt_template') {
-      prompts[key] = variable.value
-      return variable.value
+      prompts[key] = canonicalSystemPromptVariableValue(variable.value)
+      return prompts[key]
     }
     if (resolving.has(key)) {
       const cycleStart = chain.indexOf(key)
@@ -137,13 +254,14 @@ export function resolveSystemPromptVariables(
         resolve(dependency, [...chain, key])
       }
       const promptContext = Object.fromEntries(
-        [...sources].map(([sourceKey, source]) => [sourceKey, prompts[sourceKey] ?? source.value]),
+        [...sources].map(([sourceKey, source]) => [sourceKey, prompts[sourceKey] ?? canonicalSystemPromptVariableValue(source.value)]),
       )
       try {
-        const rendered = environment.renderString(variable.value, {
-          builtin: { prompts: promptContext },
+        const rendered = environment.renderString(variable.value as string, {
+          builtin: { prompts: promptContext, variables: values },
         })
         prompts[key] = rendered
+        values[key] = rendered
         return rendered
       } catch (error) {
         throw new Error(
@@ -156,5 +274,5 @@ export function resolveSystemPromptVariables(
   }
 
   for (const key of sources.keys()) resolve(key, [])
-  return { prompts, dependencies }
+  return { prompts, values, dependencies }
 }

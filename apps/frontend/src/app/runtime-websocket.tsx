@@ -17,6 +17,8 @@ import type {
   JsonPatchOperation,
   JsonValue,
   RuntimeBreakpoint,
+  RuntimeArtifactPage,
+  RuntimeVariablePage,
   RuntimeSnapshot,
   ServerEvent,
 } from "./runtime-protocol";
@@ -47,13 +49,39 @@ export type SessionStorageStats = {
   databaseFile: string;
 };
 
+export type RuntimeVariableUpdate = {
+  sequence: number;
+  timestamp: string;
+  revision: number;
+  source: "user" | "runtime" | "tool" | "hook" | "restore";
+  patch: JsonPatchOperation[];
+};
+
+export type RunnerMonitor = {
+  active: boolean;
+  session: SessionSummary;
+  persistence: { lastSavedAt?: string; lastError?: string };
+  ledger: {
+    valid: boolean;
+    head: string;
+    totalEvents: number;
+    path: string;
+    error?: string;
+  };
+};
+
 type RuntimeStore = {
   connection: ConnectionState;
   error: string | null;
+  lastEventAt: string | null;
   lastSequence: number;
   sessionId: string | null;
   snapshot: RuntimeSnapshot | null;
+  supportsPagination: boolean;
   artifactContents: Record<string, JsonValue>;
+  artifactPages: Record<string, RuntimeArtifactPage>;
+  variablePages: Record<string, RuntimeVariablePage>;
+  recentVariableUpdates: RuntimeVariableUpdate[];
 };
 
 type RuntimeContextValue = RuntimeStore & {
@@ -61,6 +89,8 @@ type RuntimeContextValue = RuntimeStore & {
   sessions: SessionSummary[];
   activeSession: SessionSummary | null;
   sessionStorage: SessionStorageStats | null;
+  runnerMode: boolean;
+  runnerMonitor: RunnerMonitor | null;
   closeProject: () => Promise<void>;
   clearSessions: () => Promise<void>;
   createSession: () => Promise<void>;
@@ -81,6 +111,8 @@ type RuntimeContextValue = RuntimeStore & {
   detachTool: (toolId: string) => void;
   interruptRun: () => void;
   getArtifact: (artifactId: string) => void;
+  getArtifactPage: (artifactId: string, page: number, pageSize: number) => void;
+  getVariablePage: (path: string, page: number, pageSize: number) => void;
   pauseRun: () => void;
   detachHarness: (harnessId: string) => void;
   detachSkill: (skillId: string) => void;
@@ -103,23 +135,43 @@ type RuntimeContextValue = RuntimeStore & {
 const INITIAL_STORE: RuntimeStore = {
   connection: "connecting",
   error: null,
+  lastEventAt: null,
   lastSequence: 0,
   sessionId: null,
   snapshot: null,
+  supportsPagination: true,
   artifactContents: {},
+  artifactPages: {},
+  variablePages: {},
+  recentVariableUpdates: [],
 };
 
 const RuntimeContext = createContext<RuntimeContextValue | null>(null);
 
+const RUNNER_URL = process.env.NEXT_PUBLIC_RUNNER_URL?.replace(/\/$/, "");
+const RUNNER_SESSION_ID = process.env.NEXT_PUBLIC_RUNNER_SESSION_ID;
+const RUNNER_MODE = Boolean(RUNNER_URL && RUNNER_SESSION_ID);
+const RUNNER_READ_COMMANDS = new Set<CommandType>([
+  "runtime.snapshot.get",
+  "runtime.artifact.get",
+  "runtime.artifact.page",
+  "runtime.variable.page",
+]);
+const SNAPSHOT_RESYNC_TIMEOUT_MS = 8_000;
+const SNAPSHOT_RESYNC_CLOSE_CODE = 4_000;
+
 function httpBase() {
+  if (RUNNER_URL) return RUNNER_URL;
   const configured = process.env.NEXT_PUBLIC_RUNTIME_HTTP_URL?.replace(/\/$/, "");
   return configured ?? `${window.location.protocol}//${window.location.hostname}:3005`;
 }
 
 async function httpRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.body) headers.set("content-type", "application/json");
   const response = await fetch(`${httpBase()}${path}`, {
     ...init,
-    headers: init?.body ? { "content-type": "application/json", ...init.headers } : init?.headers,
+    headers,
   });
   const payload = await response.json() as T & { error?: string };
   if (!response.ok) throw new Error(payload.error ?? `HTTP ${response.status}`);
@@ -127,12 +179,19 @@ async function httpRequest<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function loadSessions(projectPath: string) {
+  if (RUNNER_MODE) {
+    const result = await httpRequest<{ items: SessionSummary[] }>("/v1/sessions");
+    return { project: await httpRequest<ProjectInfo>("/v1/project"), items: result.items };
+  }
   return httpRequest<{ project: ProjectInfo; items: SessionSummary[] }>(
     `/api/sessions?projectPath=${encodeURIComponent(projectPath)}`,
   );
 }
 
 async function createProjectSession(projectPath: string) {
+  if (RUNNER_MODE) {
+    throw new Error("Runner monitoring is read-only");
+  }
   return httpRequest<SessionSummary>("/api/sessions", {
     method: "POST",
     body: JSON.stringify({ projectPath }),
@@ -140,6 +199,9 @@ async function createProjectSession(projectPath: string) {
 }
 
 async function renameProjectSession(projectPath: string, sessionId: string, name: string) {
+  if (RUNNER_MODE) {
+    throw new Error("Runner monitoring is read-only");
+  }
   return httpRequest<SessionSummary>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
     method: "PATCH",
     body: JSON.stringify({ projectPath, name }),
@@ -227,6 +289,8 @@ function applyEvent(store: RuntimeStore, event: ServerEvent): RuntimeStore {
       sessionId: event.sessionId,
       snapshot: clone(event.payload),
       artifactContents: {},
+      artifactPages: {},
+      variablePages: {},
     };
   }
 
@@ -264,13 +328,17 @@ function applyEvent(store: RuntimeStore, event: ServerEvent): RuntimeStore {
         error: null,
         lastSequence: event.sequence,
         artifactContents: {},
+        artifactPages: {},
+        variablePages: {},
         snapshot: {
           ...snapshot,
           run: clone(event.payload.run),
           timeline: clone(event.payload.timeline),
+          artifacts: clone(event.payload.artifacts),
+          contexts: clone(event.payload.contexts),
           checkpoints: clone(event.payload.checkpoints),
-          effectiveContexts: snapshot.effectiveContexts,
-          observations: snapshot.observations,
+          effectiveContexts: clone(event.payload.effectiveContexts),
+          observations: clone(event.payload.observations),
           workflows: clone(event.payload.workflows),
         },
       };
@@ -294,6 +362,26 @@ function applyEvent(store: RuntimeStore, event: ServerEvent): RuntimeStore {
         artifactContents: {
           ...store.artifactContents,
           [event.payload.artifact.id]: clone(event.payload.value),
+        },
+      };
+    case "runtime.artifact.page":
+      return {
+        ...store,
+        error: null,
+        lastSequence: event.sequence,
+        artifactPages: {
+          ...store.artifactPages,
+          [`${event.payload.artifact.id}:${event.payload.page}:${event.payload.pageSize}`]: clone(event.payload),
+        },
+      };
+    case "runtime.variable.page":
+      return {
+        ...store,
+        error: null,
+        lastSequence: event.sequence,
+        variablePages: {
+          ...store.variablePages,
+          [`${event.payload.path}:${event.payload.revision}:${event.payload.page}:${event.payload.pageSize}`]: clone(event.payload),
         },
       };
     case "runtime.context.revision.created":
@@ -467,7 +555,22 @@ function applyEvent(store: RuntimeStore, event: ServerEvent): RuntimeStore {
           value: applyJsonPatch(snapshot.variables.value, event.payload.patch),
         },
       };
-      break;
+      return {
+        ...store,
+        error: null,
+        lastSequence: event.sequence,
+        snapshot: next,
+        recentVariableUpdates: [
+          {
+            sequence: event.sequence,
+            timestamp: event.timestamp,
+            revision: event.payload.revision,
+            source: event.payload.source,
+            patch: clone(event.payload.patch),
+          },
+          ...store.recentVariableUpdates,
+        ].slice(0, 24),
+      };
     case "template.updated":
       next = { ...snapshot, template: clone(event.payload) };
       break;
@@ -486,6 +589,9 @@ function applyEvent(store: RuntimeStore, event: ServerEvent): RuntimeStore {
       break;
     case "runtime.harnesses.updated":
       next = { ...snapshot, harnesses: clone(event.payload) };
+      break;
+    case "runtime.plugins.updated":
+      next = { ...snapshot, plugins: clone(event.payload) };
       break;
     case "runtime.skills.updated":
       next = { ...snapshot, skills: clone(event.payload) };
@@ -528,6 +634,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeSession, setActiveSession] = useState<SessionSummary | null>(null);
   const [sessionStorage, setSessionStorage] = useState<SessionStorageStats | null>(null);
+  const [runnerMonitor, setRunnerMonitor] = useState<RunnerMonitor | null>(null);
   const activeSessionId = activeSession?.id;
   const storeRef = useRef(store);
   const socketRef = useRef<WebSocket | null>(null);
@@ -540,11 +647,40 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     setStore(next);
   }, []);
 
+  const commitServerEvent = useCallback((event: ServerEvent) => {
+    const current = storeRef.current;
+    const next = {
+      ...applyEvent(current, event),
+      lastEventAt: event.timestamp,
+    };
+    storeRef.current = next;
+
+    // Sequence-only events still advance storeRef for gap detection without
+    // rerendering the full runtime workspace.
+    if (
+      next.connection !== current.connection ||
+      next.error !== current.error ||
+      next.sessionId !== current.sessionId ||
+      next.snapshot !== current.snapshot ||
+      next.artifactContents !== current.artifactContents ||
+      next.artifactPages !== current.artifactPages ||
+      next.variablePages !== current.variablePages ||
+      next.recentVariableUpdates !== current.recentVariableUpdates ||
+      current.lastEventAt === null
+    ) {
+      setStore(next);
+    }
+  }, []);
+
   const sendCommand = useCallback(
     <TType extends CommandType>(
       type: TType,
       payload: CommandPayloadMap[TType],
     ) => {
+      if (RUNNER_MODE && !RUNNER_READ_COMMANDS.has(type)) {
+        commit((state) => ({ ...state, error: "Runner monitoring is read-only" }));
+        return;
+      }
       const socket = socketRef.current;
       const current = storeRef.current;
       if (
@@ -581,12 +717,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const refreshSessionStorage = useCallback(async () => {
     if (!project) return;
     const stats = await httpRequest<SessionStorageStats>(
-      `/api/sessions/storage?projectPath=${encodeURIComponent(project.path)}`,
+      RUNNER_MODE
+        ? "/v1/storage"
+        : `/api/sessions/storage?projectPath=${encodeURIComponent(project.path)}`,
     );
     setSessionStorage(stats);
   }, [project]);
 
   const selectProject = useCallback(async (input: string, initialize = false): Promise<ProjectSelectionResult> => {
+    if (RUNNER_MODE) throw new Error("Runner monitoring uses the project fixed at server startup");
     const status = storeRef.current.snapshot?.run.status;
     if (status && ["running", "waiting", "pause_requested", "paused", "interrupting"].includes(status)) {
       throw new Error("Interrupt or finish the current run before switching projects");
@@ -627,6 +766,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
   const closeProject = useCallback(async () => {
     if (!project) return;
+    if (RUNNER_MODE) throw new Error("Runner monitoring cannot close the server project");
     const status = storeRef.current.snapshot?.run.status;
     if (status && ["running", "waiting", "pause_requested", "paused", "interrupting"].includes(status)) {
       throw new Error("Interrupt or finish the current run before closing the project");
@@ -640,6 +780,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     setSessions([]);
     setActiveSession(null);
     setSessionStorage(null);
+    setRunnerMonitor(null);
     localStorage.removeItem("capybara-project-path");
     localStorage.removeItem("capybara-session-id");
     commit(() => ({ ...INITIAL_STORE, connection: "disconnected" }));
@@ -647,6 +788,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
   const createSession = useCallback(async () => {
     if (!project) return;
+    if (RUNNER_MODE) throw new Error("Runner monitoring is read-only");
     const status = storeRef.current.snapshot?.run.status;
     if (status && ["running", "waiting", "pause_requested", "paused", "interrupting"].includes(status)) {
       throw new Error("Interrupt or finish the current run before creating a session");
@@ -658,6 +800,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
   const renameSession = useCallback(async (name: string) => {
     if (!project || !activeSession) return;
+    if (RUNNER_MODE) throw new Error("Runner monitoring is read-only");
     const status = storeRef.current.snapshot?.run.status;
     if (status && ["running", "waiting", "pause_requested", "paused", "interrupting"].includes(status)) {
       throw new Error("Interrupt or finish the current run before renaming the session");
@@ -677,6 +820,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   }, [activeSession, commit, project]);
 
   const selectSession = useCallback((sessionId: string) => {
+    if (RUNNER_MODE) return;
     const status = storeRef.current.snapshot?.run.status;
     if (status && ["running", "waiting", "pause_requested", "paused", "interrupting"].includes(status)) return;
     const selected = sessions.find((session) => session.id === sessionId && session.restorable);
@@ -692,6 +836,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
   const clearSessions = useCallback(async () => {
     if (!project) return;
+    if (RUNNER_MODE) throw new Error("Runner monitoring does not clear session storage while attached");
     const status = storeRef.current.snapshot?.run.status;
     if (status && ["running", "waiting", "pause_requested", "paused", "interrupting"].includes(status)) {
       throw new Error("Interrupt or finish the current run before clearing sessions");
@@ -710,6 +855,24 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     let disposed = false;
     void (async () => {
       try {
+        if (RUNNER_MODE) {
+          const runnerInfo = await httpRequest<{ capabilities: string[] }>("/v1/agent")
+            .catch((): { capabilities: string[] } => ({ capabilities: [] }));
+          const selectedProject = await httpRequest<ProjectInfo>("/v1/project");
+          const loaded = await loadSessions(selectedProject.path);
+          const session = loaded.items.find((item) => item.id === RUNNER_SESSION_ID);
+          if (!session) throw new Error(`Runner session was not found: ${RUNNER_SESSION_ID}`);
+          if (disposed) return;
+          setProject(selectedProject);
+          setSessions(loaded.items.length > 0 ? loaded.items : [session]);
+          commit((state) => ({
+            ...state,
+            supportsPagination: runnerInfo.capabilities.includes("pagination"),
+          }));
+          setActiveSession(session);
+          localStorage.setItem("capybara-session-id", session.id);
+          return;
+        }
         const savedPath = localStorage.getItem("capybara-project-path");
         const selectedProject = savedPath
           ? await httpRequest<ProjectInfo>("/api/projects/inspect", {
@@ -749,16 +912,76 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     if (!project || !activeSessionId) return;
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let resyncTimer: number | undefined;
     const socketProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const endpoint =
-      process.env.NEXT_PUBLIC_RUNTIME_WS_URL ??
-      `${socketProtocol}//${window.location.hostname}:3005/ws/runtime`;
-    const endpointUrl = new URL(endpoint);
-    endpointUrl.searchParams.set("projectPath", project.path);
-    endpointUrl.searchParams.set("sessionId", activeSessionId);
+    const endpointUrl = RUNNER_MODE
+      ? new URL(
+          `/v1/sessions/${encodeURIComponent(activeSessionId)}/observe`,
+          RUNNER_URL,
+        )
+      : new URL(
+          process.env.NEXT_PUBLIC_RUNTIME_WS_URL ??
+            `${socketProtocol}//${window.location.hostname}:3005/ws/runtime`,
+        );
+    endpointUrl.protocol = endpointUrl.protocol === "https:" ? "wss:" : "ws:";
+    if (!RUNNER_MODE) {
+      endpointUrl.searchParams.set("projectPath", project.path);
+      endpointUrl.searchParams.set("sessionId", activeSessionId);
+    }
+
+    const clearResyncTimer = () => {
+      if (resyncTimer) window.clearTimeout(resyncTimer);
+      resyncTimer = undefined;
+    };
+
+    const requestSnapshotResync = (socket: WebSocket, current: RuntimeStore) => {
+      if (
+        resyncingRef.current ||
+        socket.readyState !== WebSocket.OPEN ||
+        !current.sessionId
+      ) {
+        return;
+      }
+      resyncingRef.current = true;
+      clearResyncTimer();
+      try {
+        socket.send(JSON.stringify({
+          version: 1,
+          kind: "command",
+          id: crypto.randomUUID(),
+          type: "runtime.snapshot.get",
+          sessionId: current.sessionId,
+          runId: current.snapshot?.run.runId ?? undefined,
+          timestamp: new Date().toISOString(),
+          payload: { afterSequence: current.lastSequence },
+        }));
+      } catch {
+        resyncingRef.current = false;
+        socket.close(SNAPSHOT_RESYNC_CLOSE_CODE, "snapshot resync send failed");
+        return;
+      }
+      commit((state) => ({ ...state, connection: "reconnecting", error: null }));
+      resyncTimer = window.setTimeout(() => {
+        resyncTimer = undefined;
+        if (
+          disposed ||
+          socketRef.current !== socket ||
+          !resyncingRef.current
+        ) {
+          return;
+        }
+        commit((state) => ({
+          ...state,
+          connection: "reconnecting",
+          error: "Runtime snapshot resync timed out; reconnecting",
+        }));
+        socket.close(SNAPSHOT_RESYNC_CLOSE_CODE, "snapshot resync timed out");
+      }, SNAPSHOT_RESYNC_TIMEOUT_MS);
+    };
 
     const connect = () => {
       if (disposed) return;
+      clearResyncTimer();
       commit((state) => ({
         ...state,
         connection: reconnectAttemptRef.current > 0 ? "reconnecting" : "connecting",
@@ -773,6 +996,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         reconnectAttemptRef.current = 0;
       });
       socket.addEventListener("message", (message) => {
+        if (socketRef.current !== socket) return;
         try {
           const event = JSON.parse(String(message.data)) as ServerEvent;
           const current = storeRef.current;
@@ -781,12 +1005,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             current.lastSequence > 0 &&
             event.sequence !== current.lastSequence + 1
           ) {
-            if (!resyncingRef.current) {
-              resyncingRef.current = true;
-              sendCommand("runtime.snapshot.get", {
-                afterSequence: current.lastSequence,
-              });
-            }
+            requestSnapshotResync(socket, current);
             return;
           }
           if (
@@ -794,17 +1013,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             current.snapshot &&
             event.payload.baseRevision !== current.snapshot.variables.revision
           ) {
-            if (!resyncingRef.current) {
-              resyncingRef.current = true;
-              sendCommand("runtime.snapshot.get", {
-                afterSequence: current.lastSequence,
-              });
-            }
+            requestSnapshotResync(socket, current);
             return;
           }
           if (resyncingRef.current && event.type !== "runtime.snapshot") return;
-          if (event.type === "runtime.snapshot") resyncingRef.current = false;
-          commit((state) => applyEvent(state, event));
+          if (event.type === "runtime.snapshot") {
+            clearResyncTimer();
+            resyncingRef.current = false;
+          }
+          commitServerEvent(event);
         } catch (error) {
           commit((state) => ({
             ...state,
@@ -813,7 +1030,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         }
       });
       socket.addEventListener("close", (event) => {
-        if (disposed) return;
+        if (disposed || socketRef.current !== socket) return;
+        clearResyncTimer();
+        resyncingRef.current = false;
+        socketRef.current = null;
         if (event.code === 1000 || event.code === 1008 || event.code === 4001) {
           commit((state) => ({
             ...state,
@@ -825,7 +1045,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         reconnectAttemptRef.current += 1;
         commit((state) => ({ ...state, connection: "reconnecting" }));
         const delay = Math.min(250 * 2 ** (reconnectAttemptRef.current - 1), 3_000);
-        reconnectTimer = setTimeout(connect, delay);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = undefined;
+          connect();
+        }, delay);
       });
       socket.addEventListener("error", () => {
         commit((state) => ({
@@ -839,10 +1062,43 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     return () => {
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      clearResyncTimer();
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [activeSessionId, commit, project, sendCommand]);
+  }, [activeSessionId, commit, commitServerEvent, project]);
+
+  useEffect(() => {
+    if (!RUNNER_MODE || !project || !activeSessionId) return;
+    let disposed = false;
+    const refresh = async () => {
+      try {
+        const [loaded, storage, monitor] = await Promise.all([
+          loadSessions(project.path),
+          httpRequest<SessionStorageStats>("/v1/storage"),
+          httpRequest<RunnerMonitor>(`/v1/sessions/${encodeURIComponent(activeSessionId)}/monitor`),
+        ]);
+        if (disposed) return;
+        setSessions(loaded.items);
+        setSessionStorage(storage);
+        setRunnerMonitor(monitor);
+        setActiveSession((current) => current?.id === monitor.session.id ? monitor.session : current);
+      } catch (error) {
+        if (!disposed) {
+          commit((state) => ({
+            ...state,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        }
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 2_500);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [activeSessionId, commit, project]);
 
   const actions = useMemo(
     () => ({
@@ -901,6 +1157,25 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       getArtifact: (artifactId: string) => {
         if (storeRef.current.artifactContents[artifactId] !== undefined) return;
         sendCommand("runtime.artifact.get", { artifactId });
+      },
+      getArtifactPage: (artifactId: string, page: number, pageSize: number) => {
+        if (!storeRef.current.supportsPagination) {
+          if (storeRef.current.artifactContents[artifactId] === undefined) {
+            sendCommand("runtime.artifact.get", { artifactId });
+          }
+          return;
+        }
+        const key = `${artifactId}:${page}:${pageSize}`;
+        if (storeRef.current.artifactPages[key] !== undefined) return;
+        sendCommand("runtime.artifact.page", { artifactId, page, pageSize });
+      },
+      getVariablePage: (path: string, page: number, pageSize: number) => {
+        if (!storeRef.current.supportsPagination) return;
+        const revision = storeRef.current.snapshot?.variables.revision;
+        if (revision === undefined) return;
+        const key = `${path}:${revision}:${page}:${pageSize}`;
+        if (storeRef.current.variablePages[key] !== undefined) return;
+        sendCommand("runtime.variable.page", { path, page, pageSize });
       },
       pauseRun: () => sendCommand("run.pause", {}),
       detachHarness: (harnessId: string) => {
@@ -992,6 +1267,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       sessions,
       activeSession,
       sessionStorage,
+      runnerMode: RUNNER_MODE,
+      runnerMonitor,
       closeProject,
       clearSessions,
       createSession,
@@ -1012,6 +1289,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       selectProject,
       selectSession,
       sessionStorage,
+      runnerMonitor,
       sessions,
       store,
     ],

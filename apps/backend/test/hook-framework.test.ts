@@ -10,6 +10,7 @@ import type { HookFixture } from '#core/hooks/types'
 import { initializeProjectDirectory } from '#core/project-initializer'
 import { ProjectResources } from '#core/project-resources'
 import { ProjectResourceRegistry } from '#core/resources/resource-registry'
+import { verifyResearchLedger } from '#core/research-ledger'
 import type { RuntimeLlm } from '#core/runtime-loop'
 import { RuntimeLoop } from '#core/runtime-loop'
 import type { ClientCommand } from '#protocol/runtime-protocol'
@@ -54,6 +55,14 @@ function fixture(): HookFixture {
         project_path: '', workspace_path: '', config_file: '', main_template: '', initialized_at: '',
         system_variables_revision: '',
         prompts: {}, missing_prompts: [], sys_message: [],
+        cache: {
+          version: 1,
+          summary: '',
+          messages: [],
+          loop: { run_id: 'run-test', iteration: 1, tool_round: 0, continuation_round: 0 },
+          compression_count: 0,
+          compressed_at: '',
+        },
       },
       task: { title: '' },
       agent: { name: 'capybara' },
@@ -448,26 +457,16 @@ test('Hook runner preserves LLM usage from failed retry attempts', async () => {
   }
 })
 
-test('Runtime runs ordinary Hooks after every model iteration and exposes results to the next iteration', async () => {
+test('Runtime compresses only Cache after a model iteration exceeds the context limit', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-runtime-'))
   initializeProjectDirectory(projectDir)
-  const hookFile = path.join(projectDir, 'hooks', 'test-context-compression.ts')
-  const source = fs.readFileSync(
-    path.join(projectDir, '.capybara', 'hooks', 'context-compression.ts'),
-    'utf8',
-  )
-    .replaceAll('context-compression', 'test-context-compression')
-    .replace('status.context.utilization >= 0.72', 'status.context.utilization >= 0')
-    .replace('status.messageCount > 10', 'status.messageCount > 1')
-    .replace('conversation.slice(-6)', 'conversation.slice(-1)')
-    .replace('conversation.slice(0, -6)', 'conversation.slice(0, -1)')
-  fs.writeFileSync(hookFile, source)
+  const largeCacheMarker = `old-cache-content-${'x'.repeat(80_000)}`
   let runtimeCalls = 0
   let hookCalls = 0
   const runtimeRequests: Parameters<RuntimeLlm['chat']>[0][] = []
   const llm: RuntimeLlm = {
     chat: async (request) => {
-      const hookCall = request.messages.some((message) => message.content.includes('Compress the earlier'))
+      const hookCall = request.messages.some((message) => message.content.includes('Compress the runtime Cache'))
       if (hookCall) hookCalls += 1
       else {
         runtimeCalls += 1
@@ -477,9 +476,9 @@ test('Runtime runs ordinary Hooks after every model iteration and exposes result
         provider: 'custom',
         model: 'hook-model',
         text: hookCall
-          ? `summary produced by Hook ${hookCalls}`
+          ? 'compressed cache summary'
           : JSON.stringify(runtimeCalls === 1
-            ? { status: 'running', content: 'continue after the first Hook' }
+            ? { status: 'running', content: largeCacheMarker }
             : { status: 'completed', content: 'runtime answer' }),
         usage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 },
         raw: {},
@@ -525,18 +524,180 @@ test('Runtime runs ordinary Hooks after every model iteration and exposes result
     const state = loop.exportState()
     const hookArtifacts = state.artifacts.filter((artifact) => (
       artifact.meta.kind === 'hook-result'
-      && (artifact.value as { hookId?: string }).hookId === 'test-context-compression'
+      && (artifact.value as { hookId?: string }).hookId === 'context-compression'
     ))
     assert.equal(runtimeCalls, 2, JSON.stringify(state.artifacts, null, 2))
-    assert.equal(hookCalls, 2, JSON.stringify(state.artifacts, null, 2))
-    assert.match(runtimeRequests[1]?.messages[0]?.content ?? '', /summary produced by Hook 1/)
-    assert.equal(snapshot.variables.value.context.history_summary, 'summary produced by Hook 2')
-    assert.deepEqual(hookArtifacts.map((artifact) => (
-      (artifact.value as { loopIteration?: number }).loopIteration
-    )), [1, 2])
+    assert.equal(hookCalls, 1, JSON.stringify(state.artifacts, null, 2))
+    assert.ok(runtimeRequests[1]?.messages.some((message) => (
+      message.name === 'capybara_cache_summary'
+      && message.content.includes('compressed cache summary')
+    )))
+    assert.equal(JSON.stringify(runtimeRequests[1]?.messages).includes(largeCacheMarker), false)
+    assert.equal(snapshot.variables.value.builtin.cache.summary, 'compressed cache summary')
+    assert.equal(snapshot.variables.value.builtin.cache.compression_count, 1)
+    assert.equal(snapshot.variables.value.context.history_summary, '')
+    assert.ok(hookArtifacts.some((artifact) => (
+      (artifact.value as { matched?: boolean; loopIteration?: number }).matched === true
+      && (artifact.value as { loopIteration?: number }).loopIteration === 1
+    )))
+    const restored = new RuntimeLoop({
+      projectDir,
+      llm,
+      initialState: loop.exportState(),
+      stepDelayMs: 0,
+      streamDelayMs: 0,
+    })
+    try {
+      const restoredCache = restored.getSnapshot(0).variables.value.builtin.cache
+      assert.equal(restoredCache.summary, 'compressed cache summary')
+      assert.equal(restoredCache.compression_count, 1)
+      assert.ok(restored.exportState().llmMessages.some((message) => (
+        message.name === 'capybara_cache_summary'
+        && message.content.includes('compressed cache summary')
+      )))
+    } finally {
+      restored.close()
+    }
   } finally {
     loop.close()
     fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('Runtime invokes the same Cache compression Hook before a model request after its limit is lowered', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-preflight-cache-'))
+  initializeProjectDirectory(projectDir)
+  const resources = new ProjectResources(projectDir)
+  resources.saveSettings({
+    ...resources.readSettings(),
+    context: {
+      context_window_tokens: 200_000,
+      max_input_tokens: 150_000,
+      reserved_output_tokens: 20_000,
+    },
+  })
+  const largeCacheMarker = `oversized-existing-cache-${'y'.repeat(80_000)}`
+  let runtimeCalls = 0
+  let hookCalls = 0
+  const runtimeRequests: Parameters<RuntimeLlm['chat']>[0][] = []
+  const llm: RuntimeLlm = {
+    chat: async (request) => {
+      const hookCall = request.messages.some((message) => message.content.includes('Compress the runtime Cache'))
+      if (hookCall) {
+        hookCalls += 1
+        return {
+          provider: 'custom', model: 'hook-model', text: 'preflight cache summary', raw: {},
+        }
+      }
+      runtimeCalls += 1
+      runtimeRequests.push(structuredClone({ ...request, signal: undefined }))
+      return {
+        provider: 'custom', model: 'hook-model',
+        text: JSON.stringify(runtimeCalls === 1
+          ? { status: 'completed', content: largeCacheMarker }
+          : { status: 'completed', content: 'completed after preflight compression' }),
+        raw: {},
+      }
+    },
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'hook-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
+    }),
+  }
+  const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
+  try {
+    await runLoopOnce(loop, 'preflight-cache-seed', 1)
+    assert.equal(hookCalls, 0)
+    resources.saveSettings({
+      ...resources.readSettings(),
+      context: {
+        context_window_tokens: 16_000,
+        max_input_tokens: 16_000,
+        reserved_output_tokens: 2_000,
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await runLoopOnce(loop, 'preflight-cache-after-limit-change', 2)
+    assert.equal(hookCalls, 1)
+    assert.equal(runtimeCalls, 2)
+    assert.ok(runtimeRequests[1]?.messages.some((message) => (
+      message.name === 'capybara_cache_summary'
+      && message.content.includes('preflight cache summary')
+    )))
+    assert.equal(JSON.stringify(runtimeRequests[1]?.messages).includes(largeCacheMarker), false)
+    const cache = loop.getSnapshot(0).variables.value.builtin.cache
+    assert.equal(cache.summary, 'preflight cache summary')
+    assert.equal(cache.compression_count, 1)
+    assert.ok(loop.exportState().artifacts.some((artifact) => (
+      artifact.meta.kind === 'hook-result'
+      && (artifact.value as { hookId?: string; checkpoint?: string }).hookId === 'context-compression'
+      && (artifact.value as { checkpoint?: string }).checkpoint === 'before_model_overflow'
+    )))
+  } finally {
+    loop.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('System Cache compression Hook cannot replace messages or patch variables outside Cache', async () => {
+  const cases = [
+    {
+      name: 'messages',
+      permissions: '{ messages: "replace" }',
+      result: 'return { messages };',
+      runArguments: '{ messages }',
+      expected: /may only modify builtin\.cache/,
+    },
+    {
+      name: 'variables',
+      permissions: '{ variables: "patch" }',
+      result: 'return { patches: [{ op: "replace", path: "/context/history_summary", value: "forbidden" }] };',
+      runArguments: '{}',
+      expected: /may only patch builtin\.cache/,
+    },
+  ] as const
+  for (const scenario of cases) {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), `capybara-hook-cache-boundary-${scenario.name}-`))
+    initializeProjectDirectory(projectDir)
+    const llm: RuntimeLlm = {
+      chat: async () => ({
+        provider: 'custom', model: 'hook-model',
+        text: JSON.stringify({ status: 'completed', content: 'runtime answer' }), raw: {},
+      }),
+      getConfig: () => ({
+        provider: 'custom', protocol: 'responses', model: 'hook-model',
+        baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
+      }),
+    }
+    const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
+    try {
+      fs.writeFileSync(
+        path.join(projectDir, '.capybara', 'hooks', 'context-compression.ts'),
+        `import { defineHook } from "@capybara-agent/sdk";
+
+export default defineHook({
+  name: "context-compression",
+  description: "Attempt a forbidden system compression mutation.",
+  enabled: true,
+  trigger() { return true; },
+  schedule: { priority: 9000, timeoutMs: 2000, onError: "continue" },
+  permissions: ${scenario.permissions},
+  run(${scenario.runArguments}) { ${scenario.result} },
+});
+`,
+      )
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      await runLoopOnce(loop, `hook-cache-boundary-${scenario.name}`, 1)
+      const errorArtifact = loop.exportState().artifacts.find((artifact) => (
+        artifact.meta.kind === 'runtime-error'
+        && (artifact.value as { hookId?: string }).hookId === 'context-compression'
+      ))
+      assert.match((errorArtifact?.value as { message?: string } | undefined)?.message ?? '', scenario.expected)
+      assert.equal(loop.getSnapshot(0).variables.value.context.history_summary, '')
+    } finally {
+      loop.close()
+      fs.rmSync(projectDir, { recursive: true, force: true })
+    }
   }
 })
 
@@ -582,6 +743,20 @@ test('Runtime runs an ordinary Hook once after a multi-tool batch and once after
     assert.deepEqual(hookArtifacts.map((artifact) => (
       (artifact.value as { loopIteration?: number }).loopIteration
     )), [1, 2])
+    const cache = loop.getSnapshot(0).variables.value.builtin.cache
+    const messages = cache.messages as Array<{
+      role?: string
+      toolCalls?: Array<{ id?: string; name?: string; arguments?: unknown }>
+      toolCallId?: string
+    }>
+    const toolCallingMessage = messages.find((message) => Array.isArray(message.toolCalls))
+    assert.deepEqual(toolCallingMessage?.toolCalls?.map((call) => call.id), ['search-tools', 'search-hooks'])
+    assert.deepEqual(messages.filter((message) => message.role === 'tool').map((message) => (
+      message.toolCallId
+    )), ['search-tools', 'search-hooks'])
+    assert.equal(cache.loop.iteration, 2)
+    assert.equal(cache.loop.tool_round, 1)
+    assert.equal(cache.loop.continuation_round, 0)
   } finally {
     loop.close()
     fs.rmSync(projectDir, { recursive: true, force: true })
@@ -654,6 +829,69 @@ export default defineHook({
     assert.equal(
       resources.readSystemVariables().variables.find((variable) => variable.key === 'agent_identity')?.value,
       projectValue,
+    )
+  } finally {
+    loop.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('Runtime appends permissioned Hook research events and updates the ledger head cursor', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-research-ledger-'))
+  initializeProjectDirectory(projectDir)
+  const variablesFile = path.join(projectDir, '.capybara', 'system-variables.json')
+  const variables = JSON.parse(fs.readFileSync(variablesFile, 'utf8'))
+  variables.variables.push({
+    key: 'research_cursor',
+    type: 'object',
+    label: 'Research cursor',
+    description: 'Tracks the research ledger head.',
+    value: { ledger_head: '' },
+    required: true,
+    readonly: false,
+    scope: 'project',
+  })
+  fs.writeFileSync(variablesFile, `${JSON.stringify(variables, null, 2)}\n`)
+  fs.appendFileSync(path.join(projectDir, 'main.j2'), '\n{{ builtin.variables.research_cursor.ledger_head }}\n')
+  fs.writeFileSync(path.join(projectDir, 'hooks', 'research-ledger.ts'), `import { defineHook } from "@capybara-agent/sdk";
+
+export default defineHook({
+  name: "research-ledger",
+  description: "Append one test research event.",
+  enabled: true,
+  trigger() { return true; },
+  schedule: { priority: 0, timeoutMs: 2000, onError: "continue" },
+  permissions: { research: "append" },
+  run() {
+    return {
+      researchEvents: [{
+        eventType: "experiment.completed",
+        idempotencyKey: "experiment-E-1",
+        payload: { experiment_id: "E-1", outcome: "supports" },
+      }],
+    };
+  },
+});
+`)
+  const llm: RuntimeLlm = {
+    chat: async () => ({
+      provider: 'custom', model: 'hook-model',
+      text: JSON.stringify({ status: 'completed', content: 'runtime answer' }), raw: {},
+    }),
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'hook-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
+    }),
+  }
+  const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
+  try {
+    await runLoopOnce(loop, 'hook-research-ledger', 1)
+    const ledger = verifyResearchLedger(projectDir)
+    assert.equal(ledger.totalEvents, 1)
+    assert.match(ledger.head, /^[a-f0-9]{64}$/)
+    assert.equal(
+      (loop.getSnapshot(0).variables.value.builtin.variables?.research_cursor as { ledger_head?: string }).ledger_head,
+      ledger.head,
     )
   } finally {
     loop.close()

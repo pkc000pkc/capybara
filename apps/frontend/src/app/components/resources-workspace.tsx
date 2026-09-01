@@ -2,15 +2,13 @@
 
 import {
   Activity,
-  BookOpen,
-  Brain,
+  Blocks,
   CircleAlert,
   CircleCheck,
   Eye,
   EyeOff,
   FileText,
   GitBranch,
-  Layers3,
   LoaderCircle,
   LockKeyhole,
   Plus,
@@ -19,20 +17,19 @@ import {
   SlidersHorizontal,
   Trash2,
   Variable,
-  Webhook,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { RuntimeToolsState } from "../runtime-protocol";
+import type { SystemVariableType, SystemVariableValue } from "../resource-api";
 import CodeSurface from "./code-surface";
 import GitResourceWorkspace from "./git-resource-workspace";
-import HookResourceWorkspace from "./hook-resource-workspace";
+import PluginResourceWorkspace from "./plugin-resource-workspace";
 import ProjectFilesWorkspace from "./project-files-workspace";
 import ResourceDefinitionWorkspace from "./resource-definition-workspace";
 import ResizeHandle from "./resize-handle";
-import SkillResourceWorkspace from "./skill-resource-workspace";
 import {
   PanelHeader,
   WorkspaceListPane,
@@ -42,20 +39,17 @@ import {
 export type ResourceSection =
   | "files"
   | "version-control"
+  | "plugins"
   | "tools"
-  | "skills"
-  | "harnesses"
-  | "hooks"
   | "system-variables"
   | "project-settings"
-  | "system-settings"
-  | "memory";
+  | "system-settings";
 type SystemVariableDefinition = {
   key: string;
-  type: "text" | "prompt_template";
+  type: SystemVariableType;
   label: string;
   description: string;
-  value: string;
+  value: SystemVariableValue;
   required: boolean;
   readonly: boolean;
   show_in_status: boolean;
@@ -71,10 +65,12 @@ type SystemVariablesResource = {
 type ProjectSettings = {
   main_template: string;
   max_messages: number;
+  max_tool_rounds: number;
   llm: {
     model: string;
     base_url: string;
-    protocol: "responses" | "chat-completions";
+    protocol: "responses" | "codex-like" | "chat-completions";
+    max_retries: number;
     api_key: string;
     api_key_configured: boolean;
   };
@@ -84,14 +80,104 @@ type ProjectSettings = {
     experience_auto_attach: boolean;
   };
   context: {
+    context_window_tokens: number;
     max_input_tokens: number;
     reserved_output_tokens: number;
   };
 };
 
+const validMaxToolRounds = (value: number) =>
+  Number.isInteger(value) && (value === -1 || value >= 1);
+
+const validMaxRetries = (value: number) =>
+  Number.isInteger(value) && (value === -1 || value >= 0);
+
+const validContextSettings = (context: ProjectSettings["context"]) =>
+  Number.isInteger(context.context_window_tokens)
+  && context.context_window_tokens >= 1024
+  && context.context_window_tokens <= 10000000
+  && Number.isInteger(context.max_input_tokens)
+  && context.max_input_tokens >= 1024
+  && context.max_input_tokens <= context.context_window_tokens
+  && Number.isInteger(context.reserved_output_tokens)
+  && context.reserved_output_tokens >= 128
+  && context.reserved_output_tokens < context.context_window_tokens;
+
 type LlmTestState =
   | { status: "success"; model: string; durationMs: number }
   | { status: "error"; message: string };
+
+const VARIABLE_TYPES: SystemVariableType[] = ["text", "prompt_template", "boolean", "integer", "number", "date", "datetime", "array", "object", "secret_ref"];
+const variableTypeLabelKey: Record<SystemVariableType, string> = {
+  text: "resources.variableTypeText", prompt_template: "resources.variableTypePromptTemplate", boolean: "resources.variableTypeBoolean", integer: "resources.variableTypeInteger", number: "resources.variableTypeNumber", date: "resources.variableTypeDate", datetime: "resources.variableTypeDatetime", array: "resources.variableTypeArray", object: "resources.variableTypeObject", secret_ref: "resources.variableTypeSecretRef",
+};
+const valueForType = (type: SystemVariableType): SystemVariableValue => type === "boolean" ? false : type === "integer" || type === "number" ? 0 : type === "array" ? [] : type === "object" ? {} : type === "date" ? new Date().toISOString().slice(0, 10) : type === "datetime" ? new Date().toISOString() : "";
+const valueText = (value: SystemVariableValue) => typeof value === "string" ? value : JSON.stringify(value, null, 2);
+const parseValueText = (type: SystemVariableType, text: string): SystemVariableValue => {
+  if (["array", "object"].includes(type)) { try { return JSON.parse(text) as SystemVariableValue; } catch { return text; } }
+  if (type === "boolean") return text === "true";
+  if (type === "integer") return Number.parseInt(text, 10);
+  if (type === "number") return Number(text);
+  return text;
+};
+
+function previewValue(value: SystemVariableValue): string {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function renderPreviewFragment(
+  fragment: string,
+  variables: readonly SystemVariableDefinition[],
+  testKey: string,
+  testValue: SystemVariableValue,
+): string {
+  const values: Record<string, SystemVariableValue> = Object.fromEntries(variables.map((item) => [item.key, item.value]));
+  values[testKey] = testValue;
+  const interpolation = /{{\s*(?:builtin\.)?(?:variables|prompts)\.([a-z][a-z0-9_]*)\s*}}/g;
+  const render = (input: string, depth: number, seen: ReadonlySet<string>): string => input.replace(interpolation, (_match, key: string) => {
+    const value = values[key];
+    if (value === undefined) return `{{ builtin.variables.${key} }}`;
+    const rendered = previewValue(value);
+    if (typeof value === "string" && depth < 6 && interpolation.test(rendered) && !seen.has(key)) {
+      interpolation.lastIndex = 0;
+      return render(rendered, depth + 1, new Set([...seen, key]));
+    }
+    interpolation.lastIndex = 0;
+    return rendered;
+  });
+  return render(fragment, 0, new Set());
+}
+
+function PromptRenderPreview({ variable, variables }: { variable: SystemVariableDefinition; variables: readonly SystemVariableDefinition[] }) {
+  const { t } = useI18n();
+  const fragment = variable.type === "prompt_template" ? String(variable.value) : `{{ builtin.variables.${variable.key} }}`;
+  const [fragmentText, setFragmentText] = useState(fragment);
+  const [testText, setTestText] = useState(() => previewValue(variable.value));
+  const testValue = parseValueText(variable.type, testText);
+  const rendered = renderPreviewFragment(fragmentText, variables, variable.key, testValue);
+  return (
+    <section className="grid gap-2 border border-[#c6d4d4] bg-[#f7faf9] p-3" aria-label={t("resources.variableRenderPreview")}>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[10px] font-semibold text-[#536d72]">{t("resources.variableRenderPreview")}</span>
+        <span className="font-mono text-[9px] text-[#718488]">Jinja2</span>
+      </div>
+      <div className="grid gap-2">
+        <label className="grid gap-1">
+          <span className="text-[9px] font-semibold text-[#718488]">{t("resources.variablePromptFragment")}</span>
+          <textarea aria-label={t("resources.variablePromptFragment")} className="min-h-14 w-full resize-y border border-[#d6e1e0] bg-white p-2 font-mono text-[10px] leading-4 text-[#294247] outline-none focus:border-[#0c766e]" onChange={(event) => setFragmentText(event.target.value)} value={fragmentText} />
+        </label>
+        <label className="grid gap-1">
+          <span className="text-[9px] font-semibold text-[#718488]">{t("resources.variableTestValue")}</span>
+          <textarea aria-label={t("resources.variableTestValue")} className="min-h-14 resize-y border border-[#d6e1e0] bg-white p-2 font-mono text-[10px] leading-4 text-[#294247] outline-none focus:border-[#0c766e]" onChange={(event) => setTestText(event.target.value)} value={testText} />
+        </label>
+      </div>
+      <div className="grid gap-1">
+        <span className="text-[9px] font-semibold text-[#718488]">{t("resources.variableRenderedOutput")}</span>
+        <pre className="min-h-14 whitespace-pre-wrap border border-[#b9d5d0] bg-[#eef7f4] p-2 font-mono text-[10px] leading-4 text-[#174f4c]">{rendered}</pre>
+      </div>
+    </section>
+  );
+}
 
 const DIVIDER_SIZE = 1;
 const NAVIGATION_DEFAULT_WIDTH = 156;
@@ -108,13 +194,10 @@ const RESOURCE_SECTIONS: {
 }[] = [
   { id: "files", icon: FileText },
   { id: "version-control", icon: GitBranch },
+  { id: "plugins", icon: Blocks },
   { id: "tools", icon: Wrench },
-  { id: "harnesses", icon: Layers3 },
-  { id: "skills", icon: BookOpen },
-  { id: "hooks", icon: Webhook },
   { id: "system-variables", icon: Variable },
   { id: "project-settings", icon: SlidersHorizontal },
-  { id: "memory", icon: Brain },
 ];
 const SYSTEM_SETTINGS_SECTION = { id: "system-settings", icon: Settings2 } as const;
 
@@ -150,22 +233,16 @@ function sectionLabel(
       return t("resources.files");
     case "version-control":
       return t("resources.versionControl");
+    case "plugins":
+      return t("resources.plugins");
     case "tools":
       return t("resources.tools");
-    case "skills":
-      return t("resources.skills");
-    case "harnesses":
-      return t("resources.harnesses");
-    case "hooks":
-      return t("resources.hooks");
     case "system-variables":
       return t("resources.systemVariables");
     case "project-settings":
       return t("resources.projectSettings");
     case "system-settings":
       return t("resources.systemSettings");
-    case "memory":
-      return t("resources.memory");
   }
 }
 
@@ -264,18 +341,39 @@ function ResourceSaveButton({
   );
 }
 
+function EmptyResourcePanel({
+  icon: Icon,
+  title,
+}: {
+  icon: LucideIcon;
+  title: string;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="flex h-full min-h-0 items-center justify-center bg-white px-4 text-center text-[#718488]">
+      <div>
+        <Icon aria-hidden="true" className="mx-auto" size={22} strokeWidth={1.5} />
+        <h2 className="mt-2 text-xs font-semibold text-[#48646a]">{title}</h2>
+        <p className="mt-1 text-[11px]">{t("resources.empty")}</p>
+      </div>
+    </div>
+  );
+}
+
 function SystemVariableDetails({
   dirty,
   onChange,
   onDelete,
   onSave,
   variable,
+  variables,
 }: {
   dirty: boolean;
   onChange: (changes: Partial<SystemVariableDefinition>) => void;
   onDelete: () => void;
   onSave: () => void;
   variable?: SystemVariableDefinition;
+  variables?: readonly SystemVariableDefinition[];
 }) {
   const { t } = useI18n();
   if (!variable) {
@@ -291,6 +389,7 @@ function SystemVariableDetails({
     );
   }
   const fieldClass = "h-8 w-full border border-[#c6d4d4] bg-white px-2 text-xs text-[#294247] outline-none focus:border-[#0c766e] focus:ring-1 focus:ring-[#0c766e] disabled:bg-[#f1f5f4] disabled:text-[#718488]";
+  const allVariables = variables ?? [variable];
   return (
     <section className="grid h-full min-h-0 grid-rows-[34px_1fr] bg-white">
       <PanelHeader
@@ -337,29 +436,29 @@ function SystemVariableDetails({
             <select
               className={fieldClass}
               disabled={variable.readonly}
-              onChange={(event) => onChange({ type: event.target.value as SystemVariableDefinition["type"] })}
+              onChange={(event) => { const type = event.target.value as SystemVariableType; onChange({ type, value: valueForType(type) }); }}
               value={variable.type}
             >
-              <option value="text">{t("resources.variableTypeText")}</option>
-              <option value="prompt_template">{t("resources.variableTypePromptTemplate")}</option>
+              {VARIABLE_TYPES.map((type) => <option key={type} value={type}>{t(variableTypeLabelKey[type] as Parameters<typeof t>[0])}</option>)}
             </select>
           </label>
           <div className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
             <span>{t("resources.variableValue")}</span>
-            <CodeSurface
+            {variable.type === "boolean" ? <select aria-label={t("resources.variableValue")} className={fieldClass} disabled={variable.readonly} onChange={(event) => onChange({ value: event.target.value === "true" })} value={String(variable.value)}><option value="true">true</option><option value="false">false</option></select> : ["integer", "number"].includes(variable.type) ? <input aria-label={t("resources.variableValue")} className={fieldClass} disabled={variable.readonly} onChange={(event) => onChange({ value: parseValueText(variable.type, event.target.value) })} type="number" step={variable.type === "integer" ? 1 : "any"} value={String(variable.value)} /> : variable.type === "date" ? <input aria-label={t("resources.variableValue")} className={fieldClass} disabled={variable.readonly} onChange={(event) => onChange({ value: event.target.value })} type="date" value={String(variable.value)} /> : variable.type === "datetime" ? <input aria-label={t("resources.variableValue")} className={fieldClass} disabled={variable.readonly} onChange={(event) => onChange({ value: event.target.value })} placeholder="2026-08-19T12:30:00Z" type="text" value={String(variable.value)} /> : <CodeSurface
               ariaLabel={t("resources.variableValue")}
-              className="h-56 border border-[#c6d4d4]"
+              className="h-32 border border-[#c6d4d4]"
               key={`${variable.type}:${variable.readonly ? "readonly" : "editable"}`}
               language={variable.type === "prompt_template" ? "Jinja2" : "Markdown"}
               lineNumbers={false}
               lineWrapping
-              onChange={(value) => onChange({ value })}
+              onChange={(value) => onChange({ value: parseValueText(variable.type, value) })}
               onSave={onSave}
               readOnly={variable.readonly}
               statusBar={false}
-              value={variable.value}
-            />
+              value={valueText(variable.value)}
+            />}
           </div>
+          <PromptRenderPreview key={`${variable.key}:${variable.type}:${valueText(variable.value)}`} variable={variable} variables={allVariables} />
           <label className="flex items-center gap-2 text-[11px] text-[#35555a]">
             <input checked={variable.required} disabled={variable.readonly} onChange={(event) => onChange({ required: event.target.checked })} type="checkbox" />
             {t("resources.variableRequired")}
@@ -407,11 +506,14 @@ function ProjectSettingsPanel({
 }) {
   const { t } = useI18n();
   const [showApiKey, setShowApiKey] = useState(false);
+  const maxToolRoundsValid = validMaxToolRounds(settings.max_tool_rounds);
+  const maxRetriesValid = validMaxRetries(settings.llm.max_retries);
+  const contextSettingsValid = validContextSettings(settings.context);
   const fieldClass = "h-8 border border-[#c6d4d4] bg-white px-2 font-mono text-xs text-[#294247] outline-none focus:border-[#0c766e] focus:ring-1 focus:ring-[#0c766e]";
   return (
     <section className="grid h-full min-h-0 grid-rows-[34px_1fr] bg-white">
       <PanelHeader
-        actions={<ResourceSaveButton disabled={!dirty} onClick={onSave} />}
+        actions={<ResourceSaveButton disabled={!dirty || !maxToolRoundsValid || !maxRetriesValid || !contextSettingsValid} onClick={onSave} />}
         icon={SlidersHorizontal}
         title={t("resources.projectSettings")}
       />
@@ -435,11 +537,50 @@ function ProjectSettingsPanel({
                 value={settings.max_messages}
               />
             </label>
+            <div className="mt-3 grid max-w-xl grid-cols-2 items-start gap-3">
+              <label className="grid content-start gap-1.5 text-[10px] font-semibold text-[#536d72]">
+                {t("resources.maxLoopRounds")}
+                <input
+                  aria-invalid={!maxToolRoundsValid}
+                  className={fieldClass}
+                  onChange={(event) => onChange({
+                    ...settings,
+                    max_tool_rounds: Number(event.target.value),
+                  })}
+                  type="number"
+                  value={settings.max_tool_rounds}
+                />
+                <span className="font-normal text-[#718488]">
+                  {t("resources.maxLoopRoundsHelp")}
+                </span>
+              </label>
+              <label className="grid content-start gap-1.5 text-[10px] font-semibold text-[#536d72]">
+                {t("resources.contextWindow")}
+                <input
+                  aria-invalid={!Number.isInteger(settings.context.context_window_tokens)
+                    || settings.context.context_window_tokens < 1024
+                    || settings.context.context_window_tokens > 10000000}
+                  className={fieldClass}
+                  max={10000000}
+                  min={1024}
+                  onChange={(event) => onChange({
+                    ...settings,
+                    context: { ...settings.context, context_window_tokens: Number(event.target.value) },
+                  })}
+                  type="number"
+                  value={settings.context.context_window_tokens}
+                />
+              </label>
+            </div>
             <div className="mt-3 grid max-w-xl grid-cols-2 gap-3">
               <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
                 {t("resources.maxInputTokens")}
                 <input
+                  aria-invalid={!Number.isInteger(settings.context.max_input_tokens)
+                    || settings.context.max_input_tokens < 1024
+                    || settings.context.max_input_tokens > settings.context.context_window_tokens}
                   className={fieldClass}
+                  max={settings.context.context_window_tokens}
                   min={1024}
                   onChange={(event) => onChange({
                     ...settings,
@@ -452,7 +593,11 @@ function ProjectSettingsPanel({
               <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
                 {t("resources.reservedOutputTokens")}
                 <input
+                  aria-invalid={!Number.isInteger(settings.context.reserved_output_tokens)
+                    || settings.context.reserved_output_tokens < 128
+                    || settings.context.reserved_output_tokens >= settings.context.context_window_tokens}
                   className={fieldClass}
+                  max={Math.max(settings.context.context_window_tokens - 1, 128)}
                   min={128}
                   onChange={(event) => onChange({
                     ...settings,
@@ -463,6 +608,9 @@ function ProjectSettingsPanel({
                 />
               </label>
             </div>
+            {!contextSettingsValid && (
+              <p className="mt-1.5 text-[10px] text-[#a13b32]">{t("resources.contextLimitsInvalid")}</p>
+            )}
           </section>
           <section aria-labelledby="llm-settings-heading" className="border-t border-[#cbd8d9] py-5">
             <div className="flex max-w-xl items-center justify-between gap-3">
@@ -507,6 +655,7 @@ function ProjectSettingsPanel({
                   value={settings.llm.protocol}
                 >
                   <option value="responses">Responses API</option>
+                  <option value="codex-like">Codex-like</option>
                   <option value="chat-completions">Chat Completions</option>
                 </select>
               </label>
@@ -550,6 +699,22 @@ function ProjectSettingsPanel({
                   </button>
                 </span>
               </div>
+              <label className="grid content-start gap-1.5 text-[10px] font-semibold text-[#536d72]">
+                {t("resources.llmMaxRetries")}
+                <input
+                  aria-invalid={!maxRetriesValid}
+                  className={fieldClass}
+                  onChange={(event) => onChange({
+                    ...settings,
+                    llm: { ...settings.llm, max_retries: Number(event.target.value) },
+                  })}
+                  type="number"
+                  value={settings.llm.max_retries}
+                />
+                <span className={maxRetriesValid ? "font-normal text-[#718488]" : "font-normal text-[#a13b32]"}>
+                  {t(maxRetriesValid ? "resources.llmMaxRetriesHelp" : "resources.llmMaxRetriesInvalid")}
+                </span>
+              </label>
               {testState && (
                 <div
                   className={
@@ -654,27 +819,6 @@ function SystemSettingsPanel({ preferences }: { preferences?: ReactNode }) {
   );
 }
 
-function EmptyResourcePanel({
-  icon: Icon,
-  title,
-}: {
-  icon: LucideIcon;
-  title: string;
-}) {
-  const { t } = useI18n();
-  return (
-    <section className="flex h-full min-h-0 items-center justify-center bg-white">
-      <div className="flex flex-col items-center gap-3 text-center text-[#718488]">
-        <Icon aria-hidden="true" size={26} strokeWidth={1.4} />
-        <div>
-          <h2 className="text-xs font-semibold text-[#48646a]">{title}</h2>
-          <p className="mt-1 text-[11px]">{t("resources.empty")}</p>
-        </div>
-      </div>
-    </section>
-  );
-}
-
 export default function ResourcesWorkspace({
   activeSection: controlledActiveSection,
   onSectionChange,
@@ -704,10 +848,12 @@ export default function ResourcesWorkspace({
   const [settings, setSettings] = useState<ProjectSettings>({
     main_template: "main.j2",
     max_messages: 20,
+    max_tool_rounds: 8,
     llm: {
       model: "",
       base_url: "",
       protocol: "responses",
+      max_retries: 3,
       api_key: "",
       api_key_configured: false,
     },
@@ -717,6 +863,7 @@ export default function ResourcesWorkspace({
       experience_auto_attach: true,
     },
     context: {
+      context_window_tokens: 16000,
       max_input_tokens: 16000,
       reserved_output_tokens: 2000,
     },
@@ -842,15 +989,23 @@ export default function ResourcesWorkspace({
   };
 
   const saveSettings = async () => {
-    if (!settingsDirty || saving) return;
+    if (
+      !settingsDirty
+      || saving
+      || !validMaxToolRounds(settings.max_tool_rounds)
+      || !validMaxRetries(settings.llm.max_retries)
+      || !validContextSettings(settings.context)
+    ) return;
     setSaving(true);
     try {
       const saved = await resourceRequest<ProjectSettings>(projectPath, "project-settings", {
         max_messages: settings.max_messages,
+        max_tool_rounds: settings.max_tool_rounds,
         llm: {
           model: settings.llm.model,
           base_url: settings.llm.base_url,
           protocol: settings.llm.protocol,
+          max_retries: settings.llm.max_retries,
           ...(settings.llm.api_key ? { api_key: settings.llm.api_key } : {}),
         },
         harness_policy: settings.harness_policy,
@@ -879,6 +1034,7 @@ export default function ResourcesWorkspace({
         model: settings.llm.model,
         base_url: settings.llm.base_url,
         protocol: settings.llm.protocol,
+        max_retries: settings.llm.max_retries,
         ...(settings.llm.api_key ? { api_key: settings.llm.api_key } : {}),
       }, "POST");
       setLlmTestState({
@@ -958,20 +1114,18 @@ export default function ResourcesWorkspace({
         <GitResourceWorkspace divider={catalogDivider} projectPath={projectPath} />
       )}
 
+      {activeSection === "plugins" && (
+        <PluginResourceWorkspace
+          divider={catalogDivider}
+          key={`plugins:${projectPath}`}
+          onManageTools={() => selectSection("tools")}
+          projectPath={projectPath}
+          variables={systemVariables}
+        />
+      )}
+
       {activeSection === "tools" && (
         <ResourceDefinitionWorkspace catalogWidth={catalogWidth} divider={catalogDivider} key={`tools:${projectPath}`} kind="tool" projectPath={projectPath} runtimeTools={runtimeTools} />
-      )}
-
-      {activeSection === "skills" && (
-        <SkillResourceWorkspace catalogWidth={catalogWidth} divider={catalogDivider} key={`skills:${projectPath}`} projectPath={projectPath} runtimeTools={runtimeTools} />
-      )}
-
-      {activeSection === "harnesses" && (
-        <ResourceDefinitionWorkspace catalogWidth={catalogWidth} divider={catalogDivider} key={`harnesses:${projectPath}`} kind="harness" projectPath={projectPath} runtimeTools={runtimeTools} />
-      )}
-
-      {activeSection === "hooks" && (
-        <HookResourceWorkspace divider={catalogDivider} key={`hooks:${projectPath}`} projectPath={projectPath} />
       )}
 
       {activeSection === "system-variables" && (
@@ -1021,6 +1175,7 @@ export default function ResourcesWorkspace({
               onDelete={deleteSystemVariable}
               onSave={() => void saveSystemVariables()}
               variable={selectedSystemVariable}
+              variables={systemVariables}
             />
           </div>
         </>
@@ -1058,17 +1213,6 @@ export default function ResourcesWorkspace({
           role="tabpanel"
         >
           <SystemSettingsPanel preferences={preferences} />
-        </div>
-      )}
-
-      {activeSection === "memory" && (
-        <div
-          aria-labelledby="resource-memory-tab"
-          className="col-span-3 min-h-0"
-          id="resource-memory-panel"
-          role="tabpanel"
-        >
-          <EmptyResourcePanel icon={Brain} title={t("resources.memory")} />
         </div>
       )}
 

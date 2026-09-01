@@ -1,4 +1,5 @@
-import http from 'node:http'
+import { createHash, randomUUID } from 'node:crypto'
+import http, { type IncomingHttpHeaders } from 'node:http'
 import https from 'node:https'
 
 import type {
@@ -6,6 +7,7 @@ import type {
   LlmChatResponse,
   LlmConfig,
   LlmProvider,
+  LlmRequestDiagnostics,
   LlmRetryHandler,
   LlmTextDeltaHandler,
   LlmToolCall,
@@ -16,12 +18,198 @@ interface HttpResult {
   statusCode: number
   statusMessage: string
   text: string
+  responseHeaders: Record<string, string>
+}
+
+interface RetriedHttpResult extends HttpResult {
+  diagnostics: LlmRequestDiagnostics
+}
+
+interface SerializedRequest {
+  json: string
+  payloadHash: string
+  payloadBytes: number
+  messageCount: number
+  toolCount: number
+}
+
+interface RequestCounts {
+  messageCount: number
+  toolCount: number
+}
+
+interface CodexRequestContext {
+  installationId: string
+  sessionId: string
+  threadId: string
+  turnId: string
+  windowId: string
+  turnMetadata: string
+}
+
+// Compatibility fingerprint verified against the official Codex CLI wire protocol.
+const CODEX_CLIENT_VERSION = '0.146.0'
+const CODEX_ORIGINATOR = 'codex_exec'
+const CODEX_USER_AGENT = `codex_exec/${CODEX_CLIENT_VERSION} (Windows 10.0.26200; x86_64) dumb (codex_exec; ${CODEX_CLIENT_VERSION})`
+const CODEX_BETA_FEATURES = 'remote_compaction_v2'
+
+const SAFE_RESPONSE_HEADERS = new Set([
+  'cf-ray',
+  'date',
+  'request-id',
+  'retry-after',
+  'server',
+  'server-timing',
+  'traceparent',
+  'via',
+  'x-correlation-id',
+  'x-envoy-upstream-service-time',
+  'x-openai-request-id',
+  'x-request-id',
+  'x-response-time',
+])
+
+const REQUEST_ID_HEADERS = [
+  'x-request-id',
+  'x-openai-request-id',
+  'request-id',
+  'x-correlation-id',
+  'traceparent',
+  'cf-ray',
+]
+
+function safeResponseHeaders(headers: IncomingHttpHeaders): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers)) {
+    const normalized = name.toLowerCase()
+    if (!SAFE_RESPONSE_HEADERS.has(normalized) || value === undefined) continue
+    result[normalized] = Array.isArray(value) ? value.join(', ') : String(value)
+  }
+  return result
+}
+
+function serializeRequest(body: unknown, counts?: RequestCounts): SerializedRequest {
+  const json = JSON.stringify(body)
+  if (json === undefined) throw new Error('LLM request body cannot be serialized')
+  const record = body && typeof body === 'object' && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : {}
+  const messages = Array.isArray(record.messages)
+    ? record.messages
+    : Array.isArray(record.input)
+      ? record.input
+      : []
+  const tools = Array.isArray(record.tools) ? record.tools : []
+  return {
+    json,
+    payloadHash: createHash('sha256').update(json).digest('hex'),
+    payloadBytes: Buffer.byteLength(json),
+    messageCount: counts?.messageCount ?? messages.length,
+    toolCount: counts?.toolCount ?? tools.length,
+  }
+}
+
+function requestDiagnostics(
+  request: SerializedRequest,
+  attempt: number,
+  maxRetries: number,
+  startedAt: number,
+  statusCode?: number,
+  responseHeaders: Record<string, string> = {},
+): LlmRequestDiagnostics {
+  const requestId = REQUEST_ID_HEADERS
+    .map((name) => responseHeaders[name])
+    .find((value) => Boolean(value))
+  return {
+    attempt,
+    maxAttempts: maxRetries === -1 ? -1 : maxRetries + 1,
+    elapsedMs: Math.max(0, Date.now() - startedAt),
+    ...(statusCode === undefined ? {} : { statusCode }),
+    ...(requestId ? { requestId } : {}),
+    responseHeaders,
+    payloadHash: request.payloadHash,
+    payloadBytes: request.payloadBytes,
+    messageCount: request.messageCount,
+    toolCount: request.toolCount,
+  }
+}
+
+export class LlmRequestError extends Error {
+  constructor(
+    message: string,
+    readonly diagnostics: LlmRequestDiagnostics,
+    cause?: unknown,
+  ) {
+    super(message, cause === undefined ? undefined : { cause })
+    this.name = 'LlmRequestError'
+  }
+}
+
+class HttpAttemptError extends Error {
+  constructor(
+    error: Error,
+    readonly statusCode?: number,
+    readonly responseHeaders: Record<string, string> = {},
+  ) {
+    super(error.message, { cause: error })
+    this.name = error.name
+  }
+}
+
+function finalRequestError(
+  error: unknown,
+  request: SerializedRequest,
+  attempt: number,
+  maxRetries: number,
+  startedAt: number,
+): LlmRequestError {
+  if (error instanceof LlmRequestError) return error
+  const attemptError = error instanceof HttpAttemptError ? error : undefined
+  const message = error instanceof Error ? error.message : String(error)
+  return new LlmRequestError(
+    message,
+    requestDiagnostics(
+      request,
+      attempt,
+      maxRetries,
+      startedAt,
+      attemptError?.statusCode,
+      attemptError?.responseHeaders,
+    ),
+    error,
+  )
+}
+
+function httpResultError(
+  result: HttpResult,
+  request: SerializedRequest,
+  attempt: number,
+  maxRetries: number,
+  startedAt: number,
+  message = `LLM request failed (${result.statusCode} ${result.statusMessage}): ${result.text}`,
+): LlmRequestError {
+  return new LlmRequestError(
+    message,
+    requestDiagnostics(
+      request,
+      attempt,
+      maxRetries,
+      startedAt,
+      result.statusCode,
+      result.responseHeaders,
+    ),
+  )
+}
+
+function abortError(signal?: AbortSignal): Error {
+  if (signal?.reason instanceof Error) return signal.reason
+  return new Error(signal?.reason === undefined ? 'LLM request aborted' : String(signal.reason))
 }
 
 function postJson(
   target: string,
   headers: Record<string, string>,
-  body: unknown,
+  body: string,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<HttpResult> {
@@ -34,25 +222,29 @@ function postJson(
       { method: 'POST', headers, timeout: timeoutMs },
       (response) => {
         response.setEncoding('utf8')
+        const statusCode = response.statusCode ?? 0
+        const responseHeaders = safeResponseHeaders(response.headers)
         let text = ''
         response.on('data', (chunk: string) => {
           text += chunk
         })
         response.on('end', () => {
           resolve({
-            statusCode: response.statusCode ?? 0,
+            statusCode,
             statusMessage: response.statusMessage ?? '',
             text,
+            responseHeaders,
           })
         })
+        response.on('error', (error) => reject(new HttpAttemptError(error, statusCode, responseHeaders)))
       },
     )
     request.on('timeout', () => request.destroy(new Error('LLM request timed out')))
     request.on('error', reject)
-    const abort = () => request.destroy(new Error('LLM request aborted'))
+    const abort = () => request.destroy(abortError(signal))
     signal?.addEventListener('abort', abort, { once: true })
     request.once('close', () => signal?.removeEventListener('abort', abort))
-    request.end(JSON.stringify(body))
+    request.end(body)
   })
 }
 
@@ -67,14 +259,33 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     const abort = () => {
       clearTimeout(timer)
       signal?.removeEventListener('abort', abort)
-      reject(new Error('LLM request aborted'))
+      reject(abortError(signal))
     }
     signal?.addEventListener('abort', abort, { once: true })
   })
 }
 
-function retryableStatus(statusCode: number): boolean {
-  return statusCode === 408 || statusCode === 429 || statusCode >= 500
+const PERMANENT_CLIENT_ERROR_STATUSES = new Set([
+  400, 401, 402, 404, 405, 406, 407, 410, 411, 412, 413, 414, 415, 416,
+  417, 418, 421, 422, 426, 428, 431, 451,
+])
+
+export function retryableLlmStatus(statusCode: number): boolean {
+  if (statusCode >= 500 && statusCode <= 599) return true
+  return statusCode >= 400
+    && statusCode <= 499
+    && !PERMANENT_CLIENT_ERROR_STATUSES.has(statusCode)
+}
+
+function canRetry(failedAttempt: number, maxRetries: number): boolean {
+  return maxRetries === -1 || failedAttempt <= maxRetries
+}
+
+export function retryDelayMs(failedAttempt: number, randomValue = Math.random()): number {
+  const exponent = Math.min(Math.max(failedAttempt - 1, 0), 5)
+  const baseDelayMs = Math.min(1_000 * 2 ** exponent, 30_000)
+  const boundedRandom = Math.max(0, Math.min(1, randomValue))
+  return Math.round(baseDelayMs * (0.5 + boundedRandom * 0.5))
 }
 
 class RetryableLlmStreamError extends Error {
@@ -83,6 +294,7 @@ class RetryableLlmStreamError extends Error {
 
 function retryableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
+  if (error instanceof HttpAttemptError) return retryableError(error.cause)
   if (error instanceof RetryableLlmStreamError) return true
   const code = 'code' in error ? String(error.code) : ''
   return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND'].includes(code)
@@ -97,10 +309,10 @@ async function waitForRetry(
   onRetry?: LlmRetryHandler,
   statusCode?: number,
 ): Promise<void> {
-  const delayMs = Math.min(1_000 * 2 ** (failedAttempt - 1), 8_000)
+  const delayMs = retryDelayMs(failedAttempt)
   const notification = {
     attempt: failedAttempt + 1,
-    maxAttempts: maxRetries + 1,
+    maxAttempts: maxRetries === -1 ? -1 : maxRetries + 1,
     reason,
     ...(statusCode === undefined ? {} : { statusCode }),
   }
@@ -117,33 +329,62 @@ async function postJsonWithRetry(
   maxRetries: number,
   signal?: AbortSignal,
   onRetry?: LlmRetryHandler,
-): Promise<HttpResult> {
-  let lastError: unknown
-  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-    let retryReason = 'Retrying model request'
-    let retryStatusCode: number | undefined
+  retryableResponse?: (result: HttpResult) => string | undefined,
+  counts?: RequestCounts,
+): Promise<RetriedHttpResult> {
+  const serialized = serializeRequest(body, counts)
+  const startedAt = Date.now()
+  for (let attempt = 0; ; attempt += 1) {
+    const failedAttempt = attempt + 1
+    let result: HttpResult
     try {
       signal?.throwIfAborted()
-      const result = await postJson(target, headers, body, timeoutMs, signal)
-      if (!retryableStatus(result.statusCode) || attempt === maxRetries) return result
-      lastError = new Error(`LLM request failed with retryable status ${result.statusCode}`)
-      retryReason = `HTTP ${result.statusCode}${result.statusMessage ? ` ${result.statusMessage}` : ''}`
-      retryStatusCode = result.statusCode
+      result = await postJson(target, headers, serialized.json, timeoutMs, signal)
     } catch (error) {
-      lastError = error
-      if (!retryableError(error) || attempt === maxRetries) throw error
-      retryReason = error instanceof Error ? error.message : String(error)
+      if (!retryableError(error) || !canRetry(failedAttempt, maxRetries)) {
+        throw finalRequestError(error, serialized, failedAttempt, maxRetries, startedAt)
+      }
+      await waitForRetry(
+        failedAttempt,
+        maxRetries,
+        error instanceof Error ? error.message : String(error),
+        signal,
+        onRetry,
+      )
+      continue
+    }
+    const successfulHttp = result.statusCode >= 200 && result.statusCode < 300
+    const semanticRetryReason = successfulHttp ? retryableResponse?.(result) : undefined
+    if (successfulHttp && !semanticRetryReason) {
+      return {
+        ...result,
+        diagnostics: requestDiagnostics(
+          serialized,
+          failedAttempt,
+          maxRetries,
+          startedAt,
+          result.statusCode,
+          result.responseHeaders,
+        ),
+      }
+    }
+    const retryReason = semanticRetryReason
+      ?? `HTTP ${result.statusCode}${result.statusMessage ? ` ${result.statusMessage}` : ''}`
+    if (
+      (!semanticRetryReason && !retryableLlmStatus(result.statusCode))
+      || !canRetry(failedAttempt, maxRetries)
+    ) {
+      throw httpResultError(result, serialized, failedAttempt, maxRetries, startedAt, semanticRetryReason)
     }
     await waitForRetry(
-      attempt + 1,
+      failedAttempt,
       maxRetries,
       retryReason,
       signal,
       onRetry,
-      retryStatusCode,
+      semanticRetryReason ? undefined : result.statusCode,
     )
   }
-  throw lastError
 }
 
 class SseDecoder {
@@ -189,7 +430,7 @@ class SseDecoder {
 function postSse(
   target: string,
   headers: Record<string, string>,
-  body: unknown,
+  body: string,
   timeoutMs: number,
   onEvent: (event: string, data: string) => void,
   signal?: AbortSignal,
@@ -216,11 +457,12 @@ function postSse(
         response.setEncoding('utf8')
         const statusCode = response.statusCode ?? 0
         const statusMessage = response.statusMessage ?? ''
+        const responseHeaders = safeResponseHeaders(response.headers)
         let text = ''
         if (statusCode < 200 || statusCode >= 300) {
           response.on('data', (chunk: string) => { text += chunk })
-          response.on('end', () => finish({ statusCode, statusMessage, text }))
-          response.on('error', fail)
+          response.on('end', () => finish({ statusCode, statusMessage, text, responseHeaders }))
+          response.on('error', (error) => fail(new HttpAttemptError(error, statusCode, responseHeaders)))
           return
         }
         const decoder = new SseDecoder(onEvent)
@@ -229,27 +471,35 @@ function postSse(
             decoder.push(chunk)
           } catch (error) {
             request.destroy()
-            fail(error instanceof Error ? error : new Error(String(error)))
+            const normalized = error instanceof Error ? error : new Error(String(error))
+            fail(new HttpAttemptError(normalized, statusCode, responseHeaders))
           }
         })
         response.on('end', () => {
           try {
             decoder.finish()
-            finish({ statusCode, statusMessage, text: '' })
+            finish({ statusCode, statusMessage, text: '', responseHeaders })
           } catch (error) {
-            fail(error instanceof Error ? error : new Error(String(error)))
+            const normalized = error instanceof Error ? error : new Error(String(error))
+            fail(new HttpAttemptError(normalized, statusCode, responseHeaders))
           }
         })
-        response.on('error', fail)
+        response.on('error', (error) => fail(new HttpAttemptError(error, statusCode, responseHeaders)))
       },
     )
     request.on('timeout', () => request.destroy(new Error('LLM request timed out')))
     request.on('error', fail)
-    const abort = () => request.destroy(new Error('LLM request aborted'))
+    const abort = () => request.destroy(abortError(signal))
     signal?.addEventListener('abort', abort, { once: true })
     request.once('close', () => signal?.removeEventListener('abort', abort))
-    request.end(JSON.stringify(body))
+    request.end(body)
   })
+}
+
+interface SseRetryController {
+  onAttemptStart(): void
+  onEvent(event: string, data: string): void
+  hasExposedOutput(): boolean
 }
 
 async function postSseWithRetry(
@@ -258,47 +508,71 @@ async function postSseWithRetry(
   body: unknown,
   timeoutMs: number,
   maxRetries: number,
-  onEvent: (event: string, data: string) => void,
+  controller: SseRetryController,
   signal?: AbortSignal,
   onRetry?: LlmRetryHandler,
-): Promise<HttpResult> {
-  let lastError: unknown
-  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-    let receivedEvent = false
-    let retryReason = 'Retrying model request'
-    let retryStatusCode: number | undefined
+  counts?: RequestCounts,
+): Promise<RetriedHttpResult> {
+  const serialized = serializeRequest(body, counts)
+  const startedAt = Date.now()
+  for (let attempt = 0; ; attempt += 1) {
+    const failedAttempt = attempt + 1
+    controller.onAttemptStart()
+    let result: HttpResult
     try {
-      const result = await postSse(
+      result = await postSse(
         target,
         headers,
-        body,
+        serialized.json,
         timeoutMs,
-        (event, data) => {
-          receivedEvent = true
-          onEvent(event, data)
-        },
+        (event, data) => controller.onEvent(event, data),
         signal,
       )
-      if (!retryableStatus(result.statusCode) || attempt === maxRetries) return result
-      lastError = new Error(`LLM request failed with retryable status ${result.statusCode}`)
-      retryReason = `HTTP ${result.statusCode}${result.statusMessage ? ` ${result.statusMessage}` : ''}`
-      retryStatusCode = result.statusCode
     } catch (error) {
-      lastError = error
-      const retryableAfterEvent = error instanceof RetryableLlmStreamError && error.retryableAfterEvent
-      if ((receivedEvent && !retryableAfterEvent) || !retryableError(error) || attempt === maxRetries) throw error
-      retryReason = error instanceof Error ? error.message : String(error)
+      if (
+        controller.hasExposedOutput()
+        || !retryableError(error)
+        || !canRetry(failedAttempt, maxRetries)
+      ) {
+        throw finalRequestError(error, serialized, failedAttempt, maxRetries, startedAt)
+      }
+      await waitForRetry(
+        failedAttempt,
+        maxRetries,
+        error instanceof Error ? error.message : String(error),
+        signal,
+        onRetry,
+        error instanceof HttpAttemptError && (error.statusCode ?? 0) >= 400
+          ? error.statusCode
+          : undefined,
+      )
+      continue
+    }
+    if (result.statusCode >= 200 && result.statusCode < 300) {
+      return {
+        ...result,
+        diagnostics: requestDiagnostics(
+          serialized,
+          failedAttempt,
+          maxRetries,
+          startedAt,
+          result.statusCode,
+          result.responseHeaders,
+        ),
+      }
+    }
+    if (!retryableLlmStatus(result.statusCode) || !canRetry(failedAttempt, maxRetries)) {
+      throw httpResultError(result, serialized, failedAttempt, maxRetries, startedAt)
     }
     await waitForRetry(
-      attempt + 1,
+      failedAttempt,
       maxRetries,
-      retryReason,
+      `HTTP ${result.statusCode}${result.statusMessage ? ` ${result.statusMessage}` : ''}`,
       signal,
       onRetry,
-      retryStatusCode,
+      result.statusCode,
     )
   }
-  throw lastError
 }
 
 interface OpenAiResponse {
@@ -418,6 +692,8 @@ function responsesFailure(payload: ResponsesApiResponse): { code: string; messag
       'server_is_overloaded',
       'rate_limit_exceeded',
       'temporarily_unavailable',
+      'upstream_error',
+      'bad_response_status_code',
     ].includes(code),
   }
 }
@@ -466,6 +742,40 @@ function responsesInput(messages: LlmChatRequest['messages']): unknown[] {
   })
 }
 
+function codexLikeResponsesInput(messages: LlmChatRequest['messages']): unknown[] {
+  return messages.flatMap((message) => {
+    if (message.role === 'system') return []
+    if (message.role === 'tool') {
+      if (!message.toolCallId) throw new Error('tool messages require toolCallId')
+      return [{
+        type: 'function_call_output',
+        call_id: message.toolCallId,
+        output: message.content,
+      }]
+    }
+    const items: unknown[] = []
+    if (message.content) {
+      items.push({
+        type: 'message',
+        role: message.role,
+        content: [{
+          type: message.role === 'assistant' ? 'output_text' : 'input_text',
+          text: message.content,
+        }],
+      })
+    }
+    for (const call of message.toolCalls ?? []) {
+      items.push({
+        type: 'function_call',
+        call_id: call.id,
+        name: call.name,
+        arguments: JSON.stringify(call.arguments),
+      })
+    }
+    return items
+  })
+}
+
 function chatMessages(messages: LlmChatRequest['messages']): unknown[] {
   return messages.map((message) => {
     if (message.role === 'tool') {
@@ -501,12 +811,98 @@ function requestTools(tools: LlmChatRequest['tools']) {
   }))
 }
 
-function requestHeaders(config: LlmConfig): Record<string, string> {
+function createCodexRequestContext(
+  request: LlmChatRequest,
+  installationId: string,
+  defaultSessionId: string,
+): CodexRequestContext {
+  const sessionId = request.clientMetadata?.sessionId?.trim() || defaultSessionId
+  const threadId = request.clientMetadata?.threadId?.trim() || sessionId
+  const turnId = request.clientMetadata?.turnId?.trim() || randomUUID()
+  const windowId = `${sessionId}:0`
+  return {
+    installationId,
+    sessionId,
+    threadId,
+    turnId,
+    windowId,
+    turnMetadata: JSON.stringify({
+      installation_id: installationId,
+      session_id: sessionId,
+      thread_id: threadId,
+      turn_id: turnId,
+      window_id: windowId,
+      request_kind: 'turn',
+      thread_source: 'user',
+      sandbox: 'none',
+      turn_started_at_unix_ms: 0,
+    }),
+  }
+}
+
+function requestHeaders(
+  config: LlmConfig,
+  codexContext?: CodexRequestContext,
+  stream = true,
+): Record<string, string> {
   return {
     'content-type': 'application/json',
-    accept: 'text/event-stream',
+    ...(stream || codexContext ? { accept: 'text/event-stream' } : {}),
     ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
+    ...(codexContext
+      ? {
+          originator: CODEX_ORIGINATOR,
+          'user-agent': CODEX_USER_AGENT,
+          'x-openai-internal-codex-responses-lite': 'true',
+          'x-client-request-id': codexContext.sessionId,
+          'session-id': codexContext.sessionId,
+          'thread-id': codexContext.threadId,
+          'x-codex-window-id': codexContext.windowId,
+          'x-codex-turn-metadata': codexContext.turnMetadata,
+          'x-codex-beta-features': CODEX_BETA_FEATURES,
+        }
+      : {}),
     ...config.headers,
+  }
+}
+
+function responsesRequestBody(
+  config: LlmConfig,
+  request: LlmChatRequest,
+  model: string,
+  instructions: string,
+  codexContext: CodexRequestContext | undefined,
+  stream: boolean,
+): Record<string, unknown> {
+  const codexLike = config.protocol === 'codex-like'
+  if (codexLike && !codexContext) throw new Error('Codex-like requests require request metadata')
+  return {
+    model,
+    instructions: instructions || undefined,
+    input: codexLike
+      ? codexLikeResponsesInput(request.messages)
+      : responsesInput(request.messages),
+    tools: requestTools(request.tools),
+    ...(codexLike
+      ? {
+          tool_choice: 'auto',
+          parallel_tool_calls: false,
+          reasoning: { effort: 'medium', context: 'all_turns', summary: 'auto' },
+          text: { verbosity: 'low' },
+          include: ['reasoning.encrypted_content'],
+          prompt_cache_key: codexContext?.sessionId,
+          client_metadata: {
+            installation_id: codexContext?.installationId,
+            session_id: codexContext?.sessionId,
+            thread_id: codexContext?.threadId,
+            turn_id: codexContext?.turnId,
+            window_id: codexContext?.windowId,
+          },
+        }
+      : { temperature: request.temperature }),
+    max_output_tokens: request.maxTokens,
+    store: false,
+    stream,
   }
 }
 
@@ -520,6 +916,9 @@ function parseStreamData(data: string): Record<string, unknown> | undefined {
 }
 
 export class OpenAiCompatibleProvider implements LlmProvider {
+  private readonly codexInstallationId = randomUUID()
+  private readonly codexSessionId = randomUUID()
+
   constructor(private readonly config: LlmConfig) {}
 
   getConfig(): Readonly<LlmConfig> {
@@ -531,7 +930,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     onTextDelta: LlmTextDeltaHandler,
   ): Promise<LlmChatResponse> {
     if (!this.config.baseUrl) throw new Error('LLM base URL is required')
-    return this.config.protocol === 'responses'
+    return this.config.protocol !== 'chat-completions'
       ? this.responsesStream(request, onTextDelta)
       : this.chatCompletionsStream(request, onTextDelta)
   }
@@ -539,7 +938,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
   async chat(request: LlmChatRequest): Promise<LlmChatResponse> {
     if (!this.config.baseUrl) throw new Error('LLM base URL is required')
 
-    if (this.config.protocol === 'responses') {
+    if (this.config.protocol !== 'chat-completions') {
       return this.responses(request)
     }
 
@@ -573,11 +972,9 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       this.config.maxRetries,
       request.signal,
       request.onRetry,
+      undefined,
+      { messageCount: request.messages.length, toolCount: request.tools?.length ?? 0 },
     )
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(`LLM request failed (${response.statusCode} ${response.statusMessage}): ${response.text}`)
-    }
 
     const payload = JSON.parse(response.text) as OpenAiResponse
     const choice = payload.choices?.[0]
@@ -605,13 +1002,24 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     onTextDelta: LlmTextDeltaHandler,
   ): Promise<LlmChatResponse> {
     const model = request.model ?? this.config.model
-    let responseModel = model
-    let text = ''
-    let finishReason: string | undefined
-    let usage: LlmUsage | undefined
-    let raw: unknown
-    let receivedPayload = false
-    const calls = new Map<number, { id: string; name: string; arguments: string }>()
+    type AttemptState = {
+      responseModel: string
+      text: string
+      finishReason?: string
+      usage?: LlmUsage
+      raw?: unknown
+      receivedPayload: boolean
+      exposedOutput: boolean
+      calls: Map<number, { id: string; name: string; arguments: string }>
+    }
+    const newAttemptState = (): AttemptState => ({
+      responseModel: model,
+      text: '',
+      receivedPayload: false,
+      exposedOutput: false,
+      calls: new Map(),
+    })
+    let state = newAttemptState()
     const response = await postSseWithRetry(
       endpoint(this.config.baseUrl),
       requestHeaders(this.config),
@@ -636,37 +1044,46 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       },
       this.config.timeoutMs,
       this.config.maxRetries,
-      (_event, data) => {
-        const payload = parseStreamData(data) as ChatCompletionChunk | undefined
-        if (!payload) return
-        receivedPayload = true
-        raw = payload
-        responseModel = payload.model ?? responseModel
-        usage = usageFromResponse(payload.usage) ?? usage
-        const choice = payload.choices?.[0]
-        if (choice?.finish_reason) finishReason = choice.finish_reason
-        const delta = choice?.delta?.content
-        if (typeof delta === 'string' && delta) {
-          text += delta
-          onTextDelta(delta)
-        }
-        for (const part of choice?.delta?.tool_calls ?? []) {
-          const index = part.index ?? 0
-          const call = calls.get(index) ?? { id: '', name: '', arguments: '' }
-          call.id = part.id ?? call.id
-          call.name += part.function?.name ?? ''
-          call.arguments += part.function?.arguments ?? ''
-          calls.set(index, call)
-        }
+      {
+        onAttemptStart() {
+          state = newAttemptState()
+        },
+        onEvent(_event, data) {
+          const payload = parseStreamData(data) as ChatCompletionChunk | undefined
+          if (!payload) return
+          state.receivedPayload = true
+          state.raw = payload
+          state.responseModel = payload.model ?? state.responseModel
+          state.usage = usageFromResponse(payload.usage) ?? state.usage
+          const choice = payload.choices?.[0]
+          if (choice?.finish_reason) state.finishReason = choice.finish_reason
+          const delta = choice?.delta?.content
+          if (typeof delta === 'string' && delta) {
+            state.text += delta
+            state.exposedOutput = true
+            onTextDelta(delta)
+          }
+          for (const part of choice?.delta?.tool_calls ?? []) {
+            const index = part.index ?? 0
+            const call = state.calls.get(index) ?? { id: '', name: '', arguments: '' }
+            call.id = part.id ?? call.id
+            call.name += part.function?.name ?? ''
+            call.arguments += part.function?.arguments ?? ''
+            state.calls.set(index, call)
+          }
+        },
+        hasExposedOutput() {
+          return state.exposedOutput
+        },
       },
       request.signal,
       request.onRetry,
+      { messageCount: request.messages.length, toolCount: request.tools?.length ?? 0 },
     )
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(`LLM request failed (${response.statusCode} ${response.statusMessage}): ${response.text}`)
+    if (!state.receivedPayload) {
+      throw new LlmRequestError('LLM stream completed without SSE events', response.diagnostics)
     }
-    if (!receivedPayload) throw new Error('LLM stream completed without SSE events')
-    const toolCalls = [...calls.entries()]
+    const toolCalls = [...state.calls.entries()]
       .sort(([left], [right]) => left - right)
       .map(([, call]) => ({
         id: call.id,
@@ -675,52 +1092,60 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       }))
     return {
       provider: this.config.provider,
-      model: responseModel,
-      text,
+      model: state.responseModel,
+      text: state.text,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      finishReason,
-      usage,
-      raw,
+      finishReason: state.finishReason,
+      usage: state.usage,
+      raw: state.raw,
     }
   }
 
   private async responses(request: LlmChatRequest): Promise<LlmChatResponse> {
     const model = request.model ?? this.config.model
+    const codexContext = this.config.protocol === 'codex-like'
+      ? createCodexRequestContext(request, this.codexInstallationId, this.codexSessionId)
+      : undefined
     const instructions = request.messages
       .filter((message) => message.role === 'system')
       .map((message) => message.content)
       .join('\n\n')
-    const input = responsesInput(request.messages)
     const response = await postJsonWithRetry(
       `${this.config.baseUrl.replace(/\/$/, '')}/responses`,
-      {
-        'content-type': 'application/json',
-        ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}),
-        ...this.config.headers,
-      },
-      {
+      requestHeaders(this.config, codexContext, false),
+      responsesRequestBody(
+        this.config,
+        request,
         model,
-        instructions: instructions || undefined,
-        input,
-        tools: requestTools(request.tools),
-        temperature: request.temperature,
-        max_output_tokens: request.maxTokens,
-        store: false,
-        stream: false,
-      },
+        instructions,
+        codexContext,
+        false,
+      ),
       this.config.timeoutMs,
       this.config.maxRetries,
       request.signal,
       request.onRetry,
+      (result) => {
+        try {
+          const failed = responsesFailure(JSON.parse(result.text) as ResponsesApiResponse)
+          return failed?.retryable
+            ? `LLM response failed (${failed.code}): ${failed.message}`
+            : undefined
+        } catch {
+          return undefined
+        }
+      },
+      { messageCount: request.messages.length, toolCount: request.tools?.length ?? 0 },
     )
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(`LLM request failed (${response.statusCode} ${response.statusMessage}): ${response.text}`)
-    }
 
     const payload = JSON.parse(response.text) as ResponsesApiResponse
     const failed = responsesFailure(payload)
-    if (failed) throw new Error(`LLM response failed (${failed.code}): ${failed.message}`)
+    if (failed) {
+      throw new LlmRequestError(
+        `LLM response failed (${failed.code}): ${failed.message}`,
+        response.diagnostics,
+      )
+    }
     return {
       provider: this.config.provider,
       model: payload.model ?? model,
@@ -737,101 +1162,122 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     onTextDelta: LlmTextDeltaHandler,
   ): Promise<LlmChatResponse> {
     const model = request.model ?? this.config.model
+    const codexContext = this.config.protocol === 'codex-like'
+      ? createCodexRequestContext(request, this.codexInstallationId, this.codexSessionId)
+      : undefined
     const instructions = request.messages
       .filter((message) => message.role === 'system')
       .map((message) => message.content)
       .join('\n\n')
-    let responseModel = model
-    let text = ''
-    let finishReason: string | undefined
-    let usage: LlmUsage | undefined
-    let completed: ResponsesApiResponse | undefined
-    let raw: unknown
-    let receivedPayload = false
-    const output = new Map<number, NonNullable<ResponsesApiResponse['output']>[number]>()
+    type AttemptState = {
+      responseModel: string
+      text: string
+      finishReason?: string
+      usage?: LlmUsage
+      completed?: ResponsesApiResponse
+      raw?: unknown
+      receivedPayload: boolean
+      exposedOutput: boolean
+      output: Map<number, NonNullable<ResponsesApiResponse['output']>[number]>
+    }
+    const newAttemptState = (): AttemptState => ({
+      responseModel: model,
+      text: '',
+      receivedPayload: false,
+      exposedOutput: false,
+      output: new Map(),
+    })
+    let state = newAttemptState()
     const response = await postSseWithRetry(
       `${this.config.baseUrl.replace(/\/$/, '')}/responses`,
-      requestHeaders(this.config),
-      {
+      requestHeaders(this.config, codexContext),
+      responsesRequestBody(
+        this.config,
+        request,
         model,
-        instructions: instructions || undefined,
-        input: responsesInput(request.messages),
-        tools: requestTools(request.tools),
-        temperature: request.temperature,
-        max_output_tokens: request.maxTokens,
-        store: false,
-        stream: true,
-      },
+        instructions,
+        codexContext,
+        true,
+      ),
       this.config.timeoutMs,
       this.config.maxRetries,
-      (eventName, data) => {
-        const value = parseStreamData(data)
-        if (!value) return
-        const event = value as ResponsesStreamEvent
-        const type = event.type ?? eventName
-        receivedPayload = true
-        raw = value
-        if (type === 'response.created' && event.response) {
-          responseModel = event.response.model ?? responseModel
-        } else if (type === 'response.output_text.delta' && typeof event.delta === 'string') {
-          text += event.delta
-          onTextDelta(event.delta)
-        } else if (
-          (type === 'response.output_item.added' || type === 'response.output_item.done') &&
-          event.item
-        ) {
-          output.set(event.output_index ?? output.size, { ...event.item })
-        } else if (type === 'response.function_call_arguments.delta' && typeof event.delta === 'string') {
-          const index = event.output_index ?? 0
-          const item = output.get(index) ?? { type: 'function_call', arguments: '' }
-          item.arguments = `${item.arguments ?? ''}${event.delta}`
-          output.set(index, item)
-        } else if (type === 'response.completed' && event.response) {
-          completed = event.response
-          responseModel = event.response.model ?? responseModel
-          finishReason = event.response.status
-          usage = usageFromResponsesApi(event.response.usage)
-        } else if (type === 'response.failed' && event.response) {
-          const failed = responsesFailure(event.response) ?? {
-            code: 'response_failed',
-            message: 'LLM response failed',
-            retryable: false,
+      {
+        onAttemptStart() {
+          state = newAttemptState()
+        },
+        onEvent(eventName, data) {
+          const value = parseStreamData(data)
+          if (!value) return
+          const event = value as ResponsesStreamEvent
+          const type = event.type ?? eventName
+          state.receivedPayload = true
+          state.raw = value
+          if (type === 'response.created' && event.response) {
+            state.responseModel = event.response.model ?? state.responseModel
+          } else if (type === 'response.output_text.delta' && typeof event.delta === 'string') {
+            state.text += event.delta
+            state.exposedOutput = true
+            onTextDelta(event.delta)
+          } else if (
+            (type === 'response.output_item.added' || type === 'response.output_item.done') &&
+            event.item
+          ) {
+            state.output.set(event.output_index ?? state.output.size, { ...event.item })
+          } else if (type === 'response.function_call_arguments.delta' && typeof event.delta === 'string') {
+            const index = event.output_index ?? 0
+            const item = state.output.get(index) ?? { type: 'function_call', arguments: '' }
+            item.arguments = `${item.arguments ?? ''}${event.delta}`
+            state.output.set(index, item)
+          } else if (type === 'response.completed' && event.response) {
+            state.completed = event.response
+            state.responseModel = event.response.model ?? state.responseModel
+            state.finishReason = event.response.status
+            state.usage = usageFromResponsesApi(event.response.usage)
+          } else if (type === 'response.failed' && event.response) {
+            const failed = responsesFailure(event.response) ?? {
+              code: 'response_failed',
+              message: 'LLM response failed',
+              retryable: false,
+            }
+            const message = `LLM response failed (${failed.code}): ${failed.message}`
+            if (failed.retryable) throw new RetryableLlmStreamError(message)
+            throw new Error(message)
           }
-          const message = `LLM response failed (${failed.code}): ${failed.message}`
-          if (failed.retryable && !text && output.size === 0) throw new RetryableLlmStreamError(message)
-          throw new Error(message)
-        }
+        },
+        hasExposedOutput() {
+          return state.exposedOutput
+        },
       },
       request.signal,
       request.onRetry,
+      { messageCount: request.messages.length, toolCount: request.tools?.length ?? 0 },
     )
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(`LLM request failed (${response.statusCode} ${response.statusMessage}): ${response.text}`)
+    if (!state.receivedPayload) {
+      throw new LlmRequestError('LLM stream completed without SSE events', response.diagnostics)
     }
-    if (!receivedPayload) throw new Error('LLM stream completed without SSE events')
-    if (completed) {
-      const completedText = textFromResponsesApi(completed)
-      if (completedText.startsWith(text)) {
-        const remaining = completedText.slice(text.length)
+    if (state.completed) {
+      const completedText = textFromResponsesApi(state.completed)
+      if (completedText.startsWith(state.text)) {
+        const remaining = completedText.slice(state.text.length)
         if (remaining) onTextDelta(remaining)
-        text = completedText
+        state.text = completedText
       }
     }
-    const payload: ResponsesApiResponse = completed ?? {
-      model: responseModel,
-      status: finishReason,
-      output: [...output.entries()]
+    const payload: ResponsesApiResponse = state.completed ?? {
+      model: state.responseModel,
+      status: state.finishReason,
+      output: [...state.output.entries()]
         .sort(([left], [right]) => left - right)
         .map(([, item]) => item),
     }
     return {
       provider: this.config.provider,
-      model: payload.model ?? responseModel,
-      text: text || textFromResponsesApi(payload),
+      model: payload.model ?? state.responseModel,
+      text: state.text || textFromResponsesApi(payload),
       toolCalls: toolCallsFromResponsesApi(payload),
-      finishReason: payload.status ?? finishReason,
-      usage: usage ?? usageFromResponsesApi(payload.usage),
-      raw: completed ?? raw,
+      finishReason: payload.status ?? state.finishReason,
+      usage: state.usage ?? usageFromResponsesApi(payload.usage),
+      raw: state.completed ?? state.raw,
     }
   }
 }

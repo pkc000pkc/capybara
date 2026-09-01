@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "project",
+  "name": "Project",
+  "description": "Resources owned directly by this Capybara Agent project.",
+  "version": "1.0.0",
+  "resources": {
+    "variables": ".capybara/system-variables.json",
+    "harnesses": [],
+    "hooks": ["hooks"],
+    "trainingHooks": ["training-hooks"]
+  },
+  "toolDependencies": [
+    {
+      "package": "project-files",
+      "version": "^1.0.0"
+    }
+  ]
+}

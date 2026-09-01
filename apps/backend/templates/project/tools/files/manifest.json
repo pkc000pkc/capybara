@@ -1,6 +1,7 @@
 {
   "version": 1,
   "package": "project-files",
+  "packageVersion": "1.0.0",
   "runner": {
     "type": "stdio",
     "entry": "runner.mjs"

@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronsRight,
+  FileText,
   LockKeyhole,
   Plus,
   Play,
@@ -26,6 +27,8 @@ import type {
   RuntimeContextsState,
   RuntimeEffectiveContextsState,
   RuntimeHarnessesState,
+  RuntimeArtifactsState,
+  RuntimeArtifactPage,
   RuntimeSkillsState,
   RuntimeToolsState,
   TemplateState,
@@ -38,7 +41,7 @@ import {
   type WorkspaceTab,
 } from "./workspace-ui";
 
-type ContextTab = "rendered" | "template" | "tools" | "harnesses" | "skills" | "memory";
+type ContextTab = "rendered" | "template" | "tools" | "harnesses" | "hooks";
 type MarkdownMode = "edit" | "preview" | "split";
 
 const TABS: { id: ContextTab }[] = [
@@ -46,8 +49,7 @@ const TABS: { id: ContextTab }[] = [
   { id: "template" },
   { id: "tools" },
   { id: "harnesses" },
-  { id: "skills" },
-  { id: "memory" },
+  { id: "hooks" },
 ];
 
 function MarkdownPreview({
@@ -189,16 +191,18 @@ function RuntimeMessage({ message, index }: { message: RenderMessage; index: num
 
 function RenderResultWorkspace({
   artifactContents,
+  artifactPages,
   contexts,
   effectiveContexts,
-  onGetArtifact,
+  onGetArtifactPage,
   requestId,
   renderResult,
 }: {
   artifactContents: Record<string, JsonValue>;
+  artifactPages: Record<string, RuntimeArtifactPage>;
   contexts: RuntimeContextsState;
   effectiveContexts: RuntimeEffectiveContextsState;
-  onGetArtifact: (artifactId: string) => void;
+  onGetArtifactPage: (artifactId: string, page: number, pageSize: number) => void;
   requestId: string | null;
   renderResult: RenderResultState | null;
 }) {
@@ -207,8 +211,14 @@ function RenderResultWorkspace({
     requestId: string | null;
     contextId: string | null;
   }>({ requestId: null, contextId: null });
+  const [artifactPageSelection, setArtifactPageSelection] = useState<{
+    contextId: string;
+    page: number;
+  } | null>(null);
+  const artifactPageSize = 20;
   const selectedId = selection.requestId === requestId ? selection.contextId : null;
   const contentRef = useRef<HTMLDivElement>(null);
+  const requestedArtifactPagesRef = useRef(new Set<string>());
   const requestContexts = requestId
     ? effectiveContexts.items.filter((item) => item.runId === requestId)
     : effectiveContexts.items;
@@ -225,32 +235,49 @@ function RenderResultWorkspace({
     : -1;
   const totalPages = Math.max(requestContexts.length + (hasLivePage ? 1 : 0), 1);
   const currentPage = selected ? effectiveSelectedIndex + 1 : totalPages;
+  const liveContext = contexts.activeId
+    ? contexts.items.find((item) => item.id === contexts.activeId)
+    : contexts.items.at(-1);
+  const displayedContext = selected ?? liveContext;
+  const artifactPageNumber = displayedContext && artifactPageSelection?.contextId === displayedContext.id
+    ? artifactPageSelection.page
+    : 1;
+  const artifactPageKey = displayedContext
+    ? `${displayedContext.messagesArtifactId}:${artifactPageNumber}:${artifactPageSize}`
+    : null;
+  const displayedArtifactPage = artifactPageKey ? artifactPages[artifactPageKey] : undefined;
+
   useEffect(() => {
-    if (selected && !(selected.messagesArtifactId in artifactContents)) {
-      onGetArtifact(selected.messagesArtifactId);
-    }
-  }, [artifactContents, onGetArtifact, selected]);
+    if (!displayedContext || !artifactPageKey || requestedArtifactPagesRef.current.has(artifactPageKey)) return;
+    requestedArtifactPagesRef.current.add(artifactPageKey);
+    onGetArtifactPage(displayedContext.messagesArtifactId, artifactPageNumber, artifactPageSize);
+  }, [artifactPageKey, artifactPageNumber, displayedContext, onGetArtifactPage]);
 
   useEffect(() => {
     contentRef.current?.scrollTo({ top: 0 });
   }, [selectedId]);
 
-  const artifact = selected
-    ? artifactContents[selected.messagesArtifactId]
+  const fullArtifact = displayedContext
+    ? artifactContents[displayedContext.messagesArtifactId]
     : undefined;
-  const historicalMessages = Array.isArray(artifact)
-    ? artifact as unknown as RenderMessage[]
-    : null;
-  const sourceContext = selected?.contextRevisionId
-    ? contexts.items.find((item) => item.id === selected.contextRevisionId)
+  const pagedMessages = displayedArtifactPage && Array.isArray(displayedArtifactPage.value)
+    ? displayedArtifactPage.value as unknown as RenderMessage[]
+    : Array.isArray(fullArtifact)
+      ? fullArtifact as unknown as RenderMessage[]
+      : null;
+  const sourceContextId = displayedContext && "contextRevisionId" in displayedContext
+    ? displayedContext.contextRevisionId
+    : displayedContext?.id;
+  const sourceContext = sourceContextId
+    ? contexts.items.find((item) => item.id === sourceContextId)
     : undefined;
-  const historicalResult: RenderResultState | null = selected && historicalMessages
+  const historicalResult: RenderResultState | null = displayedContext && pagedMessages
     ? {
-        messages: historicalMessages,
+        messages: pagedMessages,
         format: "llm-messages",
         templateRevision: sourceContext?.templateRevision ?? renderResult?.templateRevision ?? 0,
         variablesRevision: sourceContext?.variablesRevision ?? renderResult?.variablesRevision ?? 0,
-        renderedAt: selected.createdAt,
+        renderedAt: displayedContext.createdAt,
         diagnostics: (sourceContext?.missingVariables ?? []).map((name) => ({
           severity: "warning",
           code: "MISSING_VARIABLE",
@@ -258,7 +285,7 @@ function RenderResultWorkspace({
         })),
       }
     : null;
-  const visibleResult = selected ? historicalResult : renderResult;
+  const visibleResult = displayedContext ? historicalResult : renderResult;
 
   const showPrevious = () => {
     const index = selected ? effectiveSelectedIndex : requestContexts.length;
@@ -274,12 +301,12 @@ function RenderResultWorkspace({
 
   return (
     <div
-      className="grid h-full min-h-0 grid-rows-[32px_minmax(0,1fr)_auto]"
+      className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]"
       data-context-replay-mode={selected ? "history" : "live"}
     >
       <div
         aria-label={t("context.replay")}
-        className="flex min-w-0 items-center justify-between border-b border-[#cbd8d8] bg-[#edf3f2] px-2"
+        className="flex min-h-8 min-w-0 flex-wrap items-center justify-between border-b border-[#cbd8d8] bg-[#edf3f2] px-2"
         role="toolbar"
       >
         <span
@@ -290,7 +317,7 @@ function RenderResultWorkspace({
           {selected ? t("context.replayHistorical") : t("context.replayLive")}
           {requestId ? ` · ${requestId.slice(-8)}` : ""}
         </span>
-        <div className="flex h-full shrink-0 items-center" role="group">
+        <div className="flex min-w-0 shrink flex-wrap items-center justify-end" role="group">
           <button
             aria-label={t("context.replayPrevious")}
             className="flex h-7 w-7 items-center justify-center text-[#536d72] outline-none hover:bg-[#dce8e6] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-default disabled:text-[#aab7b8] disabled:hover:bg-transparent"
@@ -301,6 +328,43 @@ function RenderResultWorkspace({
           >
             <ChevronLeft aria-hidden="true" size={14} strokeWidth={1.8} />
           </button>
+          {displayedArtifactPage && (
+            <>
+              <span className="mx-1 h-4 w-px bg-[#cbd8d8]" aria-hidden="true" />
+              <button
+                aria-label={t("context.contentPrevious")}
+                className="flex h-7 w-7 items-center justify-center text-[#536d72] outline-none hover:bg-[#dce8e6] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-default disabled:text-[#aab7b8] disabled:hover:bg-transparent"
+                disabled={artifactPageNumber <= 1}
+                onClick={() => displayedContext && setArtifactPageSelection({
+                  contextId: displayedContext.id,
+                  page: Math.max(1, artifactPageNumber - 1),
+                })}
+                title={t("context.contentPrevious")}
+                type="button"
+              >
+                <ChevronLeft aria-hidden="true" size={12} strokeWidth={1.8} />
+              </button>
+              <output
+                aria-label={t("context.contentPage", { current: artifactPageNumber, total: displayedArtifactPage.totalPages })}
+                className="w-11 text-center font-mono text-[9px] text-[#5f7377]"
+              >
+                {artifactPageNumber} / {displayedArtifactPage.totalPages}
+              </output>
+              <button
+                aria-label={t("context.contentNext")}
+                className="flex h-7 w-7 items-center justify-center text-[#536d72] outline-none hover:bg-[#dce8e6] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] disabled:cursor-default disabled:text-[#aab7b8] disabled:hover:bg-transparent"
+                disabled={artifactPageNumber >= displayedArtifactPage.totalPages}
+                onClick={() => displayedContext && setArtifactPageSelection({
+                  contextId: displayedContext.id,
+                  page: Math.min(displayedArtifactPage.totalPages, artifactPageNumber + 1),
+                })}
+                title={t("context.contentNext")}
+                type="button"
+              >
+                <ChevronRight aria-hidden="true" size={12} strokeWidth={1.8} />
+              </button>
+            </>
+          )}
           <output
             aria-label={t("context.replayPage", { current: currentPage, total: totalPages })}
             className="w-11 text-center font-mono text-[9px] text-[#5f7377]"
@@ -333,7 +397,7 @@ function RenderResultWorkspace({
         className="minimal-scrollbar min-h-0 overflow-auto bg-white px-4 py-2"
         ref={contentRef}
       >
-        {selected && !historicalResult ? (
+        {displayedContext && !historicalResult ? (
           <div className="flex h-full min-h-24 items-center justify-center text-[10px] text-[#718488]">
             {t("context.replayLoading")}
           </div>
@@ -933,7 +997,7 @@ function HarnessPicker({
   );
 }
 
-function SkillsWorkspace({
+export function SkillsWorkspace({
   onAttachSkill,
   onDetachSkill,
   onLoadReference,
@@ -1085,49 +1149,168 @@ function SkillPicker({ onClose, onSelect, skills }: {
   );
 }
 
-export default function ContextWorkspace({
+function hookArtifactContent(
+  value: JsonValue | undefined,
+  preview: string,
+  loadingLabel: string,
+): string {
+  if (value === undefined) return preview || loadingLabel;
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function HooksWorkspace({
   artifactContents,
+  artifacts,
+  onGetArtifact,
+  requestId,
+}: {
+  artifactContents: Record<string, JsonValue>;
+  artifacts: RuntimeArtifactsState;
+  onGetArtifact: (artifactId: string) => void;
+  requestId: string | null;
+}) {
+  const { t } = useI18n();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const hookArtifacts = artifacts.items.filter((artifact) =>
+    (artifact.kind === "hook-result" || artifact.kind === "hook-log") &&
+    (!requestId || !artifact.runId || artifact.runId === requestId),
+  );
+  const selected = hookArtifacts.find((artifact) => artifact.id === selectedId)
+    ?? hookArtifacts.at(-1)
+    ?? null;
+
+  useEffect(() => {
+    if (selected && !(selected.id in artifactContents)) {
+      onGetArtifact(selected.id);
+    }
+  }, [artifactContents, onGetArtifact, selected]);
+
+  if (hookArtifacts.length === 0) {
+    return (
+      <div
+        className="flex h-full min-h-24 items-center justify-center px-4 text-center text-[10px] text-[#718488]"
+        data-hook-empty
+      >
+        {t("context.noHookActivity")}
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid h-full min-h-0 grid-rows-[minmax(112px,32%)_minmax(0,1fr)] divide-y divide-[#aebfbe]">
+      <div className="grid min-h-0 grid-rows-[32px_minmax(0,1fr)] bg-[#eef4f3]">
+        <div className="flex items-center justify-between border-b border-[#d4dfdf] px-2.5">
+          <span className="text-[10px] font-semibold uppercase text-[#63777b]">
+            {t("context.hookActivity")}
+          </span>
+          <span className="font-mono text-[9px] text-[#718488]">
+            {hookArtifacts.length}
+          </span>
+        </div>
+        <div className="minimal-scrollbar min-h-0 overflow-auto py-1" role="listbox">
+          {hookArtifacts.map((artifact) => (
+            <button
+              aria-selected={selected?.id === artifact.id}
+              className={`grid min-h-9 w-full grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-1.5 border-b border-[#dce5e5] px-2 text-left outline-none hover:bg-[#e3edeb] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] ${
+                selected?.id === artifact.id ? "bg-[#d8e9e6]" : ""
+              }`}
+              data-hook-artifact={artifact.kind}
+              key={artifact.id}
+              onClick={() => setSelectedId(artifact.id)}
+              role="option"
+              type="button"
+            >
+              <FileText
+                aria-hidden="true"
+                className={artifact.kind === "hook-result" ? "text-[#237662]" : "text-[#9b6b20]"}
+                size={12}
+                strokeWidth={1.8}
+              />
+              <span className="min-w-0">
+                <span className="block truncate font-mono text-[10px] font-semibold text-[#29484c]">
+                  {artifact.label}
+                </span>
+                <span className="block truncate text-[8px] text-[#718488]">
+                  {artifact.kind === "hook-result"
+                    ? t("context.hookResult")
+                    : t("context.hookLog")}
+                </span>
+              </span>
+              <time className="font-mono text-[8px] text-[#718488]" dateTime={artifact.createdAt}>
+                {artifact.createdAt.replace("T", " ").slice(11, 19)}
+              </time>
+            </button>
+          ))}
+        </div>
+      </div>
+      {selected && (
+        <div className="grid min-h-0 grid-rows-[34px_minmax(0,1fr)]">
+          <div className="flex min-w-0 items-center justify-between gap-2 border-b border-[#d4dfdf] bg-[#f5f8f7] px-2">
+            <span className="min-w-0 flex-1 truncate font-mono text-[10px] font-semibold text-[#29484c]">
+              {selected.label}
+            </span>
+            <span className="shrink-0 font-mono text-[8px] uppercase text-[#718488]">
+              {selected.contentType === "application/json" ? "JSON" : "Text"}
+            </span>
+          </div>
+          <CodeSurface
+            ariaLabel={t("context.hookArtifact", { name: selected.label })}
+            language={selected.contentType === "application/json" ? "JSON" : "Text"}
+            lineNumbers={selected.contentType === "application/json"}
+            lineWrapping
+            readOnly
+            statusBar={false}
+            value={hookArtifactContent(
+              artifactContents[selected.id],
+              selected.preview,
+              t("context.hookLoading"),
+            )}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function ContextWorkspace({
+  activeRunId,
+  artifactContents,
+  artifactPages,
+  artifacts,
   contexts,
   effectiveContexts,
   error,
   harnesses,
-  skills,
   onAttachHarness,
-  onAttachSkill,
   onAttachTool,
   onDetachHarness,
-  onDetachSkill,
   onDetachTool,
   onGetArtifact,
+  onGetArtifactPage,
   onOpenHarnessResources,
-  onOpenSkillResources,
   onOpenToolResources,
-  onLoadSkillReference,
-  onRunSkillScript,
   onUpdateTemplate,
   renderResult,
   selectedRequestId,
   template,
   tools,
 }: {
+  activeRunId: string | null;
   artifactContents: Record<string, JsonValue>;
+  artifactPages: Record<string, RuntimeArtifactPage>;
+  artifacts: RuntimeArtifactsState;
   contexts: RuntimeContextsState;
   effectiveContexts: RuntimeEffectiveContextsState;
   error: string | null;
   harnesses: RuntimeHarnessesState;
-  skills: RuntimeSkillsState;
   onAttachHarness: (harnessId: string) => void;
-  onAttachSkill: (skillId: string) => void;
   onAttachTool: (toolId: string) => void;
   onDetachHarness: (harnessId: string) => void;
-  onDetachSkill: (skillId: string) => void;
   onDetachTool: (toolId: string) => void;
   onGetArtifact: (artifactId: string) => void;
+  onGetArtifactPage: (artifactId: string, page: number, pageSize: number) => void;
   onOpenHarnessResources: () => void;
-  onOpenSkillResources: () => void;
   onOpenToolResources: () => void;
-  onLoadSkillReference: (skillId: string, path: string) => void;
-  onRunSkillScript: (skillId: string, path: string, argv: string[]) => void;
   onUpdateTemplate: (source: string) => void;
   renderResult: RenderResultState | null;
   selectedRequestId: string | null;
@@ -1147,9 +1330,7 @@ export default function ContextWorkspace({
           ? t("context.tools")
           : id === "harnesses"
             ? t("context.harnesses")
-             : id === "skills"
-               ? t("context.skills")
-               : t("context.memory"),
+            : t("context.hooks"),
   }));
 
   return (
@@ -1178,9 +1359,10 @@ export default function ContextWorkspace({
         {activeTab === "rendered" && (
           <RenderResultWorkspace
             artifactContents={artifactContents}
+            artifactPages={artifactPages}
             contexts={contexts}
             effectiveContexts={effectiveContexts}
-            onGetArtifact={onGetArtifact}
+            onGetArtifactPage={onGetArtifactPage}
             requestId={selectedRequestId}
             renderResult={renderResult}
           />
@@ -1212,20 +1394,13 @@ export default function ContextWorkspace({
             onOpenHarnessResources={onOpenHarnessResources}
           />
         )}
-        {activeTab === "skills" && (
-          <SkillsWorkspace
-            onAttachSkill={onAttachSkill}
-            onDetachSkill={onDetachSkill}
-            onLoadReference={onLoadSkillReference}
-            onOpenSkillResources={onOpenSkillResources}
-            onRunScript={onRunSkillScript}
-            skills={skills}
+        {activeTab === "hooks" && (
+          <HooksWorkspace
+            artifactContents={artifactContents}
+            artifacts={artifacts}
+            onGetArtifact={onGetArtifact}
+            requestId={activeRunId}
           />
-        )}
-        {activeTab === "memory" && (
-          <div className="flex h-full items-center justify-center text-xs text-[#718488]">
-            {t("context.memoryEmpty")}
-          </div>
         )}
       </div>
     </section>

@@ -13,8 +13,8 @@ export class SnapshotService {
   create(runId: string, runVariables?: Record<string, string>): TestSnapshot {
     const variables = runVariables ?? Object.fromEntries(
       new ProjectResources(this.projectDir).readSystemVariables().variables
-        .filter((variable) => variable.key !== 'sys_message')
-        .map((variable) => [variable.key, variable.value]),
+        .filter((variable) => variable.key !== 'sys_message' && typeof variable.value === 'string')
+        .map((variable) => [variable.key, variable.value as string]),
     )
     const canonical = JSON.stringify(Object.fromEntries(Object.entries(variables).sort()))
     return this.store.createSnapshot({

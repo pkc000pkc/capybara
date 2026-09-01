@@ -14,6 +14,7 @@ import { HookRegistry } from '#core/hooks/hook-registry'
 import { HookRunner } from '#core/hooks/hook-runner'
 import type { HookFixture, RegisteredHook } from '#core/hooks/types'
 import { ProjectResources } from '#core/project-resources'
+import { PluginRegistry } from '#core/plugins/plugin-registry'
 import type {
   HarnessResourceDefinition,
   HarnessResourceModule,
@@ -100,22 +101,27 @@ export class ProjectResourceRegistry {
     const settings = this.resources.readSettings()
     const tools = new ToolRegistry(this.projectDir)
     const skills = new SkillRegistry(this.projectDir)
-    const harnesses = new HarnessRegistry(this.projectDir)
     const hooks = new HookRegistry(this.projectDir)
+    const pluginRegistry = new PluginRegistry(this.projectDir)
     tools.load(settings.tools)
     skills.load(settings.skills)
-    harnesses.load(settings.harnesses)
     const toolNames = new Set(tools.list().map((tool) => tool.name))
+    const harnessModules = this.catalogHarnessModules(
+      pluginRegistry.catalogHarnesses(settings),
+      toolNames,
+    )
     const items: ProjectResourceModule[] = [
       ...groupBy(tools.list(), (tool) => tool.manifestFile).map((group) => this.toolModule(group)),
       ...skills.list().map((skill) => this.skillModule(skill)),
-      ...groupBy(harnesses.list(), (harness) => harness.manifestFile)
-        .map((group) => this.harnessModule(group, toolNames)),
-      ...hooks.listProject().map((hook) => this.hookModule(hook)),
+      ...harnessModules,
+      ...hooks.listCatalog().map((hook) => this.hookModule(hook)),
     ]
+    const graph = pluginRegistry.compile(items)
     return {
-      revision: hash(...items.map((item) => `${item.id}:${item.revision}`)),
+      revision: hash(...items.map((item) => `${item.id}:${item.revision}`), graph.revision),
       items,
+      plugins: graph.plugins,
+      toolPackages: graph.toolPackages,
     }
   }
 
@@ -182,7 +188,9 @@ export class ProjectResourceRegistry {
     if (!isObject(contextValue)) throw new Error('harness test context must be an object')
     const settings = this.resources.readSettings()
     const registry = new HarnessRegistry(this.projectDir)
-    registry.load(settings.harnesses)
+    // Test the same effective Harness catalog that Runtime uses, including
+    // enabled plugin resources and their persistent activation mode.
+    registry.load(new PluginRegistry(this.projectDir).effectiveHarnesses(settings))
     const harness = registry.get(id)
     if (!harness) throw new Error('harness resource was not found')
     const provider = typeof contextValue.provider === 'string' ? contextValue.provider : 'custom'
@@ -193,7 +201,9 @@ export class ProjectResourceRegistry {
       : [])
     const matchedTools = matchesToolHarness(harness, tools)
     const score = experienceHarnessScore(harness, request)
-    const matched = harness.type === 'model'
+    const matched = harness.type === 'persistent'
+      ? true
+      : harness.type === 'model'
       ? matchesModelHarness(harness, provider, model)
       : harness.type === 'tool' ? matchedTools.length > 0 : score > 0
     const environment = new nunjucks.Environment(
@@ -222,6 +232,7 @@ export class ProjectResourceRegistry {
       baseUrl: settings.llm.base_url,
       protocol: settings.llm.protocol,
       apiKey: settings.llm.api_key,
+      maxRetries: settings.llm.max_retries,
     })
     return new HookRunner(llm).run(hook, fixture)
   }
@@ -318,6 +329,7 @@ export class ProjectResourceRegistry {
       id: `tool-module:${manifest.path}`,
       kind: 'tool',
       package: first.packageName,
+      packageVersion: first.packageVersion,
       name: first.packageName,
       version: first.manifestVersion,
       source: manifest.path,
@@ -420,6 +432,59 @@ export class ProjectResourceRegistry {
     }
   }
 
+  private catalogHarnessModules(
+    manifestPaths: readonly string[],
+    toolNames: ReadonlySet<string>,
+  ): HarnessResourceModule[] {
+    const modules = manifestPaths.map((manifestPath) => {
+      const registry = new HarnessRegistry(this.projectDir)
+      try {
+        registry.load([manifestPath])
+        return this.harnessModule(registry.list(), toolNames)
+      } catch (error) {
+        const source = manifestPath.replaceAll('\\', '/')
+        const absolute = path.resolve(this.projectDir, manifestPath)
+        const message = error instanceof Error ? error.message : String(error)
+        return {
+          id: `harness-module:${source}`,
+          kind: 'harness' as const,
+          package: `invalid-${hash(source)}`,
+          name: path.basename(path.dirname(source)) || path.basename(source),
+          version: 1,
+          source,
+          enabled: false,
+          revision: hash(source, message),
+          diagnostics: [{ severity: 'error' as const, code: 'HARNESS_MODULE_INVALID', message }],
+          files: fs.existsSync(absolute) && fs.statSync(absolute).isFile()
+            ? [this.file(absolute, 'manifest')]
+            : [],
+          harnesses: [],
+        }
+      }
+    })
+    const definitions = modules.flatMap((module) => module.harnesses)
+    const duplicateIds = new Set(definitions
+      .map((harness) => harness.id)
+      .filter((id, index, ids) => ids.indexOf(id) !== index))
+    if (duplicateIds.size === 0) return modules
+    return modules.map((module) => {
+      const duplicates = module.harnesses.filter((harness) => duplicateIds.has(harness.id))
+      if (duplicates.length === 0) return module
+      return {
+        ...module,
+        enabled: false,
+        diagnostics: [
+          ...module.diagnostics,
+          ...duplicates.map((harness) => ({
+            severity: 'error' as const,
+            code: 'HARNESS_DUPLICATE',
+            message: `duplicate project harness: ${harness.id}`,
+          })),
+        ],
+      }
+    })
+  }
+
   private harnessDefinition(
     harness: RegisteredHarness,
     toolNames: ReadonlySet<string>,
@@ -452,16 +517,16 @@ export class ProjectResourceRegistry {
   private hookModule(hook: RegisteredHook): HookResourceModule {
     const definition = this.hookDefinition(hook)
     return {
-      id: `hook-module:${hook.id}`,
+      id: `hook-module:${hook.mode}:${hook.id}`,
       kind: 'hook',
-      package: 'project-hooks',
+      package: hook.ownerId,
       name: hook.name,
       version: 1,
       source: this.relative(hook.entryFile),
       enabled: hook.enabled,
       revision: hook.revision,
       diagnostics: definition.diagnostics,
-      files: [this.file(hook.entryFile, 'entry', true)],
+      files: [this.file(hook.entryFile, 'entry', hook.ownerKind === 'project' && hook.mode === 'runtime')],
       hooks: [definition],
     }
   }
@@ -474,6 +539,8 @@ export class ProjectResourceRegistry {
       description: hook.description,
       entry: this.relative(hook.entryFile),
       enabled: hook.enabled,
+      ownerId: hook.ownerId,
+      mode: hook.mode,
       checkpoint: hook.checkpoint,
       schedule: structuredClone(hook.schedule),
       permissions: structuredClone(hook.permissions),

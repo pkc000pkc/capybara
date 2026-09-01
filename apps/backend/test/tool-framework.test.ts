@@ -135,6 +135,11 @@ test('dispatcher times out and aborts active project runners', async () => {
     const pending = dispatcher.dispatch({ id: 'abort', name: 'slow_tool', arguments: {} })
     dispatcher.abort()
     assert.equal((await pending).error?.code, 'ABORTED')
+
+    const unlimited = new ToolDispatcher(registry, dir, { timeoutMs: -1 })
+    const unlimitedPending = unlimited.dispatch({ id: 'unlimited-abort', name: 'slow_tool', arguments: {} })
+    unlimited.abort()
+    assert.equal((await unlimitedPending).error?.code, 'ABORTED')
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

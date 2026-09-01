@@ -375,6 +375,77 @@ test('experiment API runs dataset cases through tools and scoring, then persists
   assert.ok(requests.length >= 10)
 })
 
+test('experiment case timeout remains active through LLM scoring retries', async (context) => {
+  const projectDir = temporaryExperimentProject()
+  let app: Awaited<ReturnType<typeof buildApp>> | undefined
+  context.after(async () => {
+    await app?.close()
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  })
+  const datasets = new DatasetStore(projectDir)
+  const dataset = datasets.create({
+    name: 'Scoring timeout',
+    storage: 'jsonl',
+    path: 'datasets/scoring-timeout.jsonl',
+    scoringPrompt: 'SCORER_REQUEST {{ actual_json }}',
+  })
+  datasets.createRecord(dataset.id, {
+    question: 'Return a completed answer.',
+    thinking: 'The runtime should finish before scoring starts.',
+    answer: 'Completed.',
+    expectedTools: [],
+  })
+  commitProject(projectDir, 'test: add scoring timeout experiment')
+
+  let scoringAborted = false
+  const llm: RuntimeLlm = {
+    async chat(request) {
+      if (request.messages.length === 1 && request.messages[0]?.content.includes('SCORER_REQUEST')) {
+        return new Promise<LlmChatResponse>((_resolve, reject) => {
+          const abort = () => {
+            scoringAborted = true
+            reject(request.signal?.reason ?? new Error('scoring aborted'))
+          }
+          if (request.signal?.aborted) abort()
+          else request.signal?.addEventListener('abort', abort, { once: true })
+        })
+      }
+      return response(JSON.stringify({ status: 'completed', content: 'Completed.' }))
+    },
+    getConfig: () => ({
+      provider: 'custom',
+      protocol: 'responses',
+      model: 'scoring-timeout-model',
+      baseUrl: 'http://127.0.0.1/unused',
+      timeoutMs: 60_000,
+      maxRetries: -1,
+    }),
+  }
+  app = await buildApp({ runtimeLoop: { projectDir, llm, streamDelayMs: 0, stepDelayMs: 0 } })
+  const projectQuery = `projectPath=${encodeURIComponent(projectDir)}`
+  const startResponse = await app.inject({
+    method: 'POST',
+    url: `/api/experiments?${projectQuery}`,
+    payload: { datasetId: dataset.id, concurrency: 1, repetitions: 1, timeoutMs: 1_000 },
+  })
+  assert.equal(startResponse.statusCode, 202, startResponse.body)
+  const run = await waitForRun(app, projectQuery, (startResponse.json() as ExperimentRunDetail).id)
+  assert.equal(run.status, 'completed')
+  assert.equal(scoringAborted, true)
+
+  const casesResponse = await app.inject({
+    method: 'GET',
+    url: `/api/experiments/${run.id}/cases?${projectQuery}`,
+  })
+  const caseSummary = casesResponse.json().items[0] as { id: string; status: string }
+  assert.equal(caseSummary.status, 'error')
+  const detailResponse = await app.inject({
+    method: 'GET',
+    url: `/api/experiments/${run.id}/cases/${caseSummary.id}?${projectQuery}`,
+  })
+  assert.match(detailResponse.json().failure.message, /experiment case exceeded 1000 ms/)
+})
+
 test('experiment start rejects incomplete datasets and dirty projects', async (context) => {
   const projectDir = temporaryExperimentProject()
   let app: Awaited<ReturnType<typeof buildApp>> | undefined

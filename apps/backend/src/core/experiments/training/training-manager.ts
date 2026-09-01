@@ -124,6 +124,9 @@ interface ReplayOutcome {
 
 function referenceForCase(item: TrainingCase, released: boolean): TrainingCaseView['reference'] {
   if (!released) return { status: 'locked' }
+  if (item.evaluation?.reference?.status === 'load_failed') {
+    return item.evaluation.reference
+  }
   const resolved = resolveTrainingReference(
     item.expectedAnswer,
     item.evaluation?.reference,
@@ -255,8 +258,12 @@ export class TrainingManager {
       ? (this.store.getSnapshot(sourceRun.id)?.variables ?? this.store.runVariables(sourceRun.id))
       : Object.fromEntries(
         new ProjectResources(this.projectDir).readSystemVariables().variables
-          .filter((variable) => variable.scope === 'project' && !variable.readonly)
-          .map((variable) => [variable.key, variable.value]),
+          .filter((variable) => (
+            variable.scope === 'project'
+            && !variable.readonly
+            && typeof variable.value === 'string'
+          ))
+          .map((variable) => [variable.key, variable.value as string]),
       )
     const run = this.store.createRun({
       id,
@@ -364,8 +371,14 @@ export class TrainingManager {
 
   variables(id: string): TrainingVariableReport {
     const resources = new ProjectResources(this.projectDir).readSystemVariables().variables
-      .filter((variable) => variable.scope === 'project' && !variable.readonly)
-    const projectValues = Object.fromEntries(resources.map((variable) => [variable.key, variable.value]))
+      .filter((variable) => (
+        variable.scope === 'project'
+        && !variable.readonly
+        && typeof variable.value === 'string'
+      ))
+    const projectValues = Object.fromEntries(
+      resources.map((variable) => [variable.key, variable.value as string]),
+    )
     const snapshot = this.store.getSnapshot(id)
     const candidates = this.store.listExperiences(id)
     const audits = this.store.listVariableAudits(id)
@@ -464,7 +477,7 @@ export class TrainingManager {
   }
 
   capabilities() {
-    const hooks = new HookRegistry(this.projectDir).list()
+    const hooks = new HookRegistry(this.projectDir).listTraining()
       .filter((hook) => hook.enabled && hook.loadable)
       .map((hook) => ({
         id: hook.id,
@@ -1536,7 +1549,7 @@ export class TrainingManager {
   }
 
   private assertHook(value: TrainingHookBinding, checkpoint: 'after_evaluation'): TrainingHookBinding {
-    const hook = new HookRegistry(this.projectDir).get(value.hookId)
+    const hook = new HookRegistry(this.projectDir).getTraining(value.hookId)
     if (!hook || !hook.enabled || !hook.loadable) throw new Error(`training Hook is unavailable: ${value.hookId}`)
     if (hook.checkpoint !== checkpoint) throw new Error(`Hook ${value.hookId} must use ${checkpoint}`)
     const definitions = new Map(hook.parameters.map((parameter) => [parameter.key, parameter]))

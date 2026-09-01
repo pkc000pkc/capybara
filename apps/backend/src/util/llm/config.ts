@@ -33,7 +33,11 @@ function protocolFromEnv(value: string | undefined): LlmProtocol {
     return 'chat-completions'
   }
   const protocol = value.trim().toLowerCase()
-  if (protocol === 'responses' || protocol === 'chat-completions') return protocol
+  if (
+    protocol === 'responses'
+    || protocol === 'codex-like'
+    || protocol === 'chat-completions'
+  ) return protocol
   throw new Error(`Unsupported LLM protocol: ${value}`)
 }
 

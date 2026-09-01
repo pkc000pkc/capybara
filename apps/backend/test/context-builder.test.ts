@@ -54,6 +54,23 @@ test('uses null semantics for missing properties', () => {
   fs.rmSync(projectDir, { recursive: true, force: true })
 })
 
+test('dumping structured properties does not report JSON toJSON probes as missing', () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-context-json-'))
+  fs.writeFileSync(path.join(projectDir, 'main.j2'), '{{ state | dump }}')
+  const builder = new ContextBuilder({
+    projectDir,
+    watch: false,
+    properties: { state: { phase: 'experiment', nested: { cycle: 2 } } },
+  })
+  try {
+    assert.equal(builder.build(), '{"phase":"experiment","nested":{"cycle":2}}')
+    assert.deepEqual(builder.getMissingVariables(), [])
+  } finally {
+    builder.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
 test('rerenders when an included template changes', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-context-'))
   const includeFile = path.join(projectDir, 'content.j2')

@@ -210,7 +210,7 @@ export class LearningHookRunner {
         evaluation: { ...context.evaluation, reference },
       }
     }
-    const hook = this.registry.get(binding.hookId)
+    const hook = this.registry.getTraining(binding.hookId)
     if (!hook) throw new Error(`training Hook was not found: ${binding.hookId}`)
     if (!hook.loadable || !hook.enabled) throw new Error(`training Hook is not enabled and loadable: ${binding.hookId}`)
     if (hook.checkpoint !== checkpoint) {
@@ -259,7 +259,7 @@ export class LearningHookRunner {
   }
 
   bindings(checkpoint: HookCheckpoint): TrainingHookBinding[] {
-    return this.registry.list()
+    return this.registry.listTraining()
       .filter((hook) => hook.enabled && hook.loadable && hook.checkpoint === checkpoint)
       .map((hook) => ({ hookId: hook.id, parameters: {} }))
   }

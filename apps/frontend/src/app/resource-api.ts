@@ -1,4 +1,6 @@
 export type ResourceKind = "tool" | "skill" | "harness" | "hook";
+export type SystemVariableType = "text" | "prompt_template" | "boolean" | "integer" | "number" | "date" | "datetime" | "array" | "object" | "secret_ref";
+export type SystemVariableValue = string | boolean | number | SystemVariableValue[] | { [key: string]: SystemVariableValue };
 
 export type ResourceDiagnostic = {
   severity: "info" | "warning" | "error";
@@ -24,6 +26,84 @@ type ResourceModule<TKind extends ResourceKind> = {
   revision: string;
   diagnostics: ResourceDiagnostic[];
   files: ResourceFile[];
+};
+
+export type PluginToolDependencyResource = {
+  package: string;
+  version: string;
+  bundled?: string;
+  installedVersion?: string;
+  manifestPath?: string;
+  status: "installed" | "missing" | "conflict";
+};
+
+export type PluginResource = {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  ownerKind: "system" | "project" | "installed";
+  enabled: boolean;
+  manifestPath?: string;
+  source: string;
+  uninstallable: boolean;
+  resourceModuleIds: string[];
+  resources: {
+    variables?: string;
+    harnesses: string[];
+    hooks: string[];
+    trainingHooks: string[];
+  };
+  variables: Array<{
+    key: string;
+    type: SystemVariableType;
+    label: string;
+    description: string;
+    value: SystemVariableValue;
+    template?: string;
+    required: boolean;
+    readonly: boolean;
+    show_in_status: boolean;
+    scope?: "session" | "project";
+    source: "builtin" | "project" | "plugin";
+    owner?: string;
+  }>;
+  variableDependencies: Array<{
+    variable: {
+      key: string;
+      type: SystemVariableType;
+      label: string;
+      description: string;
+      value: SystemVariableValue;
+      template?: string;
+      required: boolean;
+      readonly: boolean;
+      show_in_status: boolean;
+      scope?: "session" | "project";
+      source: "builtin" | "project" | "plugin";
+      owner?: string;
+    };
+    references: Array<{ path: string; count: number }>;
+  }>;
+  toolDependencies: PluginToolDependencyResource[];
+  diagnostics: ResourceDiagnostic[];
+};
+
+export type ToolDependentPlugin = {
+  pluginId: string;
+  pluginName: string;
+  requestedVersion: string;
+  enabled: boolean;
+};
+
+export type ToolPackageResource = {
+  package: string;
+  version: string;
+  manifestPath: string;
+  moduleId: string;
+  requiredBy: ToolDependentPlugin[];
+  orphaned: boolean;
+  uninstallable: boolean;
 };
 
 export type ToolResourceDefinition = {
@@ -61,7 +141,7 @@ export type HarnessResourceDefinition = {
   kind: "harness";
   name: string;
   description: string;
-  type: "model" | "tool" | "experience";
+  type: "model" | "tool" | "experience" | "persistent";
   entry: string;
   priority: number;
   activation: Record<string, unknown>;
@@ -80,6 +160,8 @@ export type HookResourceDefinition = {
   description: string;
   entry: string;
   enabled: boolean;
+  ownerId: string;
+  mode: "runtime" | "training";
   checkpoint: "after_loop" | "after_evaluation" | "after_replay";
   schedule: {
     priority: number;
@@ -111,6 +193,7 @@ export type HookResourceDefinition = {
 export type ResourceDefinition = ToolResourceDefinition | SkillResourceDefinition | HarnessResourceDefinition | HookResourceDefinition;
 
 export type ToolResourceModule = ResourceModule<"tool"> & {
+  packageVersion: string;
   runner: { type: "stdio"; entry: string };
   tools: ToolResourceDefinition[];
 };
@@ -128,8 +211,37 @@ export type HookResourceModule = ResourceModule<"hook"> & {
 };
 
 export type ProjectResourceModule = ToolResourceModule | SkillResourceModule | HarnessResourceModule | HookResourceModule;
-export type ResourceCatalog = { revision: string; items: ProjectResourceModule[] };
+export type ResourceCatalog = {
+  revision: string;
+  items: ProjectResourceModule[];
+  plugins?: PluginResource[];
+  toolPackages?: ToolPackageResource[];
+};
 export type ResourceFileContent = ResourceFile & { content: string; revision: string };
+
+export type PluginInstallPreview = {
+  plugin: {
+    id: string;
+    name: string;
+    description: string;
+    version: string;
+    source: string;
+  };
+  tools: Array<{
+    package: string;
+    requestedVersion: string;
+    resolvedVersion?: string;
+    action: "reuse" | "install" | "missing" | "conflict";
+    permissions: string[];
+  }>;
+  valid: boolean;
+};
+
+export type PluginUninstallResult = {
+  removedPlugin: { id: string; trashPath: string };
+  orphanedTools: ToolPackageResource[];
+  catalog: ResourceCatalog;
+};
 
 export type SkillMarketplaceResult = {
   description: string;
@@ -308,6 +420,133 @@ export const resourceApi = {
   deleteProjectEntry: (projectPath: string, path: string, recursive: boolean) =>
     request<{ deleted: true; path: string }>(projectPath, "files", "DELETE", { path, recursive }),
   catalog: (projectPath: string) => request<ResourceCatalog>(projectPath, "catalog"),
+  createPlugin: (projectPath: string, name: string) =>
+    request<{ plugin: PluginResource; catalog: ResourceCatalog }>(projectPath, "plugins", "POST", { name }),
+  previewPluginInstall: (projectPath: string, source: string) =>
+    request<PluginInstallPreview>(projectPath, "plugins/install/preview", "POST", { source }),
+  installPlugin: (projectPath: string, source: string) =>
+    request<{
+      plugin: PluginResource;
+      installedTools: ToolPackageResource[];
+      reusedTools: ToolPackageResource[];
+      catalog: ResourceCatalog;
+    }>(projectPath, "plugins/install", "POST", { source }),
+  setPluginEnabled: (projectPath: string, id: string, enabled: boolean) =>
+    request<{ plugin: PluginResource; catalog: ResourceCatalog }>(
+      projectPath,
+      `plugins/${encodeURIComponent(id)}`,
+      "PATCH",
+      { enabled },
+    ),
+  savePluginVariables: (
+    projectPath: string,
+    id: string,
+    variables: PluginResource["variables"],
+    catalogRevision: string,
+  ) => request<{ plugin: PluginResource; catalog: ResourceCatalog }>(
+    projectPath,
+    `plugins/${encodeURIComponent(id)}/variables`,
+    "PUT",
+    { variables, catalogRevision },
+  ),
+  removePluginVariableDependency: (
+    projectPath: string,
+    id: string,
+    key: string,
+    catalogRevision: string,
+  ) => request<{ plugin: PluginResource; catalog: ResourceCatalog }>(
+    projectPath,
+    `plugins/${encodeURIComponent(id)}/variable-dependencies/${encodeURIComponent(key)}`,
+    "DELETE",
+    { catalogRevision },
+  ),
+  createPluginHarness: (
+    projectPath: string,
+    id: string,
+    input: {
+      name: string;
+      description: string;
+      type: HarnessResourceDefinition["type"];
+      activation: Record<string, unknown>;
+      inputs: string[];
+      requiredTools: string[];
+      content: string;
+      catalogRevision: string;
+    },
+  ) => request<{ plugin: PluginResource; catalog: ResourceCatalog }>(
+    projectPath,
+    `plugins/${encodeURIComponent(id)}/harnesses`,
+    "POST",
+    input,
+  ),
+  savePluginHarness: (
+    projectPath: string,
+    pluginId: string,
+    harnessId: string,
+    content: string,
+    entryRevision: string,
+    catalogRevision: string,
+  ) => request<{ plugin: PluginResource; catalog: ResourceCatalog }>(
+    projectPath,
+    `plugins/${encodeURIComponent(pluginId)}/harnesses/${encodeURIComponent(harnessId)}`,
+    "PUT",
+    { content, entryRevision, catalogRevision },
+  ),
+  deletePluginHarness: (
+    projectPath: string,
+    pluginId: string,
+    harnessId: string,
+    entryRevision: string,
+    catalogRevision: string,
+  ) => request<{ plugin: PluginResource; catalog: ResourceCatalog }>(
+    projectPath,
+    `plugins/${encodeURIComponent(pluginId)}/harnesses/${encodeURIComponent(harnessId)}`,
+    "DELETE",
+    { entryRevision, catalogRevision },
+  ),
+  createPluginHook: (
+    projectPath: string,
+    id: string,
+    input: { name: string; mode: "runtime" | "training"; content: string; catalogRevision: string },
+  ) => request<{ plugin: PluginResource; catalog: ResourceCatalog }>(
+    projectPath,
+    `plugins/${encodeURIComponent(id)}/hooks`,
+    "POST",
+    input,
+  ),
+  savePluginHook: (
+    projectPath: string,
+    pluginId: string,
+    hookId: string,
+    content: string,
+    entryRevision: string,
+    catalogRevision: string,
+  ) => request<{ plugin: PluginResource; catalog: ResourceCatalog }>(
+    projectPath,
+    `plugins/${encodeURIComponent(pluginId)}/hooks/${encodeURIComponent(hookId)}`,
+    "PUT",
+    { content, entryRevision, catalogRevision },
+  ),
+  deletePluginHook: (
+    projectPath: string,
+    pluginId: string,
+    hookId: string,
+    entryRevision: string,
+    catalogRevision: string,
+  ) => request<{ plugin: PluginResource; catalog: ResourceCatalog }>(
+    projectPath,
+    `plugins/${encodeURIComponent(pluginId)}/hooks/${encodeURIComponent(hookId)}`,
+    "DELETE",
+    { entryRevision, catalogRevision },
+  ),
+  uninstallPlugin: (projectPath: string, id: string) =>
+    request<PluginUninstallResult>(projectPath, `plugins/${encodeURIComponent(id)}`, "DELETE"),
+  uninstallToolPackage: (projectPath: string, packageName: string) =>
+    request<{ removedTool: { package: string; trashPath: string }; catalog: ResourceCatalog }>(
+      projectPath,
+      `tools/packages/${encodeURIComponent(packageName)}`,
+      "DELETE",
+    ),
   file: (projectPath: string, path: string) =>
     request<ResourceFileContent>(projectPath, `file?path=${encodeURIComponent(path)}`),
   testTool: (projectPath: string, id: string, args: unknown) =>

@@ -16,7 +16,7 @@ import {
   type RuntimeSkillMarketplace,
 } from '#core/runtime-loop'
 import type { SkillPreview } from '#core/skills/skill-marketplace'
-import type { LlmChatRequest, LlmChatResponse } from '#util/llm'
+import { LlmRequestError, type LlmChatRequest, type LlmChatResponse } from '#util/llm'
 import type {
   CommandPayloadMap,
   CommandType,
@@ -254,6 +254,7 @@ test('empty project directories require confirmation and initialize a runnable p
         '.capybara/system-variables.json',
         'main.j2',
         'agent.md',
+        'capybara.plugin.json',
         '.capybara/hooks/context-compression.ts',
         '.capybara/hooks/hook-authoring.ts',
         '.capybara/harnesses/hook-authoring/manifest.json',
@@ -261,6 +262,7 @@ test('empty project directories require confirmation and initialize a runnable p
         '.capybara/harnesses/variable-authoring/manifest.json',
         '.capybara/harnesses/variable-authoring/variable-authoring.j2',
         'hooks/.gitkeep',
+        'training-hooks/.gitkeep',
         'tools/files/manifest.json',
         'tools/files/runner.mjs',
         '.gitignore',
@@ -638,7 +640,7 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
         key: string
         readonly: boolean
         source: string
-        value: string
+        value: unknown
         show_in_status: boolean
       }>
     }>()
@@ -667,7 +669,29 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
       show_in_status: true,
       source: 'builtin',
     })
+    const cacheDefinition = systemVariables.variables.find(
+      (variable) => variable.key === 'cache',
+    )
+    assert.deepEqual(cacheDefinition, {
+      key: 'cache',
+      type: 'object',
+      label: 'Runtime cache',
+      description: 'Runtime-managed temporary Loop, model, and tool-call context exposed as builtin.cache.',
+      value: {
+        version: 1,
+        summary: '',
+        messages: [],
+        loop: { run_id: '', iteration: 0, tool_round: 0, continuation_round: 0 },
+        compression_count: 0,
+        compressed_at: '',
+      },
+      required: false,
+      readonly: true,
+      show_in_status: true,
+      source: 'builtin',
+    })
     assert.deepEqual(snapshot.payload.variables.value.builtin.sys_message, [])
+    assert.deepEqual(snapshot.payload.variables.value.builtin.cache, cacheDefinition?.value)
     assert.equal(snapshot.payload.status.messageCount, 0)
 
     const variablesStart = client.events.length
@@ -708,6 +732,7 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
       'Updated through HTTP.',
     )
     assert.equal(storedVariables.some((variable) => variable.key === 'sys_message'), false)
+    assert.equal(storedVariables.some((variable) => variable.key === 'cache'), false)
     await client.waitFor(
       'variables.updated',
       (event) => event.payload.patch.some((operation) => operation.path === '/builtin/prompts'),
@@ -718,7 +743,7 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
       (event) => event.payload.diagnostics.some(
         (diagnostic) =>
           diagnostic.code === 'MISSING_SYSTEM_VARIABLE' &&
-          diagnostic.message.includes('builtin.prompts.agent_identity'),
+          diagnostic.message.includes('builtin.variables.agent_identity'),
       ),
       variablesStart,
     )
@@ -738,6 +763,16 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
     assert.ok(statusUpdate.payload.variableTokens.some(
       (variable) => variable.key === 'sys_message' && variable.tokens >= 0,
     ))
+    const cacheStatus = statusUpdate.payload.variableTokens.find(
+      (variable) => variable.key === 'cache',
+    )
+    assert.ok(cacheStatus && cacheStatus.tokens > 0)
+    assert.equal(statusUpdate.payload.context.cacheTokens, cacheStatus.tokens)
+    assert.equal(statusUpdate.payload.context.contextWindowTokens, 16_000)
+    assert.equal(
+      statusUpdate.payload.context.cacheUtilization,
+      cacheStatus.tokens / 16_000,
+    )
 
     const immutableResponse = await app.inject({
       method: 'PUT',
@@ -776,6 +811,7 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
       model: 'updated-model',
       base_url: 'http://127.0.0.1:1234/v1',
       protocol: 'chat-completions',
+      max_retries: 3,
     })
     const storedSecrets = JSON.parse(
       fs.readFileSync(path.join(projectDir, '.capybara', 'secrets.json'), 'utf8'),
@@ -814,14 +850,24 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
     client.send('runtime.snapshot.get', {})
     const completedSnapshot = await client.waitFor('runtime.snapshot', () => true, snapshotStart)
     assert.equal(completedSnapshot.payload.status.messageCount, 3)
+    assert.equal(completedSnapshot.payload.status.loopStatus, 'completed')
     assert.deepEqual(
       completedSnapshot.payload.variables.value.builtin.sys_message.map((message) => (
         typeof message === 'object' && message && !Array.isArray(message) ? message.role : undefined
       )),
       ['system', 'user', 'assistant'],
     )
+    assert.deepEqual(
+      completedSnapshot.payload.variables.value.builtin.cache.messages.map((message) => (
+        typeof message === 'object' && message && !Array.isArray(message) ? message.role : undefined
+      )),
+      ['user', 'assistant'],
+    )
     assert.ok(completedSnapshot.payload.status.variableTokens.some(
       (variable) => variable.key === 'sys_message' && variable.tokens > 0,
+    ))
+    assert.ok(completedSnapshot.payload.status.variableTokens.some(
+      (variable) => variable.key === 'cache' && variable.tokens > 0,
     ))
   })
 })
@@ -2018,7 +2064,7 @@ test('model-generated workflow chains list, filter, and read without intermediat
   }, { llm })
 })
 
-test('starting another run replaces current trace data', async () => {
+test('starting another run resets active trace data and retains request replay contexts', async () => {
   await withRuntime(async (client) => {
     client.send('chat.message.send', {
       clientMessageId: 'first-run-message',
@@ -2040,7 +2086,16 @@ test('starting another run replaces current trace data', async () => {
     assert.equal(trace.payload.timeline.steps.length, 4)
     assert.ok(trace.payload.timeline.steps.every((step) => step.status === 'pending'))
     assert.deepEqual(trace.payload.checkpoints.items, [])
-    assert.deepEqual(trace.payload.effectiveContexts.items, [])
+    assert.ok(trace.payload.effectiveContexts.items.length > 0)
+    assert.ok(trace.payload.effectiveContexts.items.every(
+      (context) => context.runId === firstCompleted.payload.runId,
+    ))
+    const retainedArtifacts = new Set(trace.payload.artifacts.items.map((artifact) => artifact.id))
+    for (const context of trace.payload.effectiveContexts.items) {
+      assert.equal(retainedArtifacts.has(context.requestArtifactId), true)
+      assert.equal(retainedArtifacts.has(context.messagesArtifactId), true)
+      assert.equal(retainedArtifacts.has(context.toolsArtifactId), true)
+    }
     assert.deepEqual(trace.payload.observations.items, [])
   })
 })
@@ -2102,7 +2157,18 @@ test('model retry progress is published and cleared after success', async () => 
 
 test('model failures preserve phase, message, and request artifact links', async () => {
   const llm = fakeLlm(async () => {
-    throw new Error('LLM request timed out')
+    throw new LlmRequestError('LLM request timed out', {
+      attempt: 4,
+      maxAttempts: 4,
+      elapsedMs: 12_345,
+      statusCode: 503,
+      requestId: 'runtime-request-123',
+      responseHeaders: { 'x-request-id': 'runtime-request-123', server: 'nginx' },
+      payloadHash: 'a'.repeat(64),
+      payloadBytes: 16_265,
+      messageCount: 2,
+      toolCount: 12,
+    })
   })
   await withRuntime(async (client) => {
     const start = client.events.length
@@ -2158,6 +2224,30 @@ test('model failures preserve phase, message, and request artifact links', async
     )
     assert.equal(failedAssistant?.status, 'failed')
     assert.deepEqual(failedAssistant?.failure, failed.payload.failure)
+
+    const errorArtifactId = failed.payload.failure?.errorArtifactId
+    const artifactIndex = client.events.length
+    client.send('runtime.artifact.get', { artifactId: String(errorArtifactId) })
+    const errorArtifact = await client.waitFor(
+      'runtime.artifact.content',
+      (event) => event.payload.artifact.id === errorArtifactId,
+      artifactIndex,
+    )
+    const errorValue = errorArtifact.payload.value as unknown as {
+      diagnostics?: { requestId?: string; attempt?: number; toolCount?: number; payloadHash?: string }
+    }
+    assert.deepEqual(errorValue.diagnostics, {
+      attempt: 4,
+      maxAttempts: 4,
+      elapsedMs: 12_345,
+      statusCode: 503,
+      requestId: 'runtime-request-123',
+      responseHeaders: { 'x-request-id': 'runtime-request-123', server: 'nginx' },
+      payloadHash: 'a'.repeat(64),
+      payloadBytes: 16_265,
+      messageCount: 2,
+      toolCount: 12,
+    })
   }, { llm })
 })
 

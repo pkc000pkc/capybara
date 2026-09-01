@@ -14,6 +14,10 @@ const MANIFEST_SCHEMA = {
   properties: {
     version: { const: 1 },
     package: { type: 'string', minLength: 1 },
+    packageVersion: {
+      type: 'string',
+      pattern: '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$',
+    },
     runner: {
       type: 'object',
       required: ['type', 'entry'],
@@ -97,6 +101,7 @@ export class ToolRegistry {
           ...definition,
           id: `${manifest.package}:${definition.name}`,
           packageName: manifest.package,
+          packageVersion: manifest.packageVersion ?? '1.0.0',
           manifestVersion: manifest.version,
           manifestFile,
           runnerEntry,

@@ -180,6 +180,7 @@ export class ContextBuilder {
     return new Proxy(tracked, {
       get: (target, property, receiver) => {
         if (Reflect.has(target, property)) return Reflect.get(target, property, receiver)
+        if (property === 'toJSON') return undefined
         if (typeof property === 'string') this.missingVariables.add(`${path}.${property}`)
         return null
       },

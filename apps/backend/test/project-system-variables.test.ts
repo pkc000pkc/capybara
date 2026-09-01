@@ -363,6 +363,70 @@ test('system variable patches are sequential, preserve metadata, and reject inva
   }
 })
 
+test('array and object variables support guarded JSON Patch updates', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-typed-variables-'))
+  try {
+    const resources = new ProjectResources(projectDir)
+    resources.saveSystemVariables({ version: 1, variables: [
+      { key: 'items', type: 'array', value: ['one'], required: false, readonly: false, show_in_status: false, scope: 'project' },
+      { key: 'metadata', type: 'object', value: { status: 'draft' }, required: false, readonly: false, show_in_status: false, scope: 'project' },
+    ] })
+    const initial = resources.readSystemVariablesState()
+    const items = initial.resource.variables.find((item) => item.key === 'items')
+    const metadata = initial.resource.variables.find((item) => item.key === 'metadata')
+    const updated = await resources.applySystemVariableChanges(initial.revision, [
+      { op: 'json_patch', key: 'items', expected_value_sha256: systemVariableValueHash(items?.value), patch: [{ op: 'add', path: '/-', value: 'two' }] },
+      { op: 'json_patch', key: 'metadata', expected_value_sha256: systemVariableValueHash(metadata?.value), patch: [{ op: 'replace', path: '/status', value: 'ready' }, { op: 'add', path: '/count', value: 2 }] },
+    ])
+    assert.deepEqual(updated.resource.variables.find((item) => item.key === 'items')?.value, ['one', 'two'])
+    assert.deepEqual(updated.resource.variables.find((item) => item.key === 'metadata')?.value, { status: 'ready', count: 2 })
+    await assert.rejects(() => resources.applySystemVariableChanges(updated.revision, [{ op: 'patch', key: 'items', edits: [{ old_text: 'one', new_text: 'two' }] }]), /only supported for string/)
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('variable changes preserve readonly structured values and accept JSON Patch root replacement', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-structured-readonly-'))
+  try {
+    const resources = new ProjectResources(projectDir)
+    fs.mkdirSync(path.dirname(resources.systemVariablesFile), { recursive: true })
+    fs.writeFileSync(resources.systemVariablesFile, `${JSON.stringify({
+      version: 1,
+      variables: [
+        {
+          key: 'limits', type: 'object', value: { max: -1, nested: { enabled: true } },
+          required: true, readonly: true, show_in_status: false, scope: 'session',
+        },
+        {
+          key: 'cursor', type: 'object', value: { cycle: 0 },
+          required: true, readonly: false, show_in_status: false, scope: 'project',
+        },
+      ],
+    }, null, 2)}\n`)
+
+    const initial = resources.readSystemVariablesState()
+    const cursor = initial.resource.variables.find((item) => item.key === 'cursor')
+    const updated = await resources.applySystemVariableChanges(initial.revision, [{
+      op: 'json_patch',
+      key: 'cursor',
+      expected_value_sha256: systemVariableValueHash(cursor?.value),
+      patch: [{ op: 'replace', path: '', value: { cycle: 1, phase: 'analysis' } }],
+    }])
+
+    assert.deepEqual(updated.resource.variables.find((item) => item.key === 'limits')?.value, {
+      max: -1,
+      nested: { enabled: true },
+    })
+    assert.deepEqual(updated.resource.variables.find((item) => item.key === 'cursor')?.value, {
+      cycle: 1,
+      phase: 'analysis',
+    })
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
 test('model tools author variables and inject dynamic context into the next model turn', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-variable-authoring-'))
   initializeProjectDirectory(projectDir)
@@ -582,11 +646,11 @@ test('system resource installation upgrades only built-in variable definitions',
     )
     assert.equal(
       upgraded.get('system_variable_read_tool_description'),
-      'Read selected system prompt variables and the current revision before proposing a change.',
+      'Read selected system variables and their types, structured values, dependencies, and current revision before proposing a change. Typed values are available to Jinja2 as builtin.variables.<key>; prompt_template variables are resolved before the main prompt renders, while builtin.prompts remains a compatible rendered view.',
     )
     assert.equal(
       upgraded.get('system_variable_apply_tool_description'),
-      'Atomically add, patch, replace, or remove system prompt variables using the latest revision and return the validated diff.',
+      'Atomically add, patch, replace, or remove typed system variables using the latest revision and return the validated diff. Supported types are text, prompt_template, boolean, integer, number, date, datetime, array, object, and secret_ref. Use text patch only for strings; use json_patch for arrays and objects. secret_ref stores only a reference and never resolves credentials.',
     )
     assert.equal(upgraded.get('agent_identity'), 'Custom project agent identity.')
   } finally {
@@ -659,7 +723,7 @@ test('runtime resolves and refreshes nested prompt_template values with transiti
   }))
   fs.writeFileSync(
     path.join(projectDir, 'main.j2'),
-    '{{ builtin.prompts.template_level_1 }}',
+    '{{ builtin.variables.template_level_1 }}',
   )
   const loop = new RuntimeLoop({ projectDir, workspaceDir: projectDir })
   try {

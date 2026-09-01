@@ -54,6 +54,10 @@ export class WebSocketChannel {
     return this.sequence + 1
   }
 
+  getCurrentSequence(): number {
+    return this.sequence
+  }
+
   close(code = 1000, reason = 'normal closure'): void {
     if (this.socket.readyState === WebSocket.OPEN) this.socket.close(code, reason)
   }

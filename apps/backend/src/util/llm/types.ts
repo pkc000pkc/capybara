@@ -1,6 +1,6 @@
 export type LlmProviderName = 'openai' | 'ollama' | 'deepseek' | 'custom'
 
-export type LlmProtocol = 'responses' | 'chat-completions'
+export type LlmProtocol = 'responses' | 'codex-like' | 'chat-completions'
 
 export type LlmRole = 'system' | 'user' | 'assistant' | 'tool'
 
@@ -35,13 +35,34 @@ export interface LlmUsage {
 export interface LlmRetryNotification {
   phase: 'waiting' | 'attempting'
   attempt: number
+  /** -1 indicates an unlimited number of attempts. */
   maxAttempts: number
   delayMs: number
   reason: string
   statusCode?: number
 }
 
+export interface LlmRequestDiagnostics {
+  attempt: number
+  /** -1 indicates an unlimited number of attempts. */
+  maxAttempts: number
+  elapsedMs: number
+  statusCode?: number
+  requestId?: string
+  responseHeaders: Record<string, string>
+  payloadHash: string
+  payloadBytes: number
+  messageCount: number
+  toolCount: number
+}
+
 export type LlmRetryHandler = (notification: LlmRetryNotification) => void
+
+export interface LlmClientMetadata {
+  sessionId?: string
+  threadId?: string
+  turnId?: string
+}
 
 export interface LlmChatRequest {
   messages: LlmMessage[]
@@ -50,6 +71,7 @@ export interface LlmChatRequest {
   maxTokens?: number
   responseFormat?: 'text' | 'json'
   tools?: LlmToolDefinition[]
+  clientMetadata?: LlmClientMetadata
   signal?: AbortSignal
   onRetry?: LlmRetryHandler
 }

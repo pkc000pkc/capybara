@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { gunzipSync, gzipSync } from 'node:zlib'
 
 export interface SessionSummary {
   id: string
@@ -21,22 +22,37 @@ export interface SessionStorageStats {
 
 export interface SessionStoreOptions {
   directory?: string
+  maxExpandedStateBytes?: number
+  maxCompressedStateBytes?: number
 }
 
 type SessionRow = {
   id: string
   name: string
-  state_json: string | null
+  state_json: string | Uint8Array | null
   created_at: string
   updated_at: string
   request_count: number
   state_bytes: number
 }
 
-// node:sqlite returns and parses state synchronously, so reject pathological
-// snapshots before they can block every runtime connection. Data stays intact.
-const MAX_RESTORABLE_STATE_BYTES = 16 * 1024 * 1024
+// SQLite and JSON parsing are synchronous here. Persist compressed snapshots so
+// repeated checkpoints remain recoverable, while bounding both stored and
+// expanded state before it can block every runtime connection.
+// The larger read ceiling provides a one-time migration path for snapshots
+// created before RuntimeLoop bounded its retained checkpoint window.
+const MAX_RESTORABLE_STATE_BYTES = 128 * 1024 * 1024
+const MAX_EXPANDED_STATE_BYTES = 768 * 1024 * 1024
+export const MAX_WRITABLE_SESSION_STATE_BYTES = 256 * 1024 * 1024
+export const MAX_WRITABLE_SESSION_COMPRESSED_BYTES = MAX_RESTORABLE_STATE_BYTES
 export const MAX_SESSION_NAME_LENGTH = 80
+
+function parseState(value: string | Uint8Array): unknown {
+  if (typeof value === 'string') return JSON.parse(value) as unknown
+  const json = gunzipSync(Buffer.from(value), { maxOutputLength: MAX_EXPANDED_STATE_BYTES })
+    .toString('utf8')
+  return JSON.parse(json) as unknown
+}
 
 function normalizedSessionName(name: string): string {
   const normalized = name.trim()
@@ -62,8 +78,12 @@ function summary(row: SessionRow): SessionSummary {
 export class SessionStore {
   readonly databaseFile: string
   private readonly database: DatabaseSync
+  private readonly maxExpandedStateBytes: number
+  private readonly maxCompressedStateBytes: number
 
   constructor(readonly projectDir: string, options: SessionStoreOptions = {}) {
+    this.maxExpandedStateBytes = options.maxExpandedStateBytes ?? MAX_WRITABLE_SESSION_STATE_BYTES
+    this.maxCompressedStateBytes = options.maxCompressedStateBytes ?? MAX_WRITABLE_SESSION_COMPRESSED_BYTES
     const directory = path.resolve(options.directory ?? path.join(projectDir, '.capybara'))
     fs.mkdirSync(directory, { recursive: true })
     this.databaseFile = path.join(directory, 'sessions.sqlite')
@@ -128,16 +148,29 @@ export class SessionStore {
     }
     return {
       session: summary(row),
-      ...(row.state_json ? { state: JSON.parse(row.state_json) as unknown } : {}),
+      ...(row.state_json ? { state: parseState(row.state_json) } : {}),
     }
   }
 
   save(id: string, state: unknown, requestCount: number): void {
+    const json = JSON.stringify(state)
+    const expandedBytes = Buffer.byteLength(json)
+    if (expandedBytes > this.maxExpandedStateBytes) {
+      throw new Error(
+        `session state exceeds the writable expanded limit (${expandedBytes} > ${this.maxExpandedStateBytes} bytes)`,
+      )
+    }
+    const encoded = gzipSync(Buffer.from(json), { level: 1 })
+    if (encoded.byteLength > this.maxCompressedStateBytes) {
+      throw new Error(
+        `session state exceeds the writable compressed limit (${encoded.byteLength} > ${this.maxCompressedStateBytes} bytes)`,
+      )
+    }
     const result = this.database.prepare(`
       UPDATE sessions
       SET state_json = ?, request_count = ?, updated_at = ?
       WHERE id = ?
-    `).run(JSON.stringify(state), requestCount, new Date().toISOString(), id)
+    `).run(encoded, requestCount, new Date().toISOString(), id)
     if (result.changes === 0) throw new Error(`session was not found: ${id}`)
   }
 

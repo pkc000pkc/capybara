@@ -1,5 +1,6 @@
 import type { HarnessActivation, HarnessType } from '#core/harnesses/types'
 import type { HookCheckpoint, HookParameterDefinition, HookPermissions, HookSchedule } from '#core/hooks/types'
+import type { SystemVariableDefinition } from '#core/project-resources'
 
 export type ResourceKind = 'tool' | 'skill' | 'harness' | 'hook'
 
@@ -27,6 +28,65 @@ interface ResourceModule<TKind extends ResourceKind> {
   revision: string
   diagnostics: ResourceDiagnostic[]
   files: ResourceFile[]
+}
+
+export type PluginOwnerKind = 'system' | 'project' | 'installed'
+
+export interface PluginToolDependencyResource {
+  package: string
+  version: string
+  bundled?: string
+  installedVersion?: string
+  manifestPath?: string
+  status: 'installed' | 'missing' | 'conflict'
+}
+
+export interface PluginVariableDependencyResource {
+  variable: SystemVariableDefinition
+  references: Array<{
+    path: string
+    count: number
+  }>
+}
+
+export interface PluginResource {
+  id: string
+  name: string
+  description: string
+  version: string
+  ownerKind: PluginOwnerKind
+  enabled: boolean
+  manifestPath?: string
+  source: string
+  uninstallable: boolean
+  resourceModuleIds: string[]
+  resources: {
+    variables?: string
+    harnesses: string[]
+    hooks: string[]
+    trainingHooks: string[]
+  }
+  variables: SystemVariableDefinition[]
+  variableDependencies: PluginVariableDependencyResource[]
+  toolDependencies: PluginToolDependencyResource[]
+  diagnostics: ResourceDiagnostic[]
+}
+
+export interface ToolDependentPlugin {
+  pluginId: string
+  pluginName: string
+  requestedVersion: string
+  enabled: boolean
+}
+
+export interface ToolPackageResource {
+  package: string
+  version: string
+  manifestPath: string
+  moduleId: string
+  requiredBy: ToolDependentPlugin[]
+  orphaned: boolean
+  uninstallable: boolean
 }
 
 export interface ToolResourceDefinition {
@@ -85,6 +145,8 @@ export interface HookResourceDefinition {
   description: string
   entry: string
   enabled: boolean
+  ownerId: string
+  mode: 'runtime' | 'training'
   checkpoint: HookCheckpoint
   schedule: HookSchedule
   permissions: HookPermissions
@@ -97,6 +159,7 @@ export interface HookResourceDefinition {
 }
 
 export interface ToolResourceModule extends ResourceModule<'tool'> {
+  packageVersion: string
   runner: { type: 'stdio'; entry: string }
   tools: ToolResourceDefinition[]
 }
@@ -122,6 +185,8 @@ export type ProjectResourceModule =
 export interface ResourceCatalog {
   revision: string
   items: ProjectResourceModule[]
+  plugins: PluginResource[]
+  toolPackages: ToolPackageResource[]
 }
 
 export interface ResourceFileContent extends ResourceFile {

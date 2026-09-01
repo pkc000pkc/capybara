@@ -12,6 +12,7 @@ import {
   Play,
   Save,
   Stethoscope,
+  Trash2,
   Wrench,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
@@ -22,6 +23,7 @@ import {
   type ResourceDefinition,
   type ResourceFileContent,
   type ResourceKind,
+  type ToolPackageResource,
 } from "../resource-api";
 import type { RuntimeToolsState } from "../runtime-protocol";
 import CodeSurface from "./code-surface";
@@ -90,6 +92,7 @@ export default function ResourceDefinitionWorkspace({
 }) {
   const { t } = useI18n();
   const [modules, setModules] = useState<DefinitionResourceModule[]>([]);
+  const [toolPackages, setToolPackages] = useState<ToolPackageResource[]>([]);
   const [selectedModuleId, setSelectedModuleId] = useState("");
   const [selectedDefinitionId, setSelectedDefinitionId] = useState("");
   const [query, setQuery] = useState("");
@@ -113,6 +116,8 @@ export default function ResourceDefinitionWorkspace({
   const [testStatus, setTestStatus] = useState<TestStatus>("idle");
   const [testAreaWidth, setTestAreaWidth] = useState(0);
   const [testInputWidth, setTestInputWidth] = useState(TEST_INPUT_FALLBACK_WIDTH);
+  const [confirmToolUninstall, setConfirmToolUninstall] = useState(false);
+  const [uninstallingTool, setUninstallingTool] = useState(false);
   const fileRequest = useRef(0);
   const saveRequest = useRef(false);
   const testRequest = useRef(0);
@@ -128,6 +133,7 @@ export default function ResourceDefinitionWorkspace({
       const next = catalog.items.filter(
         (item): item is DefinitionResourceModule => item.kind !== "hook" && item.kind === kind,
       );
+      setToolPackages(catalog.toolPackages ?? []);
       const firstModule = next.find((item) => item.name === preferredModuleName) ?? next[0];
       const firstDefinition = definitions(firstModule)[0];
       const firstFile = firstModule?.files[0]?.path ?? "";
@@ -214,6 +220,9 @@ export default function ResourceDefinitionWorkspace({
   }), [modules, normalizedQuery]);
   const selectedModule = modules.find((resourceModule) => resourceModule.id === selectedModuleId) ?? modules[0];
   const selectedDefinitions = definitions(selectedModule);
+  const selectedToolPackage = selectedModule?.kind === "tool"
+    ? toolPackages.find((tool) => tool.moduleId === selectedModule.id)
+    : undefined;
   const selectedDefinition = selectedDefinitions.find(
     (definition) => definition.id === selectedDefinitionId,
   ) ?? selectedDefinitions[0];
@@ -365,6 +374,28 @@ export default function ResourceDefinitionWorkspace({
     testInputResized.current = true;
     setTestInputWidth(value);
   };
+  const uninstallTool = async () => {
+    if (!selectedToolPackage || uninstallingTool) return;
+    setUninstallingTool(true);
+    try {
+      const result = await resourceApi.uninstallToolPackage(projectPath, selectedToolPackage.package);
+      const next = result.catalog.items.filter(
+        (item): item is DefinitionResourceModule => item.kind !== "hook" && item.kind === kind,
+      );
+      const first = next[0];
+      const firstDefinition = definitions(first)[0];
+      setModules(next);
+      setToolPackages(result.catalog.toolPackages ?? []);
+      setSelectedModuleId(first?.id ?? "");
+      setSelectedDefinitionId(firstDefinition?.id ?? "");
+      setConfirmToolUninstall(false);
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setUninstallingTool(false);
+    }
+  };
 
   const editorTabs: WorkspaceTab<EditorTab>[] = [
     { controls: "resource-editor-content", id: "files", icon: FolderOpen, label: t("resources.filesTab") },
@@ -468,7 +499,9 @@ export default function ResourceDefinitionWorkspace({
       {divider}
 
       <section
-        className="grid min-h-0 grid-rows-[34px_minmax(0,1fr)_26px] bg-white"
+        className={kind === "tool"
+          ? "grid min-h-0 grid-rows-[34px_34px_minmax(0,1fr)_26px] bg-white"
+          : "grid min-h-0 grid-rows-[34px_minmax(0,1fr)_26px] bg-white"}
       >
         {selectedModule ? (
           <>
@@ -497,6 +530,32 @@ export default function ResourceDefinitionWorkspace({
               monospace
               title={selectedModule.name}
             />
+            {kind === "tool" && (
+              <div className="flex min-w-0 items-center gap-2 border-b border-[#cbd8d9] bg-[#f8faf9] px-3">
+                <span className="shrink-0 text-[9px] font-semibold uppercase text-[#6b7e82]">{t("tools.requiredBy")}</span>
+                <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+                  {(selectedToolPackage?.requiredBy.length ?? 0) > 0
+                    ? selectedToolPackage?.requiredBy.map((plugin) => (
+                      <span className="shrink-0 bg-[#e3eeec] px-1.5 py-0.5 font-mono text-[8px] text-[#31575b]" key={plugin.pluginId} title={`${plugin.pluginName} · ${plugin.requestedVersion}`}>
+                        {plugin.pluginId}{plugin.enabled ? "" : ` · ${t("tools.disabledDependent")}`}
+                      </span>
+                    ))
+                    : <span className="text-[9px] text-[#718488]">{t("tools.noPluginDependents")}</span>}
+                </div>
+                {selectedToolPackage?.uninstallable && (
+                  <button
+                    aria-label={t("tools.uninstall")}
+                    className="grid h-6 w-6 shrink-0 place-items-center border border-[#cfaaaa] bg-white text-[#91483f] outline-none hover:bg-[#f8e9e8] focus-visible:ring-2 focus-visible:ring-[#9b4141] disabled:cursor-not-allowed disabled:border-[#d8dfdf] disabled:text-[#9caaaa]"
+                    disabled={selectedToolPackage.requiredBy.length > 0}
+                    onClick={() => setConfirmToolUninstall(true)}
+                    title={selectedToolPackage.requiredBy.length > 0 ? t("tools.uninstallBlocked") : t("tools.uninstall")}
+                    type="button"
+                  >
+                    <Trash2 aria-hidden="true" size={11} />
+                  </button>
+                )}
+              </div>
+            )}
             <div className="grid min-h-0 grid-rows-[31px_minmax(0,1fr)]" id="resource-editor-panel">
               <WorkspaceTabs
                 activeTab={editorTab}
@@ -719,6 +778,24 @@ export default function ResourceDefinitionWorkspace({
       {error && (
         <div className="absolute bottom-3 right-3 max-w-md border border-[#c68d8d] bg-[#fff1f0] px-3 py-2 text-[10px] text-[#8f3535]" role="alert">
           {error}
+        </div>
+      )}
+      {confirmToolUninstall && selectedToolPackage && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-[#17363a]/30 p-4" role="presentation">
+          <section aria-label={t("tools.uninstallTitle")} aria-modal="true" className="w-full max-w-sm border border-[#9fb4b5] bg-white shadow-xl" role="dialog">
+            <PanelHeader icon={Wrench} title={t("tools.uninstallTitle")} />
+            <div className="border-t border-[#dce5e5] px-4 py-4">
+              <div className="font-mono text-[11px] font-semibold text-[#29484c]">{selectedToolPackage.package} · v{selectedToolPackage.version}</div>
+              <p className="mt-2 text-[10px] leading-4 text-[#60777a]">{t("tools.uninstallDescription")}</p>
+            </div>
+            <footer className="flex justify-end gap-2 border-t border-[#cbd8d9] bg-[#f8faf9] px-4 py-3">
+              <button className="h-7 border border-[#b9caca] bg-white px-3 text-[9px] font-semibold text-[#526b70]" disabled={uninstallingTool} onClick={() => setConfirmToolUninstall(false)} type="button">{t("plugins.cancel")}</button>
+              <button className="flex h-7 items-center gap-1.5 bg-[#9b4141] px-3 text-[9px] font-semibold text-white disabled:bg-[#c9a3a3]" disabled={uninstallingTool} onClick={() => void uninstallTool()} type="button">
+                {uninstallingTool ? <LoaderCircle className="animate-spin" size={11} /> : <Trash2 size={11} />}
+                {t("tools.confirmUninstall")}
+              </button>
+            </footer>
+          </section>
         </div>
       )}
     </div>

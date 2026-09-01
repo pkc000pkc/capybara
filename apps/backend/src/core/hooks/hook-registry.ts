@@ -4,6 +4,7 @@ import path from 'node:path'
 import vm from 'node:vm'
 import ts from 'typescript'
 
+import { PluginRegistry } from '#core/plugins/plugin-registry'
 import type {
   HookDiagnostic,
   HookCheckpoint,
@@ -24,6 +25,11 @@ const DEFAULT_SCHEDULE: HookSchedule = {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function inside(root: string, target: string): boolean {
+  const relative = path.relative(root, target)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
 function hash(value: string): string {
@@ -93,7 +99,7 @@ function validateSchedule(value: unknown): HookSchedule {
 function validatePermissions(value: unknown): HookPermissions {
   if (value === undefined) return {}
   if (!isObject(value)) throw new Error('permissions must be an object')
-  const allowed = new Set(['llm', 'variables', 'messages', 'artifacts', 'hooks'])
+  const allowed = new Set(['llm', 'variables', 'messages', 'artifacts', 'hooks', 'research'])
   const unknown = Object.keys(value).find((key) => !allowed.has(key))
   if (unknown) throw new Error(`unsupported Hook permission: ${unknown}`)
   if (value.llm !== undefined && value.llm !== 'project') throw new Error('permissions.llm must be project')
@@ -101,6 +107,7 @@ function validatePermissions(value: unknown): HookPermissions {
   if (value.messages !== undefined && value.messages !== 'replace') throw new Error('permissions.messages must be replace')
   if (value.artifacts !== undefined && value.artifacts !== 'write') throw new Error('permissions.artifacts must be write')
   if (value.hooks !== undefined && value.hooks !== 'write') throw new Error('permissions.hooks must be write')
+  if (value.research !== undefined && value.research !== 'append') throw new Error('permissions.research must be append')
   return value as HookPermissions
 }
 
@@ -204,12 +211,17 @@ export class HookRegistry {
   readonly systemHooksDir: string
   readonly projectHooksDir: string
   readonly hooksDir: string
+  private readonly projectRealDir: string
   private cachedSystemHooks?: RegisteredHook[]
   private cachedProjectHooks?: RegisteredHook[]
+  private cachedPluginHooks?: RegisteredHook[]
+  private cachedTrainingHooks?: RegisteredHook[]
+  private cachedCatalogHooks?: RegisteredHook[]
   private cachedHooks?: RegisteredHook[]
 
   constructor(readonly projectDir: string) {
     const root = path.resolve(projectDir)
+    this.projectRealDir = fs.realpathSync(root)
     this.systemHooksDir = path.join(root, '.capybara', 'hooks')
     this.projectHooksDir = path.join(root, 'hooks')
     this.hooksDir = this.projectHooksDir
@@ -222,19 +234,26 @@ export class HookRegistry {
     this.cachedHooks = [
       ...systemHooks,
       ...this.listProject().filter((hook) => !systemNames.has(hook.id)),
+      ...this.listPluginRuntime(),
     ]
     return [...this.cachedHooks]
   }
 
   listSystem(): RegisteredHook[] {
-    this.cachedSystemHooks ??= this.inspectDirectory(this.systemHooksDir)
+    this.cachedSystemHooks ??= this.inspectDirectory(
+      this.systemHooksDir,
+      { ownerId: 'capybara-system', ownerKind: 'system', mode: 'runtime' },
+    )
     return [...this.cachedSystemHooks]
   }
 
   listProject(): RegisteredHook[] {
     if (this.cachedProjectHooks) return [...this.cachedProjectHooks]
     const systemNames = new Set(this.listSystem().map((hook) => hook.id))
-    this.cachedProjectHooks = this.inspectDirectory(this.projectHooksDir).map((hook) => (
+    this.cachedProjectHooks = this.inspectDirectory(
+      this.projectHooksDir,
+      { ownerId: 'project', ownerKind: 'project', mode: 'runtime' },
+    ).map((hook) => (
       systemNames.has(hook.id)
         ? this.invalid(
             hook.entryFile,
@@ -246,19 +265,141 @@ export class HookRegistry {
     return [...this.cachedProjectHooks]
   }
 
+  listTraining(): RegisteredHook[] {
+    if (this.cachedTrainingHooks) return [...this.cachedTrainingHooks]
+    const sources = new PluginRegistry(this.projectDir).hookSources('training')
+      .filter((source) => source.enabled)
+    if (sources.length === 0) {
+      this.cachedTrainingHooks = this.list()
+      return [...this.cachedTrainingHooks]
+    }
+    const projectAndPlugins = sources.flatMap((source) => this.inspectPath(source.path, {
+      ownerId: source.pluginId,
+      ownerKind: source.ownerKind,
+      mode: 'training',
+    }))
+    const system = this.listSystem()
+      .filter((hook) => hook.checkpoint !== 'after_loop')
+      .map((hook) => ({ ...hook, mode: 'training' as const }))
+    const hooks = [...system, ...projectAndPlugins]
+    const duplicate = hooks.map((hook) => hook.id)
+      .find((id, index, ids) => ids.indexOf(id) !== index)
+    if (duplicate) throw new Error(`duplicate training Hook id: ${duplicate}`)
+    this.cachedTrainingHooks = hooks
+    return [...hooks]
+  }
+
+  listCatalog(): RegisteredHook[] {
+    if (this.cachedCatalogHooks) return [...this.cachedCatalogHooks]
+    const plugins = new PluginRegistry(this.projectDir)
+    const installedRuntime = plugins.hookSources('runtime')
+      .filter((source) => source.ownerKind === 'installed')
+      .flatMap((source) => this.inspectCatalogPath(source.path, {
+        ownerId: source.pluginId,
+        ownerKind: source.ownerKind,
+        mode: 'runtime',
+      }))
+    const training = plugins.hookSources('training')
+      .filter((source) => source.ownerKind !== 'system')
+      .flatMap((source) => this.inspectCatalogPath(source.path, {
+        ownerId: source.pluginId,
+        ownerKind: source.ownerKind,
+        mode: 'training',
+      }))
+    const hooks = [...this.listProject(), ...installedRuntime, ...training]
+    const counts = new Map<string, number>()
+    for (const hook of hooks) {
+      const key = `${hook.mode}:${hook.id}`
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    this.cachedCatalogHooks = hooks.map((hook) => {
+      const key = `${hook.mode}:${hook.id}`
+      if ((counts.get(key) ?? 0) < 2) return hook
+      return {
+        ...hook,
+        enabled: false,
+        loadable: false,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'HOOK_DUPLICATE',
+          message: `duplicate ${hook.mode} Hook id: ${hook.id}`,
+        }],
+      }
+    })
+    return [...this.cachedCatalogHooks]
+  }
+
+  getTraining(id: string): RegisteredHook | undefined {
+    return this.listTraining().find((hook) => hook.id === id)
+  }
+
   reload(): RegisteredHook[] {
     this.cachedSystemHooks = undefined
     this.cachedProjectHooks = undefined
+    this.cachedPluginHooks = undefined
+    this.cachedTrainingHooks = undefined
+    this.cachedCatalogHooks = undefined
     this.cachedHooks = undefined
     return this.list()
   }
 
-  private inspectDirectory(directory: string): RegisteredHook[] {
+  private listPluginRuntime(): RegisteredHook[] {
+    if (this.cachedPluginHooks) return [...this.cachedPluginHooks]
+    this.cachedPluginHooks = new PluginRegistry(this.projectDir).hookSources('runtime')
+      .filter((source) => source.enabled && source.ownerKind === 'installed')
+      .flatMap((source) => this.inspectPath(source.path, {
+        ownerId: source.pluginId,
+        ownerKind: source.ownerKind,
+        mode: 'runtime',
+      }))
+    return [...this.cachedPluginHooks]
+  }
+
+  private inspectPath(
+    relativePath: string,
+    owner: Pick<RegisteredHook, 'ownerId' | 'ownerKind' | 'mode'>,
+  ): RegisteredHook[] {
+    const target = path.resolve(this.projectDir, relativePath)
+    const root = path.resolve(this.projectDir)
+    const relative = path.relative(root, target)
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error(`Hook source leaves the project workspace: ${relativePath}`)
+    }
+    if (!fs.existsSync(target)) return []
+    const realTarget = fs.realpathSync(target)
+    if (!inside(this.projectRealDir, realTarget)) {
+      throw new Error(`Hook source symlink leaves the project workspace: ${relativePath}`)
+    }
+    return fs.statSync(realTarget).isDirectory()
+      ? this.inspectDirectory(realTarget, owner)
+      : realTarget.endsWith('.ts') && !realTarget.endsWith('.d.ts') ? [this.inspect(realTarget, owner)] : []
+  }
+
+  private inspectCatalogPath(
+    relativePath: string,
+    owner: Pick<RegisteredHook, 'ownerId' | 'ownerKind' | 'mode'>,
+  ): RegisteredHook[] {
+    try {
+      return this.inspectPath(relativePath, owner)
+    } catch (error) {
+      return [this.invalid(
+        path.resolve(this.projectDir, relativePath),
+        '',
+        error instanceof Error ? error.message : String(error),
+        owner,
+      )]
+    }
+  }
+
+  private inspectDirectory(
+    directory: string,
+    owner: Pick<RegisteredHook, 'ownerId' | 'ownerKind' | 'mode'>,
+  ): RegisteredHook[] {
     if (!fs.existsSync(directory)) return []
     return fs.readdirSync(directory, { withFileTypes: true })
       .filter((entry) => entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts') && !entry.name.startsWith('.'))
       .sort((left, right) => left.name.localeCompare(right.name))
-      .map((entry) => this.inspect(path.join(directory, entry.name)))
+      .map((entry) => this.inspect(path.join(directory, entry.name), owner))
   }
 
   get(id: string): RegisteredHook | undefined {
@@ -272,7 +413,20 @@ export class HookRegistry {
   validateContent(name: string, source: string): RegisteredHook {
     if (!HOOK_NAME.test(name)) throw new Error('Hook name must use kebab-case')
     if (Buffer.byteLength(source) > MAX_HOOK_BYTES) throw new Error(`Hook source exceeds ${MAX_HOOK_BYTES} bytes`)
-    return this.inspectSource(path.join(this.hooksDir, `${name}.ts`), source)
+    return this.inspectSource(path.join(this.hooksDir, `${name}.ts`), source, {
+      ownerId: 'project', ownerKind: 'project', mode: 'runtime',
+    })
+  }
+
+  validateExternalContent(
+    entryFile: string,
+    source: string,
+    owner: Pick<RegisteredHook, 'ownerId' | 'ownerKind' | 'mode'>,
+  ): RegisteredHook {
+    const target = path.resolve(entryFile)
+    if (!inside(this.projectDir, target)) throw new Error('Hook file leaves the project workspace')
+    if (Buffer.byteLength(source) > MAX_HOOK_BYTES) throw new Error(`Hook source exceeds ${MAX_HOOK_BYTES} bytes`)
+    return this.inspectSource(target, source, owner)
   }
 
   create(name: string, source: string): RegisteredHook {
@@ -335,29 +489,43 @@ export class HookRegistry {
     this.reload()
   }
 
-  private inspect(file: string): RegisteredHook {
+  private inspect(
+    file: string,
+    owner: Pick<RegisteredHook, 'ownerId' | 'ownerKind' | 'mode'>,
+  ): RegisteredHook {
     const source = fs.readFileSync(file, 'utf8')
     if (Buffer.byteLength(source) > MAX_HOOK_BYTES) {
-      return this.invalid(file, source, `Hook source exceeds ${MAX_HOOK_BYTES} bytes`)
+      return this.invalid(file, source, `Hook source exceeds ${MAX_HOOK_BYTES} bytes`, owner)
     }
     try {
-      return this.inspectSource(file, source)
+      return this.inspectSource(file, source, owner)
     } catch (error) {
-      return this.invalid(file, source, error instanceof Error ? error.message : String(error))
+      return this.invalid(file, source, error instanceof Error ? error.message : String(error), owner)
     }
   }
 
-  private inspectSource(file: string, source: string): RegisteredHook {
+  private inspectSource(
+    file: string,
+    source: string,
+    owner: Pick<RegisteredHook, 'ownerId' | 'ownerKind' | 'mode'>,
+  ): RegisteredHook {
     const expectedName = path.basename(file, '.ts')
     const compiled = compileHookSource(source, file)
     const definition = loadDefinition(compiled, file)
     const validated = validateDefinition(definition, expectedName)
+    if (owner.mode === 'runtime' && owner.ownerKind === 'installed' && validated.checkpoint !== 'after_loop') {
+      throw new Error('runtime plugin Hooks must use checkpoint after_loop')
+    }
+    if (owner.mode === 'training' && validated.checkpoint === 'after_loop') {
+      throw new Error('training plugin Hooks must use checkpoint after_evaluation or after_replay')
+    }
     if (validated.permissions.hooks && path.dirname(file) !== this.systemHooksDir) {
       throw new Error('hooks:write permission is reserved for system Hooks')
     }
     const inputs = triggerInputs(source)
     return {
-      id: validated.name,
+      id: owner.ownerKind === 'installed' ? `${owner.ownerId}:${validated.name}` : validated.name,
+      ...owner,
       ...validated,
       entryFile: file,
       source,
@@ -369,11 +537,19 @@ export class HookRegistry {
     }
   }
 
-  private invalid(file: string, source: string, message: string): RegisteredHook {
+  private invalid(
+    file: string,
+    source: string,
+    message: string,
+    owner: Pick<RegisteredHook, 'ownerId' | 'ownerKind' | 'mode'> = {
+      ownerId: 'project', ownerKind: 'project', mode: 'runtime',
+    },
+  ): RegisteredHook {
     const name = path.basename(file, '.ts')
     const diagnostic: HookDiagnostic = { severity: 'error', code: 'HOOK_INVALID', message }
     return {
-      id: name,
+      id: owner.ownerKind === 'installed' ? `${owner.ownerId}:${name}` : name,
+      ...owner,
       name,
       description: 'Invalid project Hook',
       entryFile: file,

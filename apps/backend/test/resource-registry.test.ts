@@ -39,8 +39,18 @@ test('resource HTTP API exposes tools, skills, and harnesses and executes their 
     const variableHarness = variableHarnessModule.harnesses.find(
       (item: any) => item.id === 'variable-injection:runtime-variable-probe',
     )
-    assert.equal(catalog.items.length, 6)
+    assert.equal(catalog.items.length, 8)
     assert.equal(catalog.items.some((item: any) => item.kind === 'hook'), false)
+    assert.deepEqual(
+      catalog.items
+        .filter((item: any) => item.package === 'capybara-system')
+        .map((item: any) => item.id)
+        .sort(),
+      [
+        'harness-module:.capybara/harnesses/hook-authoring/manifest.json',
+        'harness-module:.capybara/harnesses/variable-authoring/manifest.json',
+      ],
+    )
     assert.equal(toolModule.runner.entry, 'tools/files/runner.mjs')
     assert.deepEqual(toolModule.files.map((file: any) => file.role), ['manifest', 'runner'])
     assert.equal(readFile.diagnostics.length, 0)

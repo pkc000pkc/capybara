@@ -18,13 +18,20 @@ export class ProjectVariableWriter {
 
   preview(patches: readonly VariableDiff[], baseValues?: Record<string, string>): Record<string, string> {
     const variables = new Map(this.resources.readSystemVariables().variables.map((item) => [item.key, item]))
-    const source = baseValues ?? Object.fromEntries([...variables].map(([key, variable]) => [key, variable.value]))
+    const source = baseValues ?? Object.fromEntries(
+      [...variables]
+        .filter(([, variable]) => typeof variable.value === 'string')
+        .map(([key, variable]) => [key, variable.value as string]),
+    )
     const result: Record<string, string> = {}
     for (const patch of patches) {
       const variable = variables.get(patch.variableName)
       if (!variable) throw new Error(`system variable was not found: ${patch.variableName}`)
       if (variable.readonly || variable.scope !== 'project') {
         throw new Error(`system variable is not a writable project variable: ${patch.variableName}`)
+      }
+      if (typeof variable.value !== 'string') {
+        throw new Error(`training diffs only support string variables: ${patch.variableName}`)
       }
       const beforeValue = source[patch.variableName]
       if (beforeValue === undefined) throw new Error(`system variable was not found in the variable source: ${patch.variableName}`)
@@ -48,6 +55,9 @@ export class ProjectVariableWriter {
         if (!variable) throw new Error(`system variable was not found: ${key}`)
         if (variable.readonly || variable.scope !== 'project') {
           throw new Error(`system variable is not a writable project variable: ${key}`)
+        }
+        if (typeof variable.value !== 'string') {
+          throw new Error(`training diffs only support string variables: ${key}`)
         }
         if (variableHash(variable.value) !== variableHash(beforeValue)) {
           throw new Error(`project variable changed since this training run started: ${key}`)

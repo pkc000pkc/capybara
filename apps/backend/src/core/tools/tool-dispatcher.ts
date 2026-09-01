@@ -115,10 +115,12 @@ export class ToolDispatcher {
         terminateProcessTree(child)
       }
       const abort = () => stop(fail('ABORTED', 'tool call was aborted'))
-      const timer = setTimeout(
-        () => stop(fail('TIMEOUT', `tool call exceeded ${this.timeoutMs} ms`)),
-        this.timeoutMs,
-      )
+      const timer = this.timeoutMs === -1
+        ? undefined
+        : setTimeout(
+            () => stop(fail('TIMEOUT', `tool call exceeded ${this.timeoutMs} ms`)),
+            this.timeoutMs,
+          )
       options.signal?.addEventListener('abort', abort, { once: true })
       this.abortActive = abort
 

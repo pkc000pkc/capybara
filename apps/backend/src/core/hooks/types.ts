@@ -17,6 +17,13 @@ export interface HookPermissions {
   messages?: 'replace'
   artifacts?: 'write'
   hooks?: 'write'
+  research?: 'append'
+}
+
+export interface HookResearchEvent {
+  eventType: string
+  idempotencyKey: string
+  payload: JsonValue
 }
 
 export interface HookParameterDefinition {
@@ -42,6 +49,17 @@ export interface HookStatusSnapshot {
   queueDepth: number
   messageCount: number
   variableTokens: Record<string, number>
+  research?: {
+    ledgerHead: string
+    totalEvents: number
+    events: Array<{
+      event_id: string
+      event_type: string
+      event_hash: string
+      payload: JsonValue
+      source: { hook_id: string }
+    }>
+  }
 }
 
 export interface HookTriggerContext {
@@ -79,6 +97,7 @@ export interface HookResult {
     name: string
     source: string
   }>
+  researchEvents?: HookResearchEvent[]
 }
 
 export interface HookCorrectionProposal {
@@ -186,6 +205,9 @@ export interface HookDiagnostic {
 
 export interface RegisteredHook {
   id: string
+  ownerId: string
+  ownerKind: 'system' | 'project' | 'installed'
+  mode: 'runtime' | 'training'
   name: string
   description: string
   entryFile: string

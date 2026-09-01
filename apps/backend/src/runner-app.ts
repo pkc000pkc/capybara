@@ -14,9 +14,16 @@ import {
   type RuntimeLoopState,
 } from '#core/runtime-loop'
 import { SessionStore } from '#core/session-store'
+import { verifyResearchLedger } from '#core/research-ledger'
 import { WebSocketChannel } from '#transport/websocket-channel'
 
 export const RUNNER_PROTOCOL_VERSION = 1
+const READ_ONLY_OBSERVER_COMMANDS = new Set([
+  'runtime.snapshot.get',
+  'runtime.artifact.get',
+  'runtime.artifact.page',
+  'runtime.variable.page',
+] as const)
 
 export interface BuildRunnerAppOptions {
   projectDir: string
@@ -32,6 +39,11 @@ export interface RunnerInfo {
   name: string
   protocolVersion: number
   capabilities: string[]
+}
+
+interface PersistenceHealth {
+  lastSavedAt?: string
+  lastError?: string
 }
 
 function bearerToken(value: string | undefined): string | undefined {
@@ -67,6 +79,16 @@ function projectName(projectDir: string): string {
   return path.basename(projectDir)
 }
 
+function isReadOnlyMonitorPath(url: string): boolean {
+  const pathname = url.split('?')[0]
+  return pathname === '/v1/project'
+    || pathname === '/v1/agent'
+    || pathname === '/v1/storage'
+    || pathname === '/v1/research'
+    || pathname === '/v1/sessions'
+    || /^\/v1\/sessions\/[^/]+(?:\/monitor|\/observe)?$/.test(pathname ?? '')
+}
+
 export async function buildRunnerApp(options: BuildRunnerAppOptions): Promise<FastifyInstance> {
   if (!options.token.trim()) throw new Error('runner token must not be empty')
 
@@ -83,12 +105,13 @@ export async function buildRunnerApp(options: BuildRunnerAppOptions): Promise<Fa
   const dataDir = path.resolve(options.dataDir ?? path.join(projectDir, '.capybara', 'runtime'))
   const store = new SessionStore(projectDir, { directory: dataDir })
   const activeSessions = new Map<string, AgentSession>()
+  const persistenceHealth = new Map<string, PersistenceHealth>()
   const allowedOrigins = new Set(options.allowedOrigins ?? [])
   const startedAt = Date.now()
   const info: RunnerInfo = {
     name: projectName(projectDir),
     protocolVersion: RUNNER_PROTOCOL_VERSION,
-    capabilities: ['sessions', 'streaming', 'tools', 'hooks', 'skills', 'harnesses'],
+    capabilities: ['sessions', 'streaming', 'tools', 'hooks', 'skills', 'harnesses', 'pagination'],
   }
   const app = Fastify({ logger: options.logger ?? false })
   await app.register(websocket)
@@ -99,6 +122,9 @@ export async function buildRunnerApp(options: BuildRunnerAppOptions): Promise<Fa
       return reply.code(403).send({ error: `origin is not allowed: ${origin}` })
     }
     if (request.method === 'OPTIONS' || request.url === '/' || request.url === '/v1/health') return
+    if (request.method === 'GET' && origin && allowedOrigins.has(origin) && isReadOnlyMonitorPath(request.url)) {
+      return
+    }
     if (!equalToken(requestToken(request), options.token)) {
       return reply.code(401).send({ error: 'invalid or missing runner token' })
     }
@@ -123,6 +149,18 @@ export async function buildRunnerApp(options: BuildRunnerAppOptions): Promise<Fa
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1_000),
   }))
   app.get('/v1/agent', async () => info)
+  app.get('/v1/project', async () => ({ path: projectDir, name: info.name }))
+  app.get('/v1/storage', async () => store.stats())
+  app.get('/v1/research', async (_request, reply) => {
+    try {
+      return { valid: true, ...verifyResearchLedger(projectDir) }
+    } catch (error) {
+      return reply.code(409).send({
+        valid: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })
   app.get('/v1/sessions', async () => ({ items: store.list() }))
   app.post('/v1/sessions', async (request, reply) => {
     try {
@@ -155,6 +193,56 @@ export async function buildRunnerApp(options: BuildRunnerAppOptions): Promise<Fa
     }
   })
 
+  app.get('/v1/sessions/:sessionId/monitor', async (request, reply) => {
+    const { sessionId } = request.params as { sessionId: string }
+    const session = store.list().find((item) => item.id === sessionId)
+    if (!session) return reply.code(404).send({ error: `session was not found: ${sessionId}` })
+    try {
+      const ledger = verifyResearchLedger(projectDir)
+      return {
+        active: activeSessions.has(sessionId),
+        session,
+        persistence: persistenceHealth.get(sessionId) ?? {},
+        ledger: {
+          valid: true,
+          head: ledger.head,
+          totalEvents: ledger.totalEvents,
+          path: ledger.path,
+        },
+      }
+    } catch (error) {
+      return {
+        active: activeSessions.has(sessionId),
+        session,
+        persistence: persistenceHealth.get(sessionId) ?? {},
+        ledger: {
+          valid: false,
+          head: '',
+          totalEvents: 0,
+          path: 'research/events.jsonl',
+          error: error instanceof Error ? error.message : String(error),
+        },
+      }
+    }
+  })
+
+  app.get('/v1/sessions/:sessionId/observe', { websocket: true }, (socket: WebSocket, request) => {
+    const authenticated = equalToken(requestToken(request), options.token)
+    const trustedMonitor = typeof request.headers.origin === 'string'
+      && allowedOrigins.has(request.headers.origin)
+    if (!authenticated && !trustedMonitor) {
+      socket.close(1008, 'invalid or missing runner token')
+      return
+    }
+    const { sessionId } = request.params as { sessionId: string }
+    const session = activeSessions.get(sessionId)
+    if (!session) {
+      socket.close(1013, 'session is not active; start the Agent connection first')
+      return
+    }
+    session.attachObserver(socket, authenticated ? undefined : READ_ONLY_OBSERVER_COMMANDS)
+  })
+
   app.get('/v1/sessions/:sessionId/events', { websocket: true }, (socket: WebSocket, request) => {
     if (!equalToken(requestToken(request), options.token)) {
       socket.close(1008, 'invalid or missing runner token')
@@ -173,13 +261,22 @@ export async function buildRunnerApp(options: BuildRunnerAppOptions): Promise<Fa
       activeSessions.get(sessionId)?.shutdown(true, 4001, 'session attached in another client')
 
       let persistTimer: NodeJS.Timeout | undefined
-      const save = () => store.save(sessionId, loop.exportState(), loop.getRequestCount())
+      const save = () => {
+        try {
+          store.save(sessionId, loop.exportState(), loop.getRequestCount())
+          persistenceHealth.set(sessionId, { lastSavedAt: new Date().toISOString() })
+        } catch (error) {
+          const lastError = error instanceof Error ? error.message : String(error)
+          persistenceHealth.set(sessionId, { ...persistenceHealth.get(sessionId), lastError })
+          app.log.error({ sessionId, error: lastError }, 'session persistence failed')
+        }
+      }
       const scheduleSave = () => {
-        if (persistTimer) clearTimeout(persistTimer)
+        if (persistTimer) return
         persistTimer = setTimeout(() => {
           persistTimer = undefined
           save()
-        }, 100)
+        }, 1_000)
       }
       const channel = new WebSocketChannel(socket, sessionId)
       const session = new AgentSession(sessionId, loop, channel, {

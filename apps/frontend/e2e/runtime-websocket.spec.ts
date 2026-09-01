@@ -19,7 +19,21 @@ projectConfig.llm = {
   base_url: `http://127.0.0.1:${modelPort}/v1`,
   protocol: "responses",
 };
+projectConfig.resource_format = 2;
+projectConfig.plugins = [];
 fs.writeFileSync(projectConfigPath, `${JSON.stringify(projectConfig, null, 2)}\n`);
+fs.writeFileSync(
+  path.join(e2eProject, "capybara.plugin.json"),
+  `${JSON.stringify({
+    schemaVersion: 1,
+    id: "project",
+    name: "Project",
+    description: "Resources owned directly by this E2E project.",
+    version: "1.0.0",
+    resources: { hooks: ["hooks"], trainingHooks: ["training-hooks"] },
+    toolDependencies: [{ package: "project-files", version: "^1.0.0" }],
+  }, null, 2)}\n`,
+);
 fs.writeFileSync(
   path.join(e2eProject, ".capybara", "secrets.json"),
   '{"version":1,"llm":{"api_key":"local-e2e-only"}}\n',
@@ -93,6 +107,87 @@ test("recall tab opens an empty workspace", async ({ page }) => {
   await expect(page.locator("#runtime-view")).toBeHidden();
 });
 
+test("status panel shows the Loop result and Cache utilization", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/");
+  await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({ timeout: 20_000 });
+
+  await page.locator("#status-tab").click();
+  await expect(page.locator('[data-status-item="Loop 状态"]')).toContainText("空闲");
+  const contextValue = page.locator('[data-status-item="上下文"] td').nth(1);
+  await expect(contextValue).toContainText(/\d+(?:\.\d+)?%/);
+  await expect(contextValue).toHaveAttribute("title", /Cache \d+ \/ \d+ Tokens/);
+
+  await page.getByLabel("输入消息").fill("验证状态栏");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.locator('[data-run-status="completed"]')).toBeVisible({ timeout: 75_000 });
+  await expect(page.locator('[data-status-item="Loop 状态"]')).toContainText("已完成");
+});
+
+test("a timed-out snapshot resync reconnects instead of freezing on stale state", async ({ page }) => {
+  test.setTimeout(45_000);
+  let connectionCount = 0;
+  let resyncRequestCount = 0;
+
+  await page.routeWebSocket(/\/ws\/runtime/, (client) => {
+    connectionCount += 1;
+    const server = client.connectToServer();
+    if (connectionCount > 1) return;
+
+    client.onMessage((message) => {
+      const command = JSON.parse(String(message)) as { type?: string };
+      if (command.type === "runtime.snapshot.get") {
+        resyncRequestCount += 1;
+        return;
+      }
+      server.send(message);
+    });
+
+    let gapInjected = false;
+    server.onMessage((message) => {
+      client.send(message);
+      const event = JSON.parse(String(message)) as {
+        id: string;
+        sessionId: string;
+        sequence: number;
+        timestamp: string;
+        type: string;
+      };
+      if (gapInjected || event.type !== "runtime.snapshot") return;
+      gapInjected = true;
+      setTimeout(() => {
+        client.send(JSON.stringify({
+          version: 1,
+          kind: "event",
+          id: crypto.randomUUID(),
+          sessionId: event.sessionId,
+          sequence: event.sequence + 2,
+          timestamp: new Date().toISOString(),
+          type: "command.accepted",
+          payload: {
+            commandId: crypto.randomUUID(),
+            acceptedAt: new Date().toISOString(),
+          },
+        }));
+      }, 250);
+    });
+  });
+
+  await page.goto("/");
+  await expect.poll(() => resyncRequestCount).toBe(1);
+  await expect(page.locator('[data-connection-state="reconnecting"]')).toBeVisible();
+  await expect.poll(() => connectionCount, { timeout: 20_000 }).toBeGreaterThan(1);
+  await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({
+    timeout: 20_000,
+  });
+
+  await page.locator("#research-tab").click();
+  await expect(page.locator("[data-runtime-last-event]")).not.toHaveAttribute(
+    "data-runtime-last-event",
+    "",
+  );
+});
+
 test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
   test.setTimeout(150_000);
   const consoleErrors: string[] = [];
@@ -104,6 +199,8 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
 
   await page.goto("/");
   await expect(page.locator('[data-connection-state="connected"]')).toBeVisible({ timeout: 20_000 });
+  await page.getByRole("button", { name: "新增会话" }).click();
+  await expect(page.locator("#conversation-panel article")).toHaveCount(1);
   await expect(page.locator("#context-rendered-panel")).toContainText(
     "You are Capybara",
   );
@@ -114,7 +211,7 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
     "data-context-replay-mode",
     "live",
   );
-  await expect(page.getByLabel("第 1 / 1 页")).toBeVisible();
+  await expect(page.getByRole("status", { name: /^第 \d+ \/ \d+ 页$/ })).toBeVisible();
   await expect(page.locator("#context-request-tab")).toHaveCount(0);
   await expect(page.locator("[data-render-warnings]")).toContainText(
     "未赋值变量：optionalNote",
@@ -132,16 +229,43 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
     .toBe("pre-line");
   await expect(page.locator("#variables-panel")).toContainText("tools");
   await expect(page.locator("#variables-panel")).toContainText("harnesses");
+  await expect(page.locator("#variables-panel [title^='由']").first()).toBeVisible();
   await expect(page.locator("#variables-panel")).not.toContainText("harness_template");
-  await expect(page.getByRole("button", { name: "隐藏系统变量" })).toBeVisible();
-  await page.getByRole("button", { name: "隐藏系统变量" }).click();
-  await expect(page.locator("#variables-panel").getByText("builtin", { exact: true })).toHaveCount(0);
-  await page.locator("#status-tab").click();
-  await expect(page.getByRole("button", { name: "显示系统变量" })).toHaveCount(0);
+  await expect(page.locator("#plugins-tab")).toBeVisible();
+  await page.locator("#plugins-tab").click();
+  await expect(page.locator("#plugins-tabpanel")).toContainText("插件状态");
+  const projectPlugin = page.locator('#plugins-tabpanel [data-plugin-id="project"]');
+  await expect(projectPlugin).toBeVisible();
+  await projectPlugin.locator("summary").click();
+  await expect(projectPlugin.locator('[data-tool-dependency="project-files"]')).toContainText("要求 ^1.0.0");
   await page.locator("#variables-tab").click();
-  await expect(page.getByRole("button", { name: "显示系统变量" })).toBeVisible();
+  await page.getByLabel("搜索变量").fill("execution_policy");
+  await expect(page.locator(
+    '#variables-tabpanel [data-variable-path="/builtin/variables/execution_policy"]',
+  )).toBeVisible();
+  await expect(page.locator("#variables-tabpanel").getByText("project_path", { exact: true })).toHaveCount(0);
+  await page.getByLabel("搜索变量").fill("");
+  await page.getByLabel("筛选变量来源").selectOption("capybara-system");
+  await expect(page.locator("#variables-tabpanel").getByText("project_path", { exact: true })).toBeVisible();
+  await expect(page.locator("#variables-tabpanel").getByText("optionalNote", { exact: true })).toHaveCount(0);
+  await page.getByLabel("筛选变量来源").selectOption("all");
+  await page.locator("#status-tab").click();
+  await expect(page.getByLabel("搜索变量")).toHaveCount(0);
+  await expect(page.locator('[data-status-item="Loop 状态"]')).toContainText("空闲");
+  await expect(page.locator('[data-status-item="上下文"]')).toContainText(/\d+%/);
+  await page.locator("#variables-tab").click();
+  await expect(page.getByLabel("搜索变量")).toBeVisible();
   await expect(page.locator("#controls-timeline-panel tbody tr")).toHaveCount(4);
   await expect(page.locator("#context-tools-tab")).toHaveText("工具");
+  await expect(page.locator("#context-hooks-tab")).toHaveText("Hook");
+  await expect(page.locator("#context-skills-tab")).toHaveCount(0);
+  await expect(page.locator("#context-memory-tab")).toHaveCount(0);
+  await expect(page.locator("#observations-tab")).toHaveCount(0);
+  await page.locator("#context-hooks-tab").click();
+  await expect(page.locator("#context-hooks-panel [data-hook-empty]")).toContainText(
+    "当前运行暂无 Hook 活动",
+  );
+  await page.locator("#context-rendered-tab").click();
   const contextDivider = page.getByRole("separator", {
     name: "调整上下文渲染区宽度",
   });
@@ -211,8 +335,8 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
     page.getByRole("button", { name: "向右滑动页签" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "向右滑动页签" }).click();
-  await page.locator("#context-memory-tab").click();
-  await expect(page.locator("#context-memory-panel")).toContainText("暂无 memory");
+  await page.locator("#context-hooks-tab").click();
+  await expect(page.locator("#context-hooks-panel")).toBeVisible();
   await page.locator("#context-rendered-tab").click();
 
   await page.getByLabel("输入消息").fill("Playwright 联调消息");
@@ -227,14 +351,21 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
     timeout: 75_000,
   });
   await expect(page.locator('[data-run-status="completed"]')).toBeVisible();
+  await page.locator("#status-tab").click();
+  await expect(page.locator('[data-status-item="Loop 状态"]')).toContainText("已完成");
+  await expect(page.locator('[data-status-item="上下文"] td').nth(1)).toHaveAttribute(
+    "title",
+    /Cache \d+ \/ \d+ Tokens/,
+  );
+  await page.locator("#variables-tab").click();
   await expect(
     conversation.locator("article").last().locator("[data-markdown-content]"),
   ).toBeVisible();
   await expect(
     conversation.getByText("Playwright 联调消息", { exact: true }).locator("[data-markdown-content]"),
   ).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "上一页上下文" })).toBeEnabled();
-  await page.getByRole("button", { name: "上一页上下文" }).click();
+  await expect(page.getByRole("button", { name: "上一页上下文", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "上一页上下文", exact: true }).click();
   await expect(contextReplay).toHaveAttribute(
     "data-context-replay-mode",
     "history",
@@ -314,23 +445,6 @@ test("runtime UI is driven by the RuntimeLoop WebSocket", async ({ page }) => {
   await page.locator("#context-tools-tab").click();
   await page.getByRole("button", { name: "删除 read_file" }).click();
   await expect(page.getByRole("option", { name: "read_file" })).toHaveCount(0);
-
-  await page.locator("#context-skills-tab").click();
-  await page.getByRole("button", { name: "激活 Skill" }).first().click();
-  const skillPicker = page.getByRole("dialog", { name: "添加 Skill 到上下文" });
-  await skillPicker.getByLabel("搜索 Skills").fill("project files");
-  await skillPicker.getByRole("option", { name: /project-files/ }).click();
-  await expect(page.getByLabel("Skill 指令")).toContainText("# Project Files");
-  await expect(page.locator("#context-skills-panel")).toContainText("project-files:read_file");
-  await page.locator("#context-skills-panel").getByRole("button", { name: /references\/safety\.md/ }).click();
-  await page.locator("#context-skills-panel").getByRole("button", { name: "加载" }).click();
-  await expect(page.getByLabel("references/safety.md")).toContainText(/workspace/i);
-  await page.locator("#context-skills-panel").getByRole("button", { name: /scripts\/inventory\.mjs/ }).click();
-  await page.getByLabel("脚本 argv JSON 数组").fill('["--max-depth","0","--max-entries","3"]');
-  await page.getByRole("button", { name: "运行已注册脚本" }).click();
-  await expect(page.getByLabel("scripts/inventory.mjs")).toContainText("entries");
-  await page.locator("#context-rendered-tab").click();
-  await expect(page.locator("#context-rendered-panel")).toContainText("Project Files");
 
   await page.locator('[data-debug-action="next-step"]').click();
   const firstStep = page.locator("#controls-timeline-panel tbody tr").first();

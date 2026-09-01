@@ -10,8 +10,11 @@ import { HookRegistry } from '#core/hooks/hook-registry'
 import { HookRunner } from '#core/hooks/hook-runner'
 import type { HookFixture, HookResult, HookStatusSnapshot } from '#core/hooks/types'
 import { Loop } from '#core/loop'
+import { PluginRegistry } from '#core/plugins/plugin-registry'
 import { installSystemProjectResources } from '#core/project-initializer'
 import { enqueueProjectWrite } from '#core/project-write-queue'
+import { appendResearchEvents, readResearchLedgerEvents } from '#core/research-ledger'
+import { ProjectResourceRegistry } from '#core/resources/resource-registry'
 import {
   ProjectResources,
   type ProjectResourceChange,
@@ -23,6 +26,11 @@ import {
 import {
   resolveSystemPromptVariables,
   templateVariablePaths,
+  SYSTEM_PROMPT_VARIABLE_TYPES,
+  canonicalSystemPromptVariableValue,
+  validateSystemPromptVariableValue,
+  type SystemPromptVariableType,
+  type SystemPromptVariableValue,
 } from '#core/system-prompt-templates'
 import {
   loadRuntimeHarnessCatalog,
@@ -40,8 +48,42 @@ import type { RegisteredSkill } from '#core/skills/types'
 import { ToolDispatcher } from '#core/tools/tool-dispatcher'
 import { ToolRegistry } from '#core/tools/tool-registry'
 import type { ToolCallRequest, ToolCallResult } from '#core/tools/types'
+import { INTERNAL_RESOURCE_TOOLS } from '#core/runtime-resource-tools'
 import {
-  GENERATED_WORKFLOW_PARAMETERS,
+  discardOrphanToolMessages,
+  hasUnknownToolOutcome,
+  interruptTimelineStep,
+  retainRecentCheckpoints,
+  type RuntimeCheckpoint,
+  type RuntimeLoopState,
+  type StoredRuntimeArtifact,
+} from '#core/runtime-loop-state'
+export {
+  discardOrphanToolMessages,
+  hasUnknownToolOutcome,
+  interruptTimelineStep,
+  MAX_RETAINED_CHECKPOINTS,
+  retainRecentCheckpoints,
+  type RuntimeLoopState,
+} from '#core/runtime-loop-state'
+import {
+  applyPatch,
+  assertRuntimeCache,
+  assertSafeToken,
+  changedVariablePaths,
+  clone,
+  decodePointer,
+  emptyRuntimeCache,
+  escapePointerToken,
+  isObject,
+  type ModelOutput,
+  ModelOutputStream,
+  parseModelOutput,
+  runtimeCacheMessages,
+  textDiff,
+  toJsonValue,
+} from '#core/runtime-loop-utils'
+import {
   filterWorkflowItems,
   parseGeneratedWorkflow,
   resolveWorkflowValue,
@@ -66,6 +108,7 @@ import {
   type RuntimeArtifactKind,
   type RuntimeArtifactMeta,
   type RuntimeBreakpoint,
+  type RuntimeCache,
   type RuntimeCheckpointMeta,
   type RuntimeContextRevision,
   type RuntimeEffectiveContextRevision,
@@ -73,6 +116,7 @@ import {
   type RuntimeFailurePhase,
   type RuntimeModelRetry,
   type RuntimeObservation,
+  type RuntimePluginsState,
   type RuntimeSnapshot,
   type RuntimeSkillsState,
   type RuntimeSkillConfirmation,
@@ -92,6 +136,7 @@ import {
 } from '#protocol/runtime-protocol'
 import {
   createLlmService,
+  LlmRequestError,
   type LlmChatRequest,
   type LlmChatResponse,
   type LlmConfig,
@@ -134,70 +179,13 @@ const MAX_GENERATED_HOOK_FILES = 8
 const MAX_GENERATED_HOOK_TOTAL_BYTES = 1024 * 1024
 const MAX_SKILL_CONFIRMATIONS = 50
 
-interface Checkpoint {
-  id: string
-  createdAt: string
-  currentStep: number
-  currentStepId?: string
-  contextRevisionId?: string
-  variables: RuntimeVariables
-  renderResult: RenderResultState
-  messages: ChatMessage[]
-  llmMessages: LlmMessage[]
-  tools: ToolDefinition[]
-  harnesses: HarnessDefinition[]
-  skills: SkillDefinition[]
-  timeline: TimelineStep[]
-  effectiveContexts: RuntimeEffectiveContextRevision[]
-  observations: RuntimeObservation[]
-  pendingToolCalls: Array<[string, ToolCallRequest]>
-  pendingWorkflowCalls?: Array<[string, ToolCallRequest]>
-  workflowDefinitions?: Array<[string, GeneratedWorkflowDefinition]>
-  workflowData?: Array<[string, WorkflowExecutionData]>
-  workflows?: RuntimeWorkflowsState
-  toolRound: number
-  continuationRound: number
-  loopIteration?: number
-  loopVariableBaseline?: RuntimeVariables
-  usage: LlmUsage
-}
-
-interface StoredArtifact {
-  meta: RuntimeArtifactMeta
-  value: JsonValue
-}
-
-export interface RuntimeLoopState {
-  version: 1
-  snapshot: RuntimeSnapshot
-  artifacts: StoredArtifact[]
-  llmMessages: LlmMessage[]
-  checkpoints: Checkpoint[]
-  pendingToolCalls: Array<[string, ToolCallRequest]>
-  pendingWorkflowCalls?: Array<[string, ToolCallRequest]>
-  workflowDefinitions?: Array<[string, GeneratedWorkflowDefinition]>
-  workflowData?: Array<[string, WorkflowExecutionData]>
-  clientMessageIds: string[]
-  runCounter: number
-  assistantCounter: number
-  toolRound: number
-  continuationRound: number
-  loopIteration?: number
-  loopVariableBaseline?: RuntimeVariables
-  runUsage: LlmUsage
-}
-
-interface ModelOutput {
-  status: 'running' | 'completed'
-  content: string
-}
-
 class RuntimeStageError extends Error {
   constructor(
     readonly phase: RuntimeFailurePhase,
     readonly code: string,
     message: string,
     readonly retryable = false,
+    readonly diagnostics?: JsonValue,
   ) {
     super(message)
     this.name = 'RuntimeStageError'
@@ -205,6 +193,9 @@ class RuntimeStageError extends Error {
 }
 
 const INITIAL_TEMPLATE = ''
+const CACHE_SUMMARY_MESSAGE_NAME = 'capybara_cache_summary'
+const CACHE_SUMMARY_PREFIX = 'Earlier runtime cache summary:\n'
+const SYSTEM_CONTEXT_COMPRESSION_HOOK_ID = 'context-compression'
 
 const INITIAL_VARIABLES: RuntimeVariables = {
   builtin: {
@@ -215,9 +206,11 @@ const INITIAL_VARIABLES: RuntimeVariables = {
     initialized_at: '',
     system_variables_revision: '',
     prompts: {},
+    variables: {},
     shared_prompts: [],
     missing_prompts: [],
     sys_message: [],
+    cache: emptyRuntimeCache(),
   },
   task: { title: '' },
   agent: { name: 'capybara' },
@@ -227,258 +220,6 @@ const INITIAL_VARIABLES: RuntimeVariables = {
   harnesses: [],
   skills: { catalog: [], active: [] },
 }
-
-interface InternalResourceToolDefinition extends Omit<LlmToolDefinition, 'description'> {
-  descriptionVariable: string
-  defaultDescription?: string
-  sideEffects?: 'none' | 'workspace-write' | 'external'
-  replay?: 'safe' | 'confirm' | 'never'
-}
-
-const INTERNAL_RESOURCE_TOOLS: InternalResourceToolDefinition[] = [
-  {
-    name: 'search_resources',
-    descriptionVariable: 'resource_search_tool_description',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', minLength: 1 },
-        kinds: {
-          type: 'array',
-          items: { type: 'string', enum: ['tool', 'harness', 'skill'] },
-          uniqueItems: true,
-        },
-        limit: { type: 'integer', minimum: 1, maximum: 50 },
-      },
-      required: ['query'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'load_resources',
-    descriptionVariable: 'resource_load_tool_description',
-    parameters: {
-      type: 'object',
-      properties: {
-        ids: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 50,
-          uniqueItems: true,
-          items: { type: 'string', minLength: 1 },
-        },
-      },
-      required: ['ids'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'read_system_variables',
-    descriptionVariable: 'system_variable_read_tool_description',
-    defaultDescription: 'Read selected system prompt variables and the current revision before changing them.',
-    parameters: {
-      type: 'object',
-      properties: {
-        keys: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 50,
-          uniqueItems: true,
-          items: { type: 'string', pattern: '^[a-z][a-z0-9_]*$' },
-        },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'apply_system_variable_changes',
-    descriptionVariable: 'system_variable_apply_tool_description',
-    defaultDescription: 'Atomically add, patch, replace, or remove system prompt variables using the latest revision and return a validated diff.',
-    sideEffects: 'workspace-write',
-    replay: 'never',
-    parameters: {
-      type: 'object',
-      properties: {
-        base_revision: { type: 'string', minLength: 1 },
-        changes: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 50,
-          items: {
-            oneOf: [
-              {
-                type: 'object',
-                description: 'Create a variable or replace its complete definition and value.',
-                properties: {
-                  op: { type: 'string', enum: ['upsert'] },
-                  key: { type: 'string', pattern: '^[a-z][a-z0-9_]*$' },
-                  type: { type: 'string', enum: ['text', 'prompt_template'] },
-                  label: { type: 'string' },
-                  description: { type: 'string' },
-                  value: { type: 'string' },
-                  expected_value_sha256: {
-                    oneOf: [
-                      { type: 'string', pattern: '^[a-f0-9]{64}$' },
-                      { type: 'null' },
-                    ],
-                    description: 'Use null to assert creation, or the hash returned by read_system_variables to replace an existing value.',
-                  },
-                  required: { type: 'boolean' },
-                  show_in_status: { type: 'boolean' },
-                  scope: { type: 'string', enum: ['session', 'project'] },
-                },
-                required: ['op', 'key', 'value', 'expected_value_sha256'],
-                additionalProperties: false,
-              },
-              {
-                type: 'object',
-                description: 'Patch only the value of an existing variable with exact text replacements.',
-                properties: {
-                  op: { type: 'string', enum: ['patch'] },
-                  key: { type: 'string', pattern: '^[a-z][a-z0-9_]*$' },
-                  expected_value_sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
-                  edits: {
-                    type: 'array',
-                    minItems: 1,
-                    maxItems: 50,
-                    items: {
-                      type: 'object',
-                      properties: {
-                        old_text: { type: 'string', minLength: 1 },
-                        new_text: { type: 'string' },
-                      },
-                      required: ['old_text', 'new_text'],
-                      additionalProperties: false,
-                    },
-                  },
-                },
-                required: ['op', 'key', 'expected_value_sha256', 'edits'],
-                additionalProperties: false,
-              },
-              {
-                type: 'object',
-                description: 'Remove an existing variable.',
-                properties: {
-                  op: { type: 'string', enum: ['remove'] },
-                  key: { type: 'string', pattern: '^[a-z][a-z0-9_]*$' },
-                  expected_value_sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
-                },
-                required: ['op', 'key', 'expected_value_sha256'],
-                additionalProperties: false,
-              },
-            ],
-          },
-        },
-      },
-      required: ['base_revision', 'changes'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'execute_workflow',
-    descriptionVariable: 'workflow_execution_tool_description',
-    parameters: GENERATED_WORKFLOW_PARAMETERS,
-  },
-  {
-    name: 'read_skill_resource',
-    descriptionVariable: 'skill_reference_tool_description',
-    parameters: {
-      type: 'object',
-      properties: {
-        skill_id: { type: 'string', minLength: 1 },
-        path: { type: 'string', minLength: 1 },
-      },
-      required: ['skill_id', 'path'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'run_skill_script',
-    descriptionVariable: 'skill_script_tool_description',
-    parameters: {
-      type: 'object',
-      properties: {
-        skill_id: { type: 'string', minLength: 1 },
-        path: { type: 'string', minLength: 1 },
-        argv: {
-          type: 'array',
-          maxItems: 100,
-          items: { type: 'string', maxLength: 4096 },
-        },
-      },
-      required: ['skill_id', 'path', 'argv'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'search_skill_marketplace',
-    descriptionVariable: 'skill_marketplace_search_tool_description',
-    defaultDescription: 'Search the GitHub Skill marketplace for project Skills. This is read-only. Preview a result before requesting installation.',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', minLength: 1, maxLength: 120 },
-        owner: { type: 'string', minLength: 1, maxLength: 100 },
-        page: { type: 'integer', minimum: 1 },
-        limit: { type: 'integer', minimum: 1, maximum: 30 },
-      },
-      required: ['query'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'preview_skill_marketplace',
-    descriptionVariable: 'skill_marketplace_preview_tool_description',
-    defaultDescription: 'Download and inspect a GitHub Skill in temporary staging. Returns its immutable commit, files, scripts, and warnings without changing the project.',
-    parameters: {
-      type: 'object',
-      properties: {
-        repo: { type: 'string', pattern: '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' },
-        path: { type: 'string', minLength: 1, maxLength: 512 },
-      },
-      required: ['repo', 'path'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'list_installed_skills',
-    descriptionVariable: 'skill_marketplace_installed_tool_description',
-    defaultDescription: 'List project-installed Skills and report their source, immutable commit, and whether local files changed. This is read-only.',
-    parameters: {
-      type: 'object',
-      properties: {},
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'request_skill_install',
-    descriptionVariable: 'skill_marketplace_install_tool_description',
-    defaultDescription: 'Request installation of an already previewed GitHub Skill at its full 40-character commit SHA. This only creates a pending user confirmation; it never installs directly.',
-    parameters: {
-      type: 'object',
-      properties: {
-        repo: { type: 'string', pattern: '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' },
-        path: { type: 'string', minLength: 1, maxLength: 512 },
-        commit: { type: 'string', pattern: '^[a-f0-9]{40}$' },
-      },
-      required: ['repo', 'path', 'commit'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'request_skill_uninstall',
-    descriptionVariable: 'skill_marketplace_uninstall_tool_description',
-    defaultDescription: 'Request removal of an installed project Skill. This only creates a pending user confirmation; it never removes files directly.',
-    parameters: {
-      type: 'object',
-      properties: {
-        skill_id: { type: 'string', minLength: 1 },
-      },
-      required: ['skill_id'],
-      additionalProperties: false,
-    },
-  },
-]
 
 const STEP_BLUEPRINT: Array<{
   id: string
@@ -493,156 +234,6 @@ const STEP_BLUEPRINT: Array<{
 
 function now(): string {
   return new Date().toISOString()
-}
-
-function clone<T>(value: T): T {
-  return structuredClone(value)
-}
-
-function changedVariablePaths(
-  before: JsonValue,
-  after: JsonValue,
-  prefix = '',
-  changed = new Set<string>(),
-): Set<string> {
-  if (JSON.stringify(before) === JSON.stringify(after)) return changed
-  if (isObject(before) && isObject(after)) {
-    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
-      changedVariablePaths(
-        before[key] ?? null,
-        after[key] ?? null,
-        prefix ? `${prefix}.${key}` : key,
-        changed,
-      )
-    }
-    return changed
-  }
-  if (prefix) changed.add(prefix)
-  return changed
-}
-
-function textDiff(before: string, after: string): JsonObject {
-  const left = before.split('\n')
-  const right = after.split('\n')
-  let prefix = 0
-  while (prefix < left.length && prefix < right.length && left[prefix] === right[prefix]) {
-    prefix += 1
-  }
-  let suffix = 0
-  while (
-    suffix < left.length - prefix &&
-    suffix < right.length - prefix &&
-    left[left.length - 1 - suffix] === right[right.length - 1 - suffix]
-  ) {
-    suffix += 1
-  }
-  return {
-    startLine: prefix + 1,
-    removed: left.slice(prefix, suffix ? -suffix : undefined),
-    added: right.slice(prefix, suffix ? -suffix : undefined),
-  }
-}
-
-function toJsonValue(value: unknown): JsonValue {
-  return JSON.parse(JSON.stringify(value ?? null)) as JsonValue
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function parseModelOutput(text: string): ModelOutput {
-  let value: unknown
-  try {
-    value = JSON.parse(text.trim())
-  } catch {
-    throw new Error('LLM response must be a JSON object containing status and content')
-  }
-  if (
-    !isObject(value) ||
-    (value.status !== 'running' && value.status !== 'completed') ||
-    typeof value.content !== 'string'
-  ) {
-    throw new Error('LLM response requires status "running" or "completed" and string content')
-  }
-  if (!value.content.trim()) throw new Error('LLM response content cannot be empty')
-  return { status: value.status, content: value.content }
-}
-
-function partialJsonStringField(source: string, field: string): string | undefined {
-  const match = new RegExp(`"${field}"\\s*:\\s*"`).exec(source)
-  if (!match) return undefined
-  let value = ''
-  let index = match.index + match[0].length
-  while (index < source.length) {
-    const character = source[index]
-    if (character === '"') return value
-    if (character !== '\\') {
-      value += character
-      index += 1
-      continue
-    }
-    if (index + 1 >= source.length) break
-    const escape = source[index + 1] as string
-    if (escape === 'u') {
-      const code = source.slice(index + 2, index + 6)
-      if (code.length < 4) break
-      if (!/^[0-9a-f]{4}$/i.test(code)) throw new Error('LLM streamed invalid JSON escape')
-      value += String.fromCharCode(Number.parseInt(code, 16))
-      index += 6
-      continue
-    }
-    const escaped: Record<string, string> = {
-      '"': '"',
-      '\\': '\\',
-      '/': '/',
-      b: '\b',
-      f: '\f',
-      n: '\n',
-      r: '\r',
-      t: '\t',
-    }
-    if (!(escape in escaped)) throw new Error('LLM streamed invalid JSON escape')
-    value += escaped[escape]
-    index += 2
-  }
-  return value
-}
-
-class ModelOutputStream {
-  private raw = ''
-  private status?: ModelOutput['status']
-  private content = ''
-  private emitted = ''
-
-  constructor(private readonly emit: (delta: string) => void) {}
-
-  push(delta: string): void {
-    this.raw += delta
-    const status = /"status"\s*:\s*"(running|completed)"/.exec(this.raw)?.[1]
-    if (status) this.status = status as ModelOutput['status']
-    this.content = partialJsonStringField(this.raw, 'content') ?? this.content
-    this.flush()
-  }
-
-  finish(output: ModelOutput): void {
-    this.status = output.status
-    this.content = output.content
-    this.flush()
-    if (output.status === 'completed' && this.emitted !== output.content) {
-      throw new Error('streamed LLM content does not match the completed response')
-    }
-  }
-
-  private flush(): void {
-    if (this.status !== 'completed' || this.content === this.emitted) return
-    if (!this.content.startsWith(this.emitted)) {
-      throw new Error('streamed LLM content changed after it was emitted')
-    }
-    const delta = this.content.slice(this.emitted.length)
-    this.emitted = this.content
-    if (delta) this.emit(delta)
-  }
 }
 
 function assertNoReservedToolNames(tools: readonly ToolDefinition[]): void {
@@ -661,97 +252,6 @@ function variablesEditable(run: RunState): boolean {
     'failed',
     'cancelled',
   ].includes(run.status)
-}
-
-function escapePointerToken(token: string): string {
-  return token.replaceAll('~', '~0').replaceAll('/', '~1')
-}
-
-function decodePointer(path: string): string[] {
-  if (path === '') return []
-  if (!path.startsWith('/')) {
-    throw new CommandError('INVALID_PAYLOAD', `invalid JSON pointer: ${path}`)
-  }
-  return path
-    .slice(1)
-    .split('/')
-    .map((token) => token.replaceAll('~1', '/').replaceAll('~0', '~'))
-}
-
-function assertSafeToken(token: string): void {
-  if (token === '__proto__' || token === 'prototype' || token === 'constructor') {
-    throw new CommandError('INVALID_PAYLOAD', 'unsafe variable path')
-  }
-}
-
-function applyPatch(
-  source: RuntimeVariables,
-  operations: JsonPatchOperation[],
-): RuntimeVariables {
-  const root = clone(source) as unknown as JsonValue
-
-  for (const operation of operations) {
-    const tokens = decodePointer(operation.path)
-    if (tokens.length === 0) {
-      throw new CommandError('INVALID_PAYLOAD', 'the variables root cannot be replaced')
-    }
-    tokens.forEach(assertSafeToken)
-    let parent: JsonValue = root
-    for (const token of tokens.slice(0, -1)) {
-      if (Array.isArray(parent)) {
-        const index = Number.parseInt(token, 10)
-        if (!Number.isInteger(index) || index < 0 || index >= parent.length) {
-          throw new CommandError('INVALID_PAYLOAD', `variable path not found: ${operation.path}`)
-        }
-        parent = parent[index] as JsonValue
-      } else if (typeof parent === 'object' && parent !== null && token in parent) {
-        parent = parent[token] as JsonValue
-      } else {
-        throw new CommandError('INVALID_PAYLOAD', `variable path not found: ${operation.path}`)
-      }
-    }
-
-    const finalToken = tokens.at(-1) as string
-    if (Array.isArray(parent)) {
-      const index = finalToken === '-' ? parent.length : Number.parseInt(finalToken, 10)
-      if (!Number.isInteger(index) || index < 0 || index > parent.length) {
-        throw new CommandError('INVALID_PAYLOAD', `invalid array index: ${operation.path}`)
-      }
-      if (operation.op === 'add') {
-        parent.splice(index, 0, clone(operation.value))
-      } else if (operation.op === 'replace') {
-        if (index >= parent.length) {
-          throw new CommandError('INVALID_PAYLOAD', `variable path not found: ${operation.path}`)
-        }
-        parent[index] = clone(operation.value)
-      } else {
-        if (index >= parent.length) {
-          throw new CommandError('INVALID_PAYLOAD', `variable path not found: ${operation.path}`)
-        }
-        parent.splice(index, 1)
-      }
-      continue
-    }
-
-    if (typeof parent !== 'object' || parent === null) {
-      throw new CommandError('INVALID_PAYLOAD', `variable path not found: ${operation.path}`)
-    }
-    if (operation.op === 'remove') {
-      if (!(finalToken in parent)) {
-        throw new CommandError('INVALID_PAYLOAD', `variable path not found: ${operation.path}`)
-      }
-      delete parent[finalToken]
-    } else if (operation.op === 'replace') {
-      if (!(finalToken in parent)) {
-        throw new CommandError('INVALID_PAYLOAD', `variable path not found: ${operation.path}`)
-      }
-      parent[finalToken] = clone(operation.value)
-    } else {
-      parent[finalToken] = clone(operation.value)
-    }
-  }
-
-  return root as RuntimeVariables
 }
 
 export class RuntimeLoop extends Loop {
@@ -773,6 +273,7 @@ export class RuntimeLoop extends Loop {
   private skillScriptRunner: SkillScriptRunner
   private maxMessages: number
   private maxToolRounds: number
+  private contextWindowTokens: number
   private maxInputTokens: number
   private reservedOutputTokens: number
   private harnessPolicy: ReturnType<ProjectResources['readSettings']>['harness_policy']
@@ -794,6 +295,7 @@ export class RuntimeLoop extends Loop {
   private harnessRevision = 1
   private skillRevision = 1
   private skillConfirmationRevision = 0
+  private pluginRevision = 1
   private artifactRevision = 0
   private contextRevision = 0
   private effectiveContextRevision = 0
@@ -802,13 +304,14 @@ export class RuntimeLoop extends Loop {
   private breakpointRevision = 0
   private workflowRevision = 0
   private readonly clientMessageIds = new Set<string>()
-  private readonly artifacts = new Map<string, StoredArtifact>()
+  private sessionId?: string
+  private readonly artifacts = new Map<string, StoredRuntimeArtifact>()
   private readonly artifactItems: RuntimeArtifactMeta[] = []
   private readonly contextItems: RuntimeContextRevision[] = []
   private effectiveContextItems: RuntimeEffectiveContextRevision[] = []
   private observations: RuntimeObservation[] = []
   private readonly breakpointItems: RuntimeBreakpoint[] = []
-  private checkpoints: Checkpoint[] = []
+  private checkpoints: RuntimeCheckpoint[] = []
   private activeContextRevisionId?: string
   private pendingContextRevisionId?: string
   private bypassBreakpointStepId?: string
@@ -847,6 +350,7 @@ export class RuntimeLoop extends Loop {
     catalog: [] as HarnessCatalogDefinition[],
   }
   private skills: RuntimeSkillsState = { revision: 1, items: [], catalog: [] }
+  private plugins: RuntimePluginsState = { revision: this.pluginRevision, items: [] }
   private skillConfirmations: RuntimeSkillConfirmationsState = { revision: 0, items: [] }
   private workflows: RuntimeWorkflowsState = { revision: 0, items: [] }
   private timeline: TimelineStep[] = this.createTimeline()
@@ -862,7 +366,15 @@ export class RuntimeLoop extends Loop {
     revision: 1,
     runtime: 'healthy',
     model: 'ready',
-    context: { usedTokens: 3260, maxTokens: 16_000, utilization: 0.204 },
+    context: {
+      usedTokens: 3260,
+      maxTokens: 16_000,
+      utilization: 0.204,
+      cacheTokens: 0,
+      contextWindowTokens: 16_000,
+      cacheUtilization: 0,
+    },
+    loopStatus: 'idle',
     queueDepth: 0,
     messageCount: 0,
     variableTokens: [],
@@ -885,16 +397,21 @@ export class RuntimeLoop extends Loop {
     installSystemProjectResources(this.projectDir)
     this.projectResources = new ProjectResources(this.projectDir, true)
     const config = this.projectResources.readSettings()
-    const systemVariablesState = this.projectResources.readSystemVariablesState()
+    const pluginRegistry = new PluginRegistry(this.projectDir)
+    const systemVariablesState = pluginRegistry.effectiveSystemVariablesState()
     this.systemVariables = systemVariablesState.resource
     this.maxMessages = config.max_messages
     this.maxToolRounds = config.max_tool_rounds
+    this.contextWindowTokens = config.context.context_window_tokens
     this.maxInputTokens = config.context.max_input_tokens
     this.reservedOutputTokens = config.context.reserved_output_tokens
     this.runtimeStatus.context = {
       usedTokens: 0,
-      maxTokens: this.maxInputTokens - this.reservedOutputTokens,
+      maxTokens: this.availableInputTokens(),
       utilization: 0,
+      cacheTokens: 0,
+      contextWindowTokens: this.contextWindowTokens,
+      cacheUtilization: 0,
     }
     this.harnessPolicy = clone(config.harness_policy)
     this.toolRegistry = new ToolRegistry(this.projectDir)
@@ -914,6 +431,7 @@ export class RuntimeLoop extends Loop {
       baseUrl: config.llm.base_url,
       protocol: config.llm.protocol,
       apiKey: config.llm.api_key,
+      maxRetries: config.llm.max_retries,
     })
     if (this.projectLlmEnabled) {
       this.projectLlmConfigFingerprint = this.llmConfigFingerprint(config)
@@ -938,8 +456,9 @@ export class RuntimeLoop extends Loop {
     }
     this.harnessCatalog = loadRuntimeHarnessCatalog(
       this.projectDir,
-      config.harnesses,
+      pluginRegistry.effectiveHarnesses(config),
     )
+    this.plugins = this.runtimePluginsState(this.pluginRevision)
     this.harnesses.catalog = this.harnessCatalogDefinitions()
     this.skillCatalog = this.skillCatalogDefinitions()
     this.skills.catalog = clone(this.skillCatalog)
@@ -953,10 +472,12 @@ export class RuntimeLoop extends Loop {
       system_variables_revision: systemVariablesState.revision,
       ...this.systemPromptState(this.systemVariables),
       sys_message: [],
+      cache: emptyRuntimeCache(),
     }
     this.runtimeStatus = {
       ...this.runtimeStatus,
       ...this.runtimeStatusMetrics(),
+      context: this.runtimeStatusContext(this.runtimeStatus.context),
     }
     this.contextBuilder = new ContextBuilder({
       projectDir: this.projectDir,
@@ -1009,6 +530,7 @@ export class RuntimeLoop extends Loop {
       variables: this.variables,
       tools: this.tools,
       harnesses: this.harnesses,
+      plugins: this.plugins,
       skills: this.skills,
       skillConfirmations: this.skillConfirmations,
       artifacts: { revision: this.artifactRevision, items: this.artifactItems },
@@ -1036,6 +558,57 @@ export class RuntimeLoop extends Loop {
       timeline: { revision: this.timelineRevision, steps: this.timeline },
       status: this.runtimeStatus,
     })
+  }
+
+  private runtimePluginsState(revision: number): RuntimePluginsState {
+    const catalog = new ProjectResourceRegistry(this.projectDir).list()
+    return {
+      revision,
+      items: catalog.plugins.map((plugin) => {
+        const moduleIds = new Set(plugin.resourceModuleIds)
+        const modules = catalog.items.filter((item) => moduleIds.has(item.id))
+        const hooks = modules
+          .filter((item) => item.kind === 'hook')
+          .flatMap((item) => item.hooks)
+        return {
+          id: plugin.id,
+          name: plugin.name,
+          version: plugin.version,
+          ownerKind: plugin.ownerKind,
+          enabled: plugin.enabled,
+          status: !plugin.enabled
+            ? 'disabled' as const
+            : plugin.diagnostics.some((diagnostic) => diagnostic.severity === 'error')
+              ? 'error' as const
+              : 'active' as const,
+          variableKeys: plugin.variables.map((variable) => variable.key),
+          toolDependencies: plugin.toolDependencies.map((dependency) => ({
+            package: dependency.package,
+            requestedVersion: dependency.version,
+            ...(dependency.installedVersion
+              ? { installedVersion: dependency.installedVersion }
+              : {}),
+            status: dependency.status,
+          })),
+          harnessIds: modules
+            .filter((item) => item.kind === 'harness')
+            .flatMap((item) => item.harnesses.map((harness) => harness.id)),
+          hookIds: hooks.filter((hook) => hook.mode === 'runtime').map((hook) => hook.id),
+          trainingHookIds: hooks.filter((hook) => hook.mode === 'training').map((hook) => hook.id),
+          diagnostics: plugin.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+        }
+      }),
+    }
+  }
+
+  private refreshRuntimePlugins(correlationId: string): boolean {
+    const next = this.runtimePluginsState(this.pluginRevision)
+    if (JSON.stringify(next.items) === JSON.stringify(this.plugins.items)) return false
+    this.pluginRevision += 1
+    this.plugins = { revision: this.pluginRevision, items: next.items }
+    this.snapshotRevision += 1
+    this.emit('runtime.plugins.updated', clone(this.plugins), correlationId)
+    return true
   }
 
   exportState(): RuntimeLoopState {
@@ -1103,12 +676,12 @@ export class RuntimeLoop extends Loop {
     )))
     this.clientMessageIds.clear()
     state.clientMessageIds.forEach((id) => this.clientMessageIds.add(id))
-    this.llmMessages = clone(state.llmMessages)
+    this.llmMessages = discardOrphanToolMessages(clone(state.llmMessages))
     this.pendingToolCalls = new Map(clone(state.pendingToolCalls))
     this.pendingWorkflowCalls = new Map(clone(state.pendingWorkflowCalls ?? []))
     this.workflowDefinitions = new Map(clone(state.workflowDefinitions ?? []))
     this.workflowData = new Map(clone(state.workflowData ?? []))
-    this.checkpoints = clone(state.checkpoints)
+    this.checkpoints = clone(retainRecentCheckpoints(state.checkpoints))
 
     this.artifacts.clear()
     for (const artifact of state.artifacts) {
@@ -1126,6 +699,7 @@ export class RuntimeLoop extends Loop {
       revision: snapshot.variables.revision + 1,
       value: clone(snapshot.variables.value),
     }
+    const restoredRuntimeCache = this.variables.value.builtin?.cache
     this.loopVariableBaseline = clone(state.loopVariableBaseline ?? this.variables.value)
     const allowedContextKeys = new Set([
       'files',
@@ -1149,6 +723,15 @@ export class RuntimeLoop extends Loop {
     }
     this.workflows = clone(snapshot.workflows ?? { revision: 0, items: [] })
     this.variables.value.builtin = currentBuiltin
+    try {
+      assertRuntimeCache(restoredRuntimeCache)
+      this.variables.value.builtin.cache = clone(restoredRuntimeCache)
+    } catch {
+      this.variables.value.builtin.cache = emptyRuntimeCache()
+    }
+    const restoredCache = this.runtimeCacheValue()
+    this.applyRuntimeCache(restoredCache)
+    this.variables.value.builtin.cache = restoredCache
     this.variables.value.builtin.sys_message = this.systemMessageValue()
     this.template = {
       ...currentTemplate,
@@ -1225,7 +808,7 @@ export class RuntimeLoop extends Loop {
     this.skillRevision = this.skills.revision
     this.reconcileHarnessBindings('restore', { publish: false })
     this.timeline = snapshot.timeline.steps.map((step) => (
-      step.status === 'running' ? { ...step, status: 'interrupted' as const } : step
+      step.status === 'running' ? interruptTimelineStep(step) : step
     ))
     this.run = this.withRun({
       ...snapshot.run,
@@ -1235,8 +818,14 @@ export class RuntimeLoop extends Loop {
     this.runtimeStatus = {
       ...clone(snapshot.status),
       model: 'ready',
+      loopStatus: snapshot.status.loopStatus ?? (
+        snapshot.run.status === 'completed'
+          ? 'completed'
+          : snapshot.run.runId ? 'running' : 'idle'
+      ),
       queueDepth: this.pendingToolCalls.size,
       ...this.runtimeStatusMetrics(),
+      context: this.runtimeStatusContext(snapshot.status.context),
       updatedAt: now(),
     }
     this.activeAssistantId = undefined
@@ -1270,6 +859,14 @@ export class RuntimeLoop extends Loop {
         if (!this.artifacts.has(command.payload.artifactId)) {
           throw new CommandError('NOT_FOUND', 'runtime artifact was not found')
         }
+        return
+      case 'runtime.artifact.page':
+        if (!this.artifacts.has(command.payload.artifactId)) {
+          throw new CommandError('NOT_FOUND', 'runtime artifact was not found')
+        }
+        return
+      case 'runtime.variable.page':
+        this.readVariablePath(command.payload.path)
         return
       case 'runtime.context.apply':
         if (['running', 'waiting', 'pause_requested', 'interrupting'].includes(this.run.status)) {
@@ -1332,6 +929,12 @@ export class RuntimeLoop extends Loop {
       case 'run.resume':
         if (!['paused', 'interrupted'].includes(this.run.status)) {
           throw new CommandError('INVALID_STATE', 'only a paused or interrupted run can resume')
+        }
+        if (hasUnknownToolOutcome(this.timeline[this.run.currentStep])) {
+          throw new CommandError(
+            'CONFIRMATION_REQUIRED',
+            'the interrupted tool result is unknown; restart the step with side-effect confirmation',
+          )
         }
         return
       case 'run.pause':
@@ -1399,19 +1002,19 @@ export class RuntimeLoop extends Loop {
         }
         return
       case 'variables.apply': {
-        this.assertRevision(command.payload.baseRevision, this.variables.revision)
         const sharedPatch = command.payload.patch.filter((operation) =>
           operation.path.startsWith('/builtin/prompts/'),
         )
+        if (sharedPatch.length === 0 && !variablesEditable(this.run)) {
+          throw new CommandError('VARIABLES_LOCKED', 'variables are editable only while paused or in step mode')
+        }
+        this.assertRevision(command.payload.baseRevision, this.variables.revision)
         if (sharedPatch.length > 0) {
           if (sharedPatch.length !== command.payload.patch.length) {
             throw new CommandError('INVALID_PAYLOAD', 'shared variable updates cannot be mixed with session variables')
           }
           this.sharedVariableUpdates(command.payload.patch)
           return
-        }
-        if (!variablesEditable(this.run)) {
-          throw new CommandError('VARIABLES_LOCKED', 'variables are editable only while paused or in step mode')
         }
         if (command.payload.patch.some((operation) =>
           ['/tools', '/harnesses', '/skills', '/builtin'].some(
@@ -1511,12 +1114,29 @@ export class RuntimeLoop extends Loop {
   }
 
   execute(command: ClientCommand, nextSequence: number): void {
+    this.sessionId = command.sessionId
     switch (command.type) {
       case 'runtime.snapshot.get':
         this.emit('runtime.snapshot', this.getSnapshot(nextSequence), command.id)
         return
       case 'runtime.artifact.get':
         this.publishArtifact(command.payload.artifactId, command.id)
+        return
+      case 'runtime.artifact.page':
+        this.publishArtifactPage(
+          command.payload.artifactId,
+          command.payload.page,
+          command.payload.pageSize,
+          command.id,
+        )
+        return
+      case 'runtime.variable.page':
+        this.publishVariablePage(
+          command.payload.path,
+          command.payload.page,
+          command.payload.pageSize,
+          command.id,
+        )
         return
       case 'runtime.context.apply':
         this.applyContextRevision(command.payload.contextRevisionId, command.id)
@@ -1708,6 +1328,7 @@ export class RuntimeLoop extends Loop {
     this.loopIteration = 0
     const latestContext = this.pendingContextRevisionId ?? this.contextItems.at(-1)?.id
     if (latestContext) this.applyContextRevision(latestContext, correlationId)
+    this.resetRunTraceState()
     this.publishRenderedMessages(correlationId)
     this.loopVariableBaseline = clone(this.variables.value)
     this.checkpoints = []
@@ -1715,10 +1336,17 @@ export class RuntimeLoop extends Loop {
     this.emit('run.trace.started', {
       run: clone(this.run),
       timeline: { revision: this.timelineRevision, steps: clone(this.timeline) },
+      artifacts: { revision: this.artifactRevision, items: clone(this.artifactItems) },
+      contexts: {
+        revision: this.contextRevision,
+        activeId: this.activeContextRevisionId,
+        pendingId: this.pendingContextRevisionId,
+        items: clone(this.contextItems),
+      },
       checkpoints: { revision: this.checkpointRevision, items: [] },
       effectiveContexts: {
         revision: this.effectiveContextRevision,
-        items: [],
+        items: clone(this.effectiveContextItems),
       },
       observations: {
         revision: this.observationRevision,
@@ -1728,7 +1356,48 @@ export class RuntimeLoop extends Loop {
     }, correlationId)
     this.pushCheckpoint(0, undefined, correlationId)
     this.emitRun(correlationId)
+    this.updateRuntimeStatus({ loopStatus: 'running', model: 'ready', queueDepth: 0 }, correlationId)
     if (this.run.mode === 'continuous') this.startContinuous(correlationId)
+  }
+
+  private resetRunTraceState(): void {
+    const retainedContextId = this.activeContextRevisionId ?? this.contextItems.at(-1)?.id
+    const retainedContext = retainedContextId
+      ? this.contextItems.find((item) => item.id === retainedContextId)
+      : undefined
+    const retainedArtifactIds = new Set<string>()
+    if (retainedContext) {
+      retainedArtifactIds.add(retainedContext.renderArtifactId)
+      retainedArtifactIds.add(retainedContext.messagesArtifactId)
+      retainedArtifactIds.add(retainedContext.toolsArtifactId)
+      if (retainedContext.diffArtifactId) retainedArtifactIds.add(retainedContext.diffArtifactId)
+    }
+    for (const context of this.effectiveContextItems) {
+      retainedArtifactIds.add(context.requestArtifactId)
+      retainedArtifactIds.add(context.messagesArtifactId)
+      retainedArtifactIds.add(context.toolsArtifactId)
+      if (context.diffArtifactId) retainedArtifactIds.add(context.diffArtifactId)
+    }
+    for (const artifactId of [...this.artifacts.keys()]) {
+      if (!retainedArtifactIds.has(artifactId)) this.artifacts.delete(artifactId)
+    }
+    this.artifactItems.splice(
+      0,
+      this.artifactItems.length,
+      ...this.artifactItems.filter((item) => retainedArtifactIds.has(item.id)),
+    )
+    this.contextItems.splice(
+      0,
+      this.contextItems.length,
+      ...(retainedContext ? [{ ...retainedContext, parentId: undefined }] : []),
+    )
+    this.activeContextRevisionId = retainedContext?.id
+    this.pendingContextRevisionId = undefined
+    this.observations = []
+    this.artifactRevision += 1
+    this.contextRevision += 1
+    this.effectiveContextRevision += 1
+    this.observationRevision += 1
   }
 
   private startContinuous(correlationId: string): void {
@@ -1831,7 +1500,7 @@ export class RuntimeLoop extends Loop {
       switch (runningStep.type) {
         case 'context':
           {
-            const usedTokens = Math.ceil(JSON.stringify(this.llmMessages).length / 4)
+            const usedTokens = this.estimatedModelInputTokens()
             const maxTokens = this.runtimeStatus.context.maxTokens
           this.updateRuntimeStatus({
               context: {
@@ -1992,7 +1661,7 @@ export class RuntimeLoop extends Loop {
     const current = this.timeline[this.run.currentStep]
     if (current?.status === 'running') {
       this.updateTimeline(
-        { ...current, status: 'interrupted', completedAt: now() },
+        interruptTimelineStep(current),
         correlationId,
       )
     }
@@ -2006,6 +1675,8 @@ export class RuntimeLoop extends Loop {
   private cancelRun(correlationId: string): void {
     this.generation += 1
     this.abortActiveWork()
+    const current = this.timeline[this.run.currentStep]
+    if (current?.status === 'running') this.updateTimeline(interruptTimelineStep(current), correlationId)
     this.run = this.withRun({ status: 'cancelled' })
     this.updateRuntimeStatus({ model: 'ready', queueDepth: 0 }, correlationId)
     this.emitRun(correlationId)
@@ -2021,7 +1692,7 @@ export class RuntimeLoop extends Loop {
       )
       if (found >= 0) targetIndex = found
     }
-    const checkpoint = this.checkpoints[targetIndex] as Checkpoint
+    const checkpoint = this.checkpoints[targetIndex] as RuntimeCheckpoint
     this.restoreCheckpoint(checkpoint, correlationId)
   }
 
@@ -2101,7 +1772,7 @@ export class RuntimeLoop extends Loop {
     return true
   }
 
-  private restoreCheckpoint(checkpoint: Checkpoint, correlationId: string): void {
+  private restoreCheckpoint(checkpoint: RuntimeCheckpoint, correlationId: string): void {
     this.generation += 1
     this.abortActiveWork()
     const targetIndex = this.checkpoints.findIndex((item) => item.id === checkpoint.id)
@@ -2112,7 +1783,10 @@ export class RuntimeLoop extends Loop {
       value: clone(checkpoint.variables),
     }
     this.messages.splice(0, this.messages.length, ...clone(checkpoint.messages))
-    this.llmMessages = clone(checkpoint.llmMessages)
+    this.llmMessages = discardOrphanToolMessages(clone(checkpoint.llmMessages))
+    const restoredCache = this.runtimeCacheValue()
+    this.applyRuntimeCache(restoredCache)
+    this.variables.value.builtin.cache = restoredCache
     this.variables.value.builtin.sys_message = this.systemMessageValue()
     this.tools = {
       ...this.tools,
@@ -2186,6 +1860,7 @@ export class RuntimeLoop extends Loop {
     this.emit('render.result.updated', clone(this.renderResult), correlationId)
     this.emit('runtime.tools.updated', clone(this.tools), correlationId)
     this.emit('runtime.harnesses.updated', clone(this.harnesses), correlationId)
+    this.emit('runtime.plugins.updated', clone(this.plugins), correlationId)
     this.emit('runtime.skills.updated', clone(this.skills), correlationId)
     this.emit('runtime.checkpoint.restored', {
       checkpointId: checkpoint.id,
@@ -2225,14 +1900,10 @@ export class RuntimeLoop extends Loop {
     this.snapshotRevision += 1
     this.emit('chat.user.created', clone(message), command.id)
     if (!command.payload.autoStart && this.run.runId) {
-      this.llmMessages.push({ role: 'user', content: text })
-      const conversationLimit = Math.max(this.maxMessages - 1, 0)
-      const system = this.llmMessages[0]?.role === 'system' ? this.llmMessages[0] : undefined
-      const conversation = this.llmMessages.filter((item) => item.role !== 'system')
-      this.llmMessages = [
-        ...(system ? [system] : []),
-        ...(conversationLimit > 0 ? conversation.slice(-conversationLimit) : []),
-      ]
+      this.llmMessages = this.limitRuntimeMessages([
+        ...this.llmMessages,
+        { role: 'user', content: text },
+      ])
     }
 
     const patch: JsonPatchOperation[] = [
@@ -2249,14 +1920,11 @@ export class RuntimeLoop extends Loop {
     }
     if (command.payload.autoStart) {
       const system = this.renderResult.messages.find((item) => item.role === 'system')?.content ?? ''
-      const conversation = this.llmMessages.filter((item) => item.role !== 'system')
-      const conversationLimit = Math.max(this.maxMessages - 1, 0)
-      this.llmMessages = [
+      this.llmMessages = this.limitRuntimeMessages([
         { role: 'system', content: system },
-        ...(conversationLimit > 0
-          ? [...conversation, { role: 'user' as const, content: text }].slice(-conversationLimit)
-          : []),
-      ]
+        ...this.llmMessages.filter((item) => item.role !== 'system'),
+        { role: 'user', content: text },
+      ])
     }
     if (command.payload.autoStart) this.beginRun(command.id, requestId)
   }
@@ -2782,7 +2450,14 @@ export class RuntimeLoop extends Loop {
     correlationId: string,
     generation: number,
   ): Promise<void> {
+    const sanitizedMessages = discardOrphanToolMessages(this.llmMessages)
+    if (JSON.stringify(sanitizedMessages) !== JSON.stringify(this.llmMessages)) {
+      this.llmMessages = sanitizedMessages
+      this.syncSystemMessages(correlationId)
+    }
     this.refreshProjectLlm()
+    await this.compressRuntimeCacheBeforeModel(correlationId, generation)
+    if (this.generation !== generation) return
     const llm = this.llm
     this.ensureAssistantStarted(correlationId)
     const controller = new AbortController()
@@ -2790,15 +2465,17 @@ export class RuntimeLoop extends Loop {
     this.updateRuntimeStatus({ model: 'busy' }, correlationId)
     const request: LlmChatRequest = {
       messages: clone(this.llmMessages),
-      tools: [
-        ...this.internalResourceTools(),
-        ...this.tools.items.map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.inputSchema,
-        })),
-      ],
+      tools: this.modelToolDefinitions(),
       responseFormat: 'json',
+      ...(this.sessionId
+        ? {
+            clientMetadata: {
+              sessionId: this.sessionId,
+              threadId: this.sessionId,
+              ...(this.run.runId ? { turnId: this.run.runId } : {}),
+            },
+          }
+        : {}),
       signal: controller.signal,
     }
     Object.defineProperty(request, 'onRetry', {
@@ -2844,6 +2521,13 @@ export class RuntimeLoop extends Loop {
         utilization: Math.min(estimatedInputTokens / maxTokens, 1),
       },
     }, correlationId)
+    if (estimatedInputTokens > maxTokens) {
+      throw new RuntimeStageError(
+        'runtime',
+        'CONTEXT_WINDOW_EXCEEDED',
+        `model input requires ${estimatedInputTokens} tokens but the configured limit is ${maxTokens}; only builtin.cache is compressible`,
+      )
+    }
     const requestStarted = Date.now()
     let firstDeltaAt: number | undefined
     let streamChunks = 0
@@ -2926,7 +2610,7 @@ export class RuntimeLoop extends Loop {
       },
     }
     if (calls.length > 0) {
-      if (this.toolRound >= this.maxToolRounds) {
+      if (this.maxToolRounds !== -1 && this.toolRound >= this.maxToolRounds) {
         throw new RuntimeStageError(
           'model_protocol',
           'MODEL_TOOL_ROUND_LIMIT',
@@ -2961,9 +2645,10 @@ export class RuntimeLoop extends Loop {
       )
     }
     step.detail = { ...step.detail, loopStatus: output.status }
+    this.updateRuntimeStatus({ loopStatus: output.status }, correlationId)
     if (output.status === 'running') {
       if (nativeStream) outputStream.finish(output)
-      if (this.continuationRound >= this.maxToolRounds) {
+      if (this.maxToolRounds !== -1 && this.continuationRound >= this.maxToolRounds) {
         throw new RuntimeStageError(
           'model_protocol',
           'MODEL_CONTINUATION_LIMIT',
@@ -3453,11 +3138,15 @@ export class RuntimeLoop extends Loop {
   private modelInvocationError(error: unknown): RuntimeStageError {
     const message = error instanceof Error ? error.message : String(error)
     const protocolFailure = /invalid JSON|SSE events|tool messages require|stream.*event/i.test(message)
+    const diagnostics = error instanceof LlmRequestError
+      ? toJsonValue(error.diagnostics)
+      : undefined
     return new RuntimeStageError(
       protocolFailure ? 'model_protocol' : 'model_transport',
       protocolFailure ? 'MODEL_PROTOCOL_ERROR' : 'MODEL_TRANSPORT_ERROR',
       message,
       !protocolFailure,
+      diagnostics,
     )
   }
 
@@ -3506,6 +3195,7 @@ export class RuntimeLoop extends Loop {
         stepId: step.id,
         requestArtifactId: requestArtifactId ?? null,
         responseArtifactId: responseArtifactId ?? null,
+        ...(staged?.diagnostics === undefined ? {} : { diagnostics: staged.diagnostics }),
         timestamp,
       },
       correlationId,
@@ -3577,6 +3267,94 @@ export class RuntimeLoop extends Loop {
       artifact: artifact.meta,
       value: artifact.value,
     }), correlationId)
+  }
+
+  private publishArtifactPage(
+    artifactId: string,
+    page: number,
+    pageSize: number,
+    correlationId: string,
+  ): void {
+    const artifact = this.artifacts.get(artifactId)
+    if (!artifact) throw new CommandError('NOT_FOUND', 'runtime artifact was not found')
+    const artifactValue = artifact.value
+    const normalizedPage = Math.max(1, Math.trunc(page))
+    const normalizedPageSize = Math.max(1, Math.trunc(pageSize))
+    const arrayValue = Array.isArray(artifactValue) ? artifactValue : undefined
+    const isArray = arrayValue !== undefined
+    const serialized = isArray
+      ? undefined
+      : typeof artifactValue === 'string'
+        ? artifactValue
+        : JSON.stringify(artifactValue, null, 2)
+    const totalItems = isArray
+      ? arrayValue.length
+      : (serialized ?? '').length
+    const totalPages = Math.max(1, Math.ceil(totalItems / normalizedPageSize))
+    if (normalizedPage > totalPages) {
+      throw new CommandError('NOT_FOUND', `runtime artifact page ${normalizedPage} was not found`)
+    }
+    const start = (normalizedPage - 1) * normalizedPageSize
+    const value = isArray
+      ? arrayValue.slice(start, start + normalizedPageSize)
+      : (serialized ?? '').slice(start, start + normalizedPageSize)
+    this.emit('runtime.artifact.page', {
+      artifact: clone(artifact.meta),
+      page: normalizedPage,
+      pageSize: normalizedPageSize,
+      totalPages,
+      totalItems,
+      unit: isArray ? 'items' : 'characters',
+      value: clone(value),
+    }, correlationId)
+  }
+
+  private readVariablePath(pointer: string): JsonValue {
+    const tokens = decodePointer(pointer)
+    if (tokens.length === 0) return clone(this.variables.value) as unknown as JsonValue
+    let current: JsonValue = this.variables.value as unknown as JsonValue
+    for (const token of tokens) {
+      assertSafeToken(token)
+      if (Array.isArray(current)) {
+        const index = Number.parseInt(token, 10)
+        if (!Number.isInteger(index) || index < 0 || index >= current.length) {
+          throw new CommandError('NOT_FOUND', `variable path was not found: ${pointer}`)
+        }
+        current = current[index] as JsonValue
+      } else if (typeof current === 'object' && current !== null && token in current) {
+        current = current[token] as JsonValue
+      } else {
+        throw new CommandError('NOT_FOUND', `variable path was not found: ${pointer}`)
+      }
+    }
+    return clone(current)
+  }
+
+  private publishVariablePage(
+    pointer: string,
+    page: number,
+    pageSize: number,
+    correlationId: string,
+  ): void {
+    const value = this.readVariablePath(pointer)
+    const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+    const normalizedPage = Math.max(1, Math.trunc(page))
+    const normalizedPageSize = Math.max(1, Math.trunc(pageSize))
+    const totalCharacters = text.length
+    const totalPages = Math.max(1, Math.ceil(totalCharacters / normalizedPageSize))
+    if (normalizedPage > totalPages) {
+      throw new CommandError('NOT_FOUND', `variable page ${normalizedPage} was not found`)
+    }
+    const start = (normalizedPage - 1) * normalizedPageSize
+    this.emit('runtime.variable.page', {
+      path: pointer,
+      revision: this.variables.revision,
+      page: normalizedPage,
+      pageSize: normalizedPageSize,
+      totalPages,
+      totalCharacters,
+      value: text.slice(start, start + normalizedPageSize),
+    }, correlationId)
   }
 
   private upsertObservation(
@@ -3779,7 +3557,7 @@ export class RuntimeLoop extends Loop {
     }, correlationId)
   }
 
-  private checkpointMeta(checkpoint: Checkpoint): RuntimeCheckpointMeta {
+  private checkpointMeta(checkpoint: RuntimeCheckpoint): RuntimeCheckpointMeta {
     return {
       id: checkpoint.id,
       currentStep: checkpoint.currentStep,
@@ -3795,7 +3573,7 @@ export class RuntimeLoop extends Loop {
     currentStep: number,
     currentStepId?: string,
     id = `checkpoint-${this.checkpointRevision + 1}-${randomUUID()}`,
-  ): Checkpoint {
+  ): RuntimeCheckpoint {
     return {
       id,
       createdAt: now(),
@@ -3830,9 +3608,10 @@ export class RuntimeLoop extends Loop {
     currentStepId: string | undefined,
     correlationId: string,
     id?: string,
-  ): Checkpoint {
+  ): RuntimeCheckpoint {
     const checkpoint = this.createCheckpoint(currentStep, currentStepId, id)
     this.checkpoints.push(checkpoint)
+    this.checkpoints = retainRecentCheckpoints(this.checkpoints)
     this.checkpointRevision += 1
     this.snapshotRevision += 1
     this.emit('runtime.checkpoint.created', {
@@ -3882,7 +3661,7 @@ export class RuntimeLoop extends Loop {
       .filter((variable) => variable.scope === 'project')
       .map((variable) => variable.key))
     const sharedPatch = patch.filter((operation) => {
-      if (!operation.path.startsWith('/builtin/prompts/')) return false
+      if (!operation.path.startsWith('/builtin/prompts/') && !operation.path.startsWith('/builtin/variables/')) return false
       const tokens = decodePointer(operation.path)
       return tokens.length === 3 && projectKeys.has(tokens[2] ?? '')
     })
@@ -3931,14 +3710,14 @@ export class RuntimeLoop extends Loop {
 
   private sharedVariableUpdates(
     patch: readonly JsonPatchOperation[],
-  ): Array<{ key: string; value: string }> {
+  ): Array<{ key: string; value: SystemPromptVariableValue }> {
     return patch.map((operation) => {
-      if (operation.op === 'remove' || typeof operation.value !== 'string') {
-        throw new CommandError('INVALID_PAYLOAD', 'shared variables accept text add or replace operations only')
+      if (operation.op === 'remove' || operation.value === undefined || operation.value === null) {
+        throw new CommandError('INVALID_PAYLOAD', 'shared variables accept add or replace operations with a JSON value')
       }
       const tokens = decodePointer(operation.path)
-      if (tokens.length !== 3 || tokens[0] !== 'builtin' || tokens[1] !== 'prompts') {
-        throw new CommandError('INVALID_PAYLOAD', 'shared variables must target /builtin/prompts/<key>')
+      if (tokens.length !== 3 || tokens[0] !== 'builtin' || (tokens[1] !== 'prompts' && tokens[1] !== 'variables')) {
+        throw new CommandError('INVALID_PAYLOAD', 'shared variables must target /builtin/prompts/<key> or /builtin/variables/<key>')
       }
       const key = tokens[2]
       if (!key) throw new CommandError('INVALID_PAYLOAD', 'shared variable key is required')
@@ -3946,7 +3725,12 @@ export class RuntimeLoop extends Loop {
       if (!variable || variable.scope !== 'project') {
         throw new CommandError('INVALID_PAYLOAD', `variable is not project-scoped: ${key}`)
       }
-      return { key, value: operation.value }
+      try {
+        validateSystemPromptVariableValue(variable.type, operation.value, `shared variable ${key}`)
+      } catch (error) {
+        throw new CommandError('INVALID_PAYLOAD', error instanceof Error ? error.message : String(error))
+      }
+      return { key, value: operation.value as SystemPromptVariableValue }
     })
   }
 
@@ -3954,7 +3738,7 @@ export class RuntimeLoop extends Loop {
     patch: readonly JsonPatchOperation[],
     correlationId: string,
   ): void {
-    let updates: Array<{ key: string; value: string }>
+    let updates: Array<{ key: string; value: SystemPromptVariableValue }>
     try {
       updates = this.sharedVariableUpdates(patch)
     } catch (error) {
@@ -3978,7 +3762,7 @@ export class RuntimeLoop extends Loop {
   ): RenderResultState {
     const referencedVariables = new Set(
       [...templateVariablePaths(this.template.source)]
-        .filter((name) => name.startsWith('builtin.prompts.'))
+        .filter((name) => name.startsWith('builtin.prompts.') || name.startsWith('builtin.variables.'))
         .map((name) => name.split('.')[2])
         .filter((name): name is string => Boolean(name)),
     )
@@ -3993,12 +3777,12 @@ export class RuntimeLoop extends Loop {
     }
     const missingReferences = this.systemVariables.variables
       .filter((variable) => variable.required)
-      .map((variable) => `builtin.prompts.${variable.key}`)
-      .filter((name) => !referencedVariables.has(name.split('.')[2] ?? ''))
+      .map((variable) => `builtin.variables.${variable.key}`)
+      .filter((name) => !referencedVariables.has(name.split('.')[2] ?? '') && !referencedVariables.has(`builtin.prompts.${name.split('.')[2] ?? ''}`))
     const missingValues = [
       ...missingVariables,
       ...this.variables.value.builtin.missing_prompts.map(
-        (name) => `builtin.prompts.${name}`,
+        (name) => `builtin.variables.${name}`,
       ),
     ]
     return {
@@ -4010,7 +3794,7 @@ export class RuntimeLoop extends Loop {
       diagnostics: [
         ...[...new Set(missingValues)].map((name) => ({
           severity: 'warning' as const,
-          code: name.startsWith('builtin.prompts.')
+          code: name.startsWith('builtin.prompts.') || name.startsWith('builtin.variables.')
             ? 'MISSING_SYSTEM_VARIABLE'
             : 'MISSING_VARIABLE',
           message: `Variable "${name}" is not set`,
@@ -4029,6 +3813,7 @@ export class RuntimeLoop extends Loop {
     this.systemPromptDependencies = resolved.dependencies
     return {
       prompts: resolved.prompts,
+      variables: resolved.values,
       shared_prompts: resource.variables
         .filter((variable) => variable.key !== 'sys_message' && variable.scope === 'project')
         .map((variable) => variable.key),
@@ -4046,6 +3831,69 @@ export class RuntimeLoop extends Loop {
     return this.llmMessages.map((message) => toJsonValue(message))
   }
 
+  private runtimeCacheValue(): RuntimeCache {
+    const current = this.variables.value.builtin.cache ?? emptyRuntimeCache()
+    const summaryMessage = this.llmMessages.find((message) => (
+      message.role === 'assistant' && message.name === CACHE_SUMMARY_MESSAGE_NAME
+    ))
+    const summary = current.summary || (
+      summaryMessage?.content.startsWith(CACHE_SUMMARY_PREFIX)
+        ? summaryMessage.content.slice(CACHE_SUMMARY_PREFIX.length)
+        : summaryMessage?.content ?? ''
+    )
+    return {
+      version: 1,
+      summary,
+      messages: this.llmMessages
+        .filter((message) => (
+          message.role !== 'system' && message.name !== CACHE_SUMMARY_MESSAGE_NAME
+        ))
+        .map((message) => toJsonValue(message)),
+      loop: {
+        run_id: this.run.runId ?? '',
+        iteration: this.loopIteration,
+        tool_round: this.toolRound,
+        continuation_round: this.continuationRound,
+      },
+      compression_count: current.compression_count,
+      compressed_at: current.compressed_at,
+    }
+  }
+
+  private limitRuntimeMessages(messages: readonly LlmMessage[]): LlmMessage[] {
+    const system = messages.find((message) => message.role === 'system')
+    const summary = messages.find((message) => (
+      message.role === 'assistant' && message.name === CACHE_SUMMARY_MESSAGE_NAME
+    ))
+    const conversation = messages.filter((message) => (
+      message.role !== 'system' && message.name !== CACHE_SUMMARY_MESSAGE_NAME
+    ))
+    const conversationLimit = Math.max(
+      this.maxMessages - (system ? 1 : 0),
+      0,
+    )
+    return discardOrphanToolMessages([
+      ...(system ? [system] : []),
+      ...(summary ? [summary] : []),
+      ...(conversationLimit > 0 ? conversation.slice(-conversationLimit) : []),
+    ])
+  }
+
+  private applyRuntimeCache(cache: RuntimeCache): void {
+    assertRuntimeCache(cache)
+    const system = this.llmMessages.find((message) => message.role === 'system')
+      ?? this.renderResult.messages.find((message) => message.role === 'system')
+    this.llmMessages = discardOrphanToolMessages([
+      ...(system ? [{ role: 'system' as const, content: system.content }] : []),
+      ...(cache.summary ? [{
+        role: 'assistant' as const,
+        name: CACHE_SUMMARY_MESSAGE_NAME,
+        content: `${CACHE_SUMMARY_PREFIX}${cache.summary}`,
+      }] : []),
+      ...runtimeCacheMessages(cache.messages),
+    ])
+  }
+
   private statusVariableTokens(): RuntimeStatusState['variableTokens'] {
     return this.systemVariables.variables
       .filter((variable) => variable.show_in_status)
@@ -4055,7 +3903,9 @@ export class RuntimeLoop extends Loop {
         tokens: estimateTokens(
           variable.key === 'sys_message'
             ? this.llmMessages
-            : this.variables.value.builtin.prompts[variable.key] ?? variable.value,
+            : variable.key === 'cache'
+              ? this.runtimeCacheValue()
+              : this.variables.value.builtin.prompts[variable.key] ?? variable.value,
         ),
       }))
   }
@@ -4067,8 +3917,22 @@ export class RuntimeLoop extends Loop {
     }
   }
 
+  private runtimeStatusContext(
+    context: RuntimeStatusState['context'],
+  ): RuntimeStatusState['context'] {
+    const cacheTokens = estimateTokens(this.runtimeCacheValue())
+    const contextWindowTokens = this.contextWindowTokens
+    return {
+      ...context,
+      cacheTokens,
+      contextWindowTokens,
+      cacheUtilization: contextWindowTokens > 0 ? cacheTokens / contextWindowTokens : 0,
+    }
+  }
+
   private hookStatus(outcome: 'completed' | 'failed' | 'cancelled'): HookStatusSnapshot {
     const metrics = this.runtimeStatusMetrics()
+    const researchEvents = readResearchLedgerEvents(this.projectDir)
     return {
       run: {
         status: outcome,
@@ -4078,9 +3942,22 @@ export class RuntimeLoop extends Loop {
       queueDepth: this.runtimeStatus.queueDepth,
       messageCount: metrics.messageCount,
       variableTokens: Object.fromEntries(metrics.variableTokens.map((variable) => [
-        variable.key === 'sys_message' ? 'builtin.sys_message' : `builtin.prompts.${variable.key}`,
+        variable.key === 'sys_message'
+          ? 'builtin.sys_message'
+          : variable.key === 'cache' ? 'builtin.cache' : `builtin.prompts.${variable.key}`,
         variable.tokens,
       ])),
+      research: {
+        ledgerHead: researchEvents.at(-1)?.event_hash ?? '0'.repeat(64),
+        totalEvents: researchEvents.length,
+        events: researchEvents.map((event) => ({
+          event_id: event.event_id,
+          event_type: event.event_type,
+          event_hash: event.event_hash,
+          payload: clone(event.payload),
+          source: { hook_id: event.source.hook_id },
+        })),
+      },
     }
   }
 
@@ -4094,6 +3971,15 @@ export class RuntimeLoop extends Loop {
     if (!runId) return
     this.loopIteration += 1
     this.syncSystemMessages(correlationId)
+    const usedTokensBeforeHooks = this.estimatedModelInputTokens()
+    const maxTokensBeforeHooks = this.runtimeStatus.context.maxTokens
+    this.updateRuntimeStatus({
+      context: {
+        usedTokens: usedTokensBeforeHooks,
+        maxTokens: maxTokensBeforeHooks,
+        utilization: Math.min(usedTokensBeforeHooks / maxTokensBeforeHooks, 1),
+      },
+    }, correlationId)
     const changedVariables = [...changedVariablePaths(
       this.loopVariableBaseline,
       this.variables.value,
@@ -4165,7 +4051,7 @@ export class RuntimeLoop extends Loop {
     } finally {
       if (this.activeAbortController === controller) this.activeAbortController = undefined
     }
-    const usedTokens = estimateTokens(this.llmMessages)
+    const usedTokens = this.estimatedModelInputTokens()
     const maxTokens = this.runtimeStatus.context.maxTokens
     this.updateRuntimeStatus({
       context: {
@@ -4175,6 +4061,100 @@ export class RuntimeLoop extends Loop {
       },
     }, correlationId)
     this.loopVariableBaseline = clone(this.variables.value)
+  }
+
+  private async compressRuntimeCacheBeforeModel(
+    correlationId: string,
+    generation: number,
+  ): Promise<void> {
+    const maxTokens = this.runtimeStatus.context.maxTokens
+    const usedTokens = this.estimatedModelInputTokens()
+    this.updateRuntimeStatus({
+      context: {
+        usedTokens,
+        maxTokens,
+        utilization: Math.min(usedTokens / maxTokens, 1),
+      },
+    }, correlationId)
+    if (usedTokens <= maxTokens) return
+
+    this.syncSystemMessages(correlationId)
+    const tools = this.modelToolDefinitions()
+    const fixedTokens = this.estimatedModelInputTokens(
+      this.llmMessages.filter((message) => message.role === 'system'),
+      tools,
+    )
+    if (fixedTokens > maxTokens) return
+
+    const hook = this.hookRegistry.list().find((candidate) => (
+      candidate.ownerKind === 'system'
+      && candidate.id === SYSTEM_CONTEXT_COMPRESSION_HOOK_ID
+      && candidate.loadable
+      && candidate.enabled
+      && candidate.checkpoint === 'after_loop'
+    ))
+    if (!hook) return
+
+    const changedVariables = ['builtin.cache']
+    const fixture: HookFixture = {
+      checkpoint: 'after_loop',
+      runId: this.run.runId ?? '',
+      loopIteration: this.loopIteration,
+      loopTerminal: false,
+      status: this.hookStatus('completed'),
+      changedVariables,
+      variables: clone(this.variables.value),
+      messages: clone(this.llmMessages),
+    }
+    const controller = new AbortController()
+    this.activeAbortController = controller
+    try {
+      const execution = await new HookRunner(this.llm).run(hook, fixture, controller.signal)
+      this.addUsage(execution.usage)
+      if (execution.matched && execution.result) {
+        await this.applyHookResult(hook, execution.result, new Set<string>(), correlationId)
+      }
+      this.createArtifact(
+        'hook-result',
+        `Hook ${execution.matched ? 'result' : 'check'} · ${hook.name}`,
+        {
+          hookId: hook.id,
+          hookRevision: hook.revision,
+          checkpoint: 'before_model_overflow',
+          loopIteration: this.loopIteration,
+          changedVariables,
+          matched: execution.matched,
+          attempts: execution.attempts,
+          durationMs: execution.durationMs,
+          usage: toJsonValue(execution.usage),
+          result: toJsonValue(execution.result ?? {}),
+        },
+        correlationId,
+      )
+    } catch (error) {
+      this.createArtifact(
+        'runtime-error',
+        `Hook failed · ${hook.name}`,
+        {
+          hookId: hook.id,
+          hookRevision: hook.revision,
+          checkpoint: 'before_model_overflow',
+          message: error instanceof Error ? error.message : String(error),
+        },
+        correlationId,
+      )
+    } finally {
+      if (this.activeAbortController === controller) this.activeAbortController = undefined
+    }
+
+    const compressedTokens = this.estimatedModelInputTokens()
+    this.updateRuntimeStatus({
+      context: {
+        usedTokens: compressedTokens,
+        maxTokens,
+        utilization: Math.min(compressedTokens / maxTokens, 1),
+      },
+    }, correlationId)
   }
 
   private isLoopStep(step: TimelineStep): boolean {
@@ -4234,6 +4214,17 @@ export class RuntimeLoop extends Loop {
       }
     }
 
+    const systemCacheCompression = hook.ownerKind === 'system'
+      && hook.id === SYSTEM_CONTEXT_COMPRESSION_HOOK_ID
+    if (systemCacheCompression && result.messages !== undefined) {
+      throw new Error('System context compression may only modify builtin.cache')
+    }
+    if (systemCacheCompression && result.patches?.some((operation) => (
+      operation.path !== '/builtin/cache' && !operation.path.startsWith('/builtin/cache/')
+    ))) {
+      throw new Error('System context compression may only patch builtin.cache')
+    }
+
     if (result.messages !== undefined) {
       if (hook.permissions.messages !== 'replace') {
         throw new Error(`Hook ${hook.id} returned messages without messages:replace permission`)
@@ -4246,20 +4237,71 @@ export class RuntimeLoop extends Loop {
           throw new Error(`Hook ${hook.id} returned an invalid message at index ${index}`)
         }
       }
-      this.llmMessages = clone(result.messages)
+      this.llmMessages = discardOrphanToolMessages(clone(result.messages))
     }
 
-    if (result.patches !== undefined) {
-      if (hook.permissions.variables !== 'patch') {
-        throw new Error(`Hook ${hook.id} returned patches without variables:patch permission`)
+    let hookPatches = result.patches === undefined ? undefined : [...result.patches]
+    if (result.researchEvents !== undefined) {
+      if (hook.permissions.research !== 'append') {
+        throw new Error(`Hook ${hook.id} returned researchEvents without research:append permission`)
       }
-      if (!Array.isArray(result.patches)) throw new Error(`Hook ${hook.id} patches must be an array`)
-      const conflict = result.patches.find((operation) => claimedPaths.has(operation.path))
+      if (result.patches !== undefined) {
+        if (hook.permissions.variables !== 'patch') {
+          throw new Error(`Hook ${hook.id} returned patches without variables:patch permission`)
+        }
+        if (!Array.isArray(result.patches)) throw new Error(`Hook ${hook.id} patches must be an array`)
+        this.assertRuntimeVariables(applyPatch(this.variables.value, result.patches))
+      }
+      const ledger = await appendResearchEvents(this.projectDir, result.researchEvents, {
+        hookId: hook.id,
+        runId: this.run.runId ?? '',
+        loopIteration: this.loopIteration,
+      })
+      const patchedVariables = applyPatch(this.variables.value, hookPatches ?? [])
+      const cursor = patchedVariables.builtin.variables?.research_cursor
+      if (isObject(cursor) && typeof cursor.ledger_head === 'string') {
+        const cursorPath = '/builtin/variables/research_cursor'
+        hookPatches = [
+          ...(hookPatches ?? []).filter((operation) => operation.path !== cursorPath),
+          { op: 'replace', path: cursorPath, value: { ...cursor, ledger_head: ledger.head } },
+        ]
+      }
+      this.createArtifact(
+        'hook-result',
+        'Research ledger append',
+        {
+          hookId: hook.id,
+          path: ledger.path,
+          head: ledger.head,
+          appendedEventIds: ledger.appended.map((event) => event.event_id),
+          duplicateEventIds: ledger.duplicates.map((event) => event.event_id),
+          totalEvents: ledger.totalEvents,
+        },
+        correlationId,
+      )
+    }
+
+    if (hookPatches !== undefined) {
+      if (hook.permissions.variables !== 'patch') {
+        const onlyLedgerHead = result.patches === undefined
+          && hookPatches.length === 1
+          && hookPatches[0]?.path === '/builtin/variables/research_cursor'
+        if (!onlyLedgerHead) throw new Error(`Hook ${hook.id} returned patches without variables:patch permission`)
+      }
+      if (!Array.isArray(hookPatches)) throw new Error(`Hook ${hook.id} patches must be an array`)
+      const conflict = hookPatches.find((operation) => claimedPaths.has(operation.path))
       if (conflict) throw new Error(`Hook patch conflict at ${conflict.path}`)
-      const candidate = applyPatch(this.variables.value, result.patches)
+      const candidate = applyPatch(this.variables.value, hookPatches)
       this.assertRuntimeVariables(candidate)
-      result.patches.forEach((operation) => claimedPaths.add(operation.path))
-      this.updateVariables(result.patches, 'hook', correlationId)
+      const cacheChanged = hookPatches.some((operation) => (
+        operation.path === '/builtin/cache' || operation.path.startsWith('/builtin/cache/')
+      ))
+      if (cacheChanged && result.messages !== undefined) {
+        throw new Error(`Hook ${hook.id} cannot replace messages and builtin.cache together`)
+      }
+      if (cacheChanged) this.applyRuntimeCache(candidate.builtin.cache)
+      hookPatches.forEach((operation) => claimedPaths.add(operation.path))
+      this.updateVariables(hookPatches, 'hook', correlationId)
     } else if (result.messages !== undefined) {
       this.publishRenderedMessages(correlationId)
     }
@@ -4280,7 +4322,15 @@ export class RuntimeLoop extends Loop {
 
   private syncSystemMessages(correlationId?: string): void {
     const sysMessage = this.systemMessageValue()
-    if (JSON.stringify(sysMessage) === JSON.stringify(this.variables.value.builtin.sys_message)) return
+    const cache = this.runtimeCacheValue()
+    const patch: JsonPatchOperation[] = []
+    if (JSON.stringify(sysMessage) !== JSON.stringify(this.variables.value.builtin.sys_message)) {
+      patch.push({ op: 'add', path: '/builtin/sys_message', value: sysMessage })
+    }
+    if (JSON.stringify(cache) !== JSON.stringify(this.variables.value.builtin.cache)) {
+      patch.push({ op: 'add', path: '/builtin/cache', value: cache })
+    }
+    if (patch.length === 0) return
     const baseRevision = this.variables.revision
     this.variables = {
       revision: baseRevision + 1,
@@ -4289,6 +4339,7 @@ export class RuntimeLoop extends Loop {
         builtin: {
           ...this.variables.value.builtin,
           sys_message: sysMessage,
+          cache,
         },
       },
     }
@@ -4296,7 +4347,7 @@ export class RuntimeLoop extends Loop {
     this.emit('variables.updated', {
       baseRevision,
       revision: this.variables.revision,
-      patch: [{ op: 'add', path: '/builtin/sys_message', value: sysMessage }],
+      patch,
       source: 'runtime',
     }, correlationId)
   }
@@ -4318,13 +4369,14 @@ export class RuntimeLoop extends Loop {
   private refreshSystemVariablesResource(
     resource: SystemVariablesResource,
     correlationId: string,
-    revision = this.projectResources.readSystemVariablesState().revision,
+    revision = new PluginRegistry(this.projectDir).effectiveSystemVariablesState().revision,
   ): void {
     this.systemVariables = resource
     const state = this.systemPromptState(resource)
     const candidates: JsonPatchOperation[] = [
       { op: 'replace', path: '/builtin/system_variables_revision', value: revision },
       { op: 'replace', path: '/builtin/prompts', value: state.prompts },
+      { op: 'replace', path: '/builtin/variables', value: state.variables },
       { op: 'replace', path: '/builtin/shared_prompts', value: state.shared_prompts },
       { op: 'replace', path: '/builtin/missing_prompts', value: state.missing_prompts },
     ]
@@ -4344,10 +4396,11 @@ export class RuntimeLoop extends Loop {
         this.maxMessages = settings.max_messages
         this.maxToolRounds = settings.max_tool_rounds
         if (change === 'settings') {
+          this.contextWindowTokens = settings.context.context_window_tokens
           this.maxInputTokens = settings.context.max_input_tokens
           this.reservedOutputTokens = settings.context.reserved_output_tokens
-          const availableTokens = this.maxInputTokens - this.reservedOutputTokens
-          const usedTokens = estimateTokens(this.llmMessages)
+          const availableTokens = this.availableInputTokens()
+          const usedTokens = this.estimatedModelInputTokens()
           this.updateRuntimeStatus({
             context: {
               usedTokens,
@@ -4367,18 +4420,24 @@ export class RuntimeLoop extends Loop {
         if (change === 'settings' || change === 'skills') {
           this.reloadProjectSkills(settings, `resource:${change}`)
         }
-        if (change === 'settings' || change === 'harnesses') {
+        if (change === 'settings' || change === 'harnesses' || change === 'plugins') {
           this.reloadProjectHarnesses(settings, `resource:${change}`)
         }
-        if (change === 'hooks') {
+        if (change === 'settings' || change === 'hooks' || change === 'plugins') {
           this.hookRegistry.reload()
           this.updateRuntimeStatus({}, `resource:${change}`)
         }
+        if (change === 'settings' || change === 'plugins') {
+          const state = new PluginRegistry(this.projectDir).effectiveSystemVariablesState()
+          this.refreshSystemVariablesResource(state.resource, `resource:${change}`, state.revision)
+        }
+        if (change !== 'skills') this.refreshRuntimePlugins(`resource:${change}`)
         if (change === 'settings') this.renderAndPublish(`resource:${change}`)
         return
       }
-      const state = this.projectResources.readSystemVariablesState()
+      const state = new PluginRegistry(this.projectDir).effectiveSystemVariablesState()
       this.refreshSystemVariablesResource(state.resource, 'resource:system-variables', state.revision)
+      this.refreshRuntimePlugins('resource:system-variables')
     } catch (error) {
       this.emit('render.result.failed', {
         templateRevision: this.template.revision,
@@ -4392,6 +4451,31 @@ export class RuntimeLoop extends Loop {
     }
   }
 
+  private availableInputTokens(): number {
+    return Math.min(
+      this.maxInputTokens,
+      this.contextWindowTokens - this.reservedOutputTokens,
+    )
+  }
+
+  private modelToolDefinitions(): LlmToolDefinition[] {
+    return [
+      ...this.internalResourceTools(),
+      ...this.tools.items.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+      })),
+    ]
+  }
+
+  private estimatedModelInputTokens(
+    messages: readonly LlmMessage[] = this.llmMessages,
+    tools: readonly LlmToolDefinition[] = this.modelToolDefinitions(),
+  ): number {
+    return Math.ceil(JSON.stringify({ messages, tools }).length / 4)
+  }
+
   private llmConfigFingerprint(
     settings: ReturnType<ProjectResources['readSettings']>,
   ): string {
@@ -4399,6 +4483,7 @@ export class RuntimeLoop extends Loop {
       settings.llm.model,
       settings.llm.base_url,
       settings.llm.protocol,
+      settings.llm.max_retries,
       settings.llm.api_key ?? '',
     ])
   }
@@ -4414,6 +4499,7 @@ export class RuntimeLoop extends Loop {
       baseUrl: settings.llm.base_url,
       protocol: settings.llm.protocol,
       apiKey: settings.llm.api_key,
+      maxRetries: settings.llm.max_retries,
     })
     this.projectLlmConfigFingerprint = fingerprint
   }
@@ -4656,7 +4742,7 @@ export class RuntimeLoop extends Loop {
     this.harnessPolicy = clone(settings.harness_policy)
     this.harnessCatalog = loadRuntimeHarnessCatalog(
       this.projectDir,
-      settings.harnesses,
+      new PluginRegistry(this.projectDir).effectiveHarnesses(settings),
     )
     this.reconcileHarnessBindings(correlationId)
   }
@@ -4825,6 +4911,14 @@ export class RuntimeLoop extends Loop {
     const llm = this.llm.getConfig()
     const activeToolNames = new Set(this.tools.items.map((tool) => tool.name))
     for (const entry of this.harnessCatalog) {
+      if (entry.type === 'persistent') {
+        add(entry.id, {
+          id: `persistent:${entry.id}`,
+          source: 'persistent',
+          sourceId: entry.id,
+          reason: 'Persistent harness from enabled plugin',
+        })
+      }
       if (entry.type === 'model') {
         const activation = entry.activation as {
           providers?: string[]
@@ -4877,7 +4971,7 @@ export class RuntimeLoop extends Loop {
       })
     }
 
-    const typeOrder = { model: 0, tool: 1, experience: 2 }
+    const typeOrder = { persistent: 0, model: 1, tool: 2, experience: 3 }
     const nextItems = this.harnessCatalog
       .filter((entry) => (byHarness.get(entry.id)?.length ?? 0) > 0)
       .sort((left, right) => typeOrder[left.type] - typeOrder[right.type]
@@ -5534,7 +5628,11 @@ export class RuntimeLoop extends Loop {
     ) {
       throw new Error('read_system_variables keys must contain 1-50 unique lowercase snake_case names')
     }
-    const state = this.projectResources.readSystemVariablesState()
+    // The runtime prompt includes enabled plugin variables as well as the
+    // project file, so the authoring tool must inspect the same effective
+    // registry rather than silently hiding plugin-owned values.
+    const state = new PluginRegistry(this.projectDir).effectiveSystemVariablesState()
+    const editableRevision = this.projectResources.readSystemVariablesState().revision
     const allVariables = state.resource.variables.filter((variable) => variable.key !== 'sys_message')
     const resolved = resolveSystemPromptVariables(allVariables)
     const selectedKeys = requestedKeys as string[] | undefined
@@ -5549,7 +5647,7 @@ export class RuntimeLoop extends Loop {
       variables.map((variable) => [variable.key, resolved.dependencies[variable.key] ?? []]),
     )
     return toJsonValue({
-      revision: state.revision,
+      revision: editableRevision,
       variables,
       dependencies,
       ...(selectedKeys
@@ -5581,7 +5679,7 @@ export class RuntimeLoop extends Loop {
     const changes = argumentsValue.changes.map((value, index): SystemVariableChange => {
       if (
         !isObject(value)
-        || (value.op !== 'upsert' && value.op !== 'patch' && value.op !== 'remove')
+        || (value.op !== 'upsert' && value.op !== 'patch' && value.op !== 'json_patch' && value.op !== 'remove')
       ) {
         throw new Error(`changes[${index}] requires op upsert, patch, or remove`)
       }
@@ -5634,14 +5732,45 @@ export class RuntimeLoop extends Loop {
           edits,
         }
       }
+      if (value.op === 'json_patch') {
+        const unknown = Object.keys(value).find((key) => (
+          key !== 'op' && key !== 'key' && key !== 'expected_value_sha256' && key !== 'patch'
+        ))
+        if (unknown) throw new Error(`changes[${index}] json_patch does not accept ${unknown}`)
+        if (typeof value.expected_value_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.expected_value_sha256)) {
+          throw new Error(`changes[${index}].expected_value_sha256 must be the hash returned by read_system_variables`)
+        }
+        if (!Array.isArray(value.patch) || value.patch.length === 0 || value.patch.length > 100) {
+          throw new Error(`changes[${index}].patch must contain 1-100 JSON Patch operations`)
+        }
+        const patch = value.patch.map((operation, operationIndex) => {
+          if (!isObject(operation) || (operation.op !== 'add' && operation.op !== 'remove' && operation.op !== 'replace') || typeof operation.path !== 'string' || (operation.path !== '' && !operation.path.startsWith('/'))) {
+            throw new Error(`changes[${index}].patch[${operationIndex}] requires op, path, and optional JSON value`)
+          }
+          if ((operation.op === 'add' || operation.op === 'replace') && operation.value === undefined) {
+            throw new Error(`changes[${index}].patch[${operationIndex}] requires value for ${operation.op}`)
+          }
+          return {
+            op: operation.op as 'add' | 'remove' | 'replace',
+            path: operation.path,
+            ...(operation.value === undefined ? {} : { value: operation.value as SystemPromptVariableValue }),
+          }
+        })
+        return {
+          op: 'json_patch',
+          key: value.key,
+          expected_value_sha256: value.expected_value_sha256,
+          patch,
+        }
+      }
       const allowed = new Set([
         'op', 'key', 'type', 'label', 'description', 'value',
         'expected_value_sha256', 'required', 'show_in_status', 'scope',
       ])
       const unknown = Object.keys(value).find((key) => !allowed.has(key))
       if (unknown) throw new Error(`changes[${index}] does not accept ${unknown}`)
-      if (typeof value.value !== 'string') {
-        throw new Error(`changes[${index}].value must be a string for upsert`)
+      if (value.value === undefined) {
+        throw new Error(`changes[${index}].value is required for upsert`)
       }
       if (
         value.expected_value_sha256 !== null
@@ -5650,8 +5779,8 @@ export class RuntimeLoop extends Loop {
       ) {
         throw new Error(`changes[${index}].expected_value_sha256 must be null or the hash returned by read_system_variables`)
       }
-      if (value.type !== undefined && value.type !== 'text' && value.type !== 'prompt_template') {
-        throw new Error(`changes[${index}].type must be text or prompt_template`)
+      if (value.type !== undefined && !SYSTEM_PROMPT_VARIABLE_TYPES.includes(value.type as (typeof SYSTEM_PROMPT_VARIABLE_TYPES)[number])) {
+        throw new Error(`changes[${index}].type is unsupported`)
       }
       for (const key of ['label', 'description'] as const) {
         if (value[key] !== undefined && typeof value[key] !== 'string') {
@@ -5669,9 +5798,9 @@ export class RuntimeLoop extends Loop {
       return {
         op: 'upsert',
         key: value.key,
-        value: value.value,
+        value: value.value as SystemPromptVariableValue,
         expected_value_sha256: value.expected_value_sha256,
-        ...(value.type ? { type: value.type } : {}),
+        ...(value.type ? { type: value.type as SystemPromptVariableType } : {}),
         ...(typeof value.label === 'string' ? { label: value.label } : {}),
         ...(typeof value.description === 'string' ? { description: value.description } : {}),
         ...(typeof value.required === 'boolean' ? { required: value.required } : {}),
@@ -5702,8 +5831,8 @@ export class RuntimeLoop extends Loop {
       scope: variable.scope ?? 'session',
       required: variable.required,
       show_in_status: variable.show_in_status,
-      value_length: variable.value.length,
-      value_sha256: createHash('sha256').update(variable.value).digest('hex'),
+          value_length: canonicalSystemPromptVariableValue(variable.value).length,
+          value_sha256: systemVariableValueHash(variable.value),
     })
     const diff = result.diff.map((item) => ({
       op: item.op,
@@ -5896,12 +6025,14 @@ export class RuntimeLoop extends Loop {
   }
 
   private updateRuntimeStatus(
-    changes: Partial<Pick<RuntimeStatusState, 'model' | 'queueDepth' | 'context'>>,
+    changes: Partial<Pick<RuntimeStatusState, 'model' | 'loopStatus' | 'queueDepth' | 'context'>>,
     correlationId: string,
   ): void {
+    const context = this.runtimeStatusContext(changes.context ?? this.runtimeStatus.context)
     this.runtimeStatus = {
       ...this.runtimeStatus,
       ...changes,
+      context,
       ...this.runtimeStatusMetrics(),
       revision: this.runtimeStatus.revision + 1,
       updatedAt: now(),
@@ -5975,6 +6106,11 @@ export class RuntimeLoop extends Loop {
   }
 
   private assertRuntimeVariables(value: RuntimeVariables): void {
+    try {
+      assertRuntimeCache(value.builtin?.cache)
+    } catch {
+      throw new CommandError('INVALID_PAYLOAD', 'patch would violate the runtime cache schema')
+    }
     if (
       typeof value.task?.title !== 'string' ||
       typeof value.builtin?.project_path !== 'string' ||

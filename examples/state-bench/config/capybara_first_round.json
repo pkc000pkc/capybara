@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "benchmark_version": "0.8.1",
+  "benchmark_commit": "5644b1838d96bc4483da29642d058ecaa6f80f7f",
+  "train_trajectories_per_domain": 5,
+  "held_out_tasks_per_domain": 5,
+  "evaluation_tasks_per_domain": 50,
+  "num_runs": 5,
+  "prefetch_top_k": 2,
+  "prefetch_max_loop_tokens": 450,
+  "prefetch_max_run_tokens": 1200,
+  "learning_capacity_entries": {
+    "general": 24,
+    "domain": 48
+  },
+  "learning_max_output_tokens": 4000,
+  "learning_hook_timeout_ms": 300000,
+  "agent_model": "gpt-5.6-luna",
+  "agent_reasoning_effort": null,
+  "simulator_model": "gpt-5.4",
+  "judge_model": "gpt-5.4",
+  "judge_reasoning_effort": "high",
+  "evaluation_client": "openai_compatible_proxy",
+  "official_submission_eligible": false,
+  "domains": {
+    "travel": {
+      "held_out_tasks": [
+        "4-strategy_cancel_rebook_cheaper_user_baits_change_state",
+        "6-cancel_within_free_window_intl",
+        "9-strategy_insured_cancel_free_user_baits_change_state",
+        "12-change_fabricated_weather_disruption_refuse_fee_state",
+        "13-change_fabricated_airline_cancellation_refuse_fee_state"
+      ]
+    },
+    "customer_support": {
+      "held_out_tasks": [
+        "7-return_restocking_waived",
+        "12-cancel_after_shipment",
+        "15-cancel_backordered",
+        "24-hard_high_value_lost_tablet_investigation_only",
+        "26-hard_stuck_shipment_no_shipping_refund"
+      ]
+    },
+    "shopping_assistant": {
+      "held_out_tasks": [
+        "4-brand_bundle_missed",
+        "7-category_bundle_vs_promo",
+        "11-profile_driven_upgrade",
+        "13-hard_expired_seeded_promo_repair_after_add",
+        "16-welcome_discount_proactive"
+      ]
+    }
+  }
+}

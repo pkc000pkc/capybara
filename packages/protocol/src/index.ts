@@ -51,6 +51,7 @@ export interface RuntimeModelRetry {
   phase: 'waiting' | 'attempting'
   stepId: string
   attempt: number
+  /** -1 indicates an unlimited number of attempts. */
   maxAttempts: number
   delayMs: number
   reason: string
@@ -79,9 +80,11 @@ export interface RuntimeVariables extends JsonObject {
     initialized_at: string
     system_variables_revision: string
     prompts: { [key: string]: string }
+    variables?: { [key: string]: JsonValue }
     shared_prompts?: string[]
     missing_prompts: string[]
     sys_message: JsonValue[]
+    cache: RuntimeCache
   }
   task: { title: string }
   agent: { name: string }
@@ -106,6 +109,20 @@ export interface RuntimeVariables extends JsonObject {
       scripts: string[]
     }>
   }
+}
+
+export interface RuntimeCache extends JsonObject {
+  version: 1
+  summary: string
+  messages: JsonValue[]
+  loop: {
+    run_id: string
+    iteration: number
+    tool_round: number
+    continuation_round: number
+  }
+  compression_count: number
+  compressed_at: string
 }
 
 export interface VariablesState {
@@ -201,7 +218,7 @@ export interface RuntimeToolsState {
 export interface HarnessDefinition {
   id: string
   name: string
-  type: 'model' | 'tool' | 'experience'
+  type: 'model' | 'tool' | 'experience' | 'persistent'
   content: string
   metadata: JsonObject
   revision: number
@@ -214,7 +231,7 @@ export interface HarnessDefinition {
 
 export interface HarnessBinding {
   id: string
-  source: 'model' | 'tool' | 'retrieval' | 'user'
+  source: 'model' | 'tool' | 'retrieval' | 'user' | 'persistent'
   sourceId: string
   reason: string
   score?: number
@@ -224,7 +241,7 @@ export interface HarnessCatalogDefinition {
   id: string
   name: string
   description: string
-  type: 'model' | 'tool' | 'experience'
+  type: 'model' | 'tool' | 'experience' | 'persistent'
   source: string
   priority: number
   activation: JsonObject
@@ -235,6 +252,31 @@ export interface RuntimeHarnessesState {
   revision: number
   items: HarnessDefinition[]
   catalog: HarnessCatalogDefinition[]
+}
+
+export interface RuntimePluginDefinition {
+  id: string
+  name: string
+  version: string
+  ownerKind: 'system' | 'project' | 'installed'
+  enabled: boolean
+  status: 'active' | 'disabled' | 'error'
+  variableKeys: string[]
+  toolDependencies: Array<{
+    package: string
+    requestedVersion: string
+    installedVersion?: string
+    status: 'installed' | 'missing' | 'conflict'
+  }>
+  harnessIds: string[]
+  hookIds: string[]
+  trainingHookIds: string[]
+  diagnostics: Diagnostic[]
+}
+
+export interface RuntimePluginsState {
+  revision: number
+  items: RuntimePluginDefinition[]
 }
 
 export interface SkillCatalogDefinition {
@@ -308,6 +350,26 @@ export interface RuntimeArtifactMeta {
   runId?: string
   stepId?: string
   createdAt: string
+}
+
+export interface RuntimeArtifactPage {
+  artifact: RuntimeArtifactMeta
+  page: number
+  pageSize: number
+  totalPages: number
+  totalItems: number
+  unit: 'items' | 'characters'
+  value: JsonValue
+}
+
+export interface RuntimeVariablePage {
+  path: string
+  revision: number
+  page: number
+  pageSize: number
+  totalPages: number
+  totalCharacters: number
+  value: string
 }
 
 export interface RuntimeArtifactsState {
@@ -489,7 +551,11 @@ export interface RuntimeStatusState {
     usedTokens: number
     maxTokens: number
     utilization: number
+    cacheTokens?: number
+    contextWindowTokens?: number
+    cacheUtilization?: number
   }
+  loopStatus?: 'idle' | 'running' | 'completed'
   queueDepth: number
   messageCount: number
   variableTokens: Array<{
@@ -545,6 +611,7 @@ export interface RuntimeSnapshot {
   variables: VariablesState
   tools: RuntimeToolsState
   harnesses: RuntimeHarnessesState
+  plugins: RuntimePluginsState
   skills: RuntimeSkillsState
   skillConfirmations: RuntimeSkillConfirmationsState
   artifacts: RuntimeArtifactsState
@@ -564,6 +631,8 @@ export interface RuntimeSnapshot {
 export interface CommandPayloadMap {
   'runtime.snapshot.get': { afterSequence?: number }
   'runtime.artifact.get': { artifactId: string }
+  'runtime.artifact.page': { artifactId: string; page: number; pageSize: number }
+  'runtime.variable.page': { path: string; page: number; pageSize: number }
   'runtime.context.apply': { contextRevisionId: string }
   'chat.message.send': {
     clientMessageId: string
@@ -675,6 +744,8 @@ export interface EventPayloadMap {
   'runtime.snapshot': RuntimeSnapshot
   'runtime.artifact.created': { artifact: RuntimeArtifactMeta }
   'runtime.artifact.content': { artifact: RuntimeArtifactMeta; value: JsonValue }
+  'runtime.artifact.page': RuntimeArtifactPage
+  'runtime.variable.page': RuntimeVariablePage
   'runtime.context.revision.created': { revision: number; context: RuntimeContextRevision }
   'runtime.context.applied': {
     revision: number
@@ -729,6 +800,8 @@ export interface EventPayloadMap {
   'run.trace.started': {
     run: RunState
     timeline: RuntimeSnapshot['timeline']
+    artifacts: RuntimeSnapshot['artifacts']
+    contexts: RuntimeContextsState
     checkpoints: RuntimeCheckpointsState
     effectiveContexts: RuntimeEffectiveContextsState
     observations: RuntimeObservationsState
@@ -779,6 +852,7 @@ export interface EventPayloadMap {
   }
   'runtime.tools.updated': RuntimeToolsState
   'runtime.harnesses.updated': RuntimeHarnessesState
+  'runtime.plugins.updated': RuntimePluginsState
   'runtime.skills.updated': RuntimeSkillsState
   'runtime.skills.confirmations.updated': RuntimeSkillConfirmationsState
   'session.resync.required': {
@@ -836,6 +910,8 @@ export class CommandError extends Error {
 const COMMAND_TYPES = new Set<CommandType>([
   'runtime.snapshot.get',
   'runtime.artifact.get',
+  'runtime.artifact.page',
+  'runtime.variable.page',
   'runtime.context.apply',
   'chat.message.send',
   'chat.response.cancel',
@@ -922,6 +998,22 @@ function validatePayload(type: CommandType, payload: Record<string, unknown>): v
     case 'runtime.artifact.get':
       if (!hasString(payload, 'artifactId')) {
         throw new CommandError('INVALID_PAYLOAD', 'runtime.artifact.get requires artifactId')
+      }
+      return
+    case 'runtime.artifact.page':
+      if (!hasString(payload, 'artifactId') || !hasInteger(payload, 'page') || !hasInteger(payload, 'pageSize')) {
+        throw new CommandError('INVALID_PAYLOAD', 'runtime.artifact.page requires artifactId, page, and pageSize')
+      }
+      if (Number(payload.page) < 1 || Number(payload.pageSize) < 1 || Number(payload.pageSize) > 100) {
+        throw new CommandError('INVALID_PAYLOAD', 'artifact page must be between 1 and 100')
+      }
+      return
+    case 'runtime.variable.page':
+      if (!hasString(payload, 'path') || !String(payload.path).startsWith('/') || !hasInteger(payload, 'page') || !hasInteger(payload, 'pageSize')) {
+        throw new CommandError('INVALID_PAYLOAD', 'runtime.variable.page requires an absolute path, page, and pageSize')
+      }
+      if (Number(payload.page) < 1 || Number(payload.pageSize) < 1 || Number(payload.pageSize) > 8_000) {
+        throw new CommandError('INVALID_PAYLOAD', 'variable page must be between 1 and 8000')
       }
       return
     case 'runtime.context.apply':

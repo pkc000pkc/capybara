@@ -14,27 +14,29 @@ const SYSTEM_MANAGED_PROJECT_FILES = [
 ] as const
 const INITIAL_PROJECT_TEMPLATE_FILES = [
   'agent.md',
+  'capybara.plugin.json',
   ...SYSTEM_MANAGED_PROJECT_FILES,
   'hooks/.gitkeep',
+  'training-hooks/.gitkeep',
   'tools/files/manifest.json',
   'tools/files/runner.mjs',
 ] as const
 
-const INITIAL_MAIN_TEMPLATE = `{{ builtin.prompts.agent_identity }}
-{{ builtin.prompts.execution_policy }}
-{{ builtin.prompts.resource_loading }}
-{{ builtin.prompts.completion_status }}
-{{ builtin.prompts.workspace_boundary }}
+const INITIAL_MAIN_TEMPLATE = `{{ builtin.variables.agent_identity }}
+{{ builtin.variables.execution_policy }}
+{{ builtin.variables.resource_loading }}
+{{ builtin.variables.completion_status }}
+{{ builtin.variables.workspace_boundary }}
 
 Selected workspace root: {{ builtin.workspace_path }}
 
-{% set _resource_search_tool_description = builtin.prompts.resource_search_tool_description %}
-{% set _resource_load_tool_description = builtin.prompts.resource_load_tool_description %}
-{% set _system_variable_read_tool_description = builtin.prompts.system_variable_read_tool_description %}
-{% set _system_variable_apply_tool_description = builtin.prompts.system_variable_apply_tool_description %}
-{% set _workflow_execution_tool_description = builtin.prompts.workflow_execution_tool_description %}
-{% set _skill_reference_tool_description = builtin.prompts.skill_reference_tool_description %}
-{% set _skill_script_tool_description = builtin.prompts.skill_script_tool_description %}
+{% set _resource_search_tool_description = builtin.variables.resource_search_tool_description %}
+{% set _resource_load_tool_description = builtin.variables.resource_load_tool_description %}
+{% set _system_variable_read_tool_description = builtin.variables.system_variable_read_tool_description %}
+{% set _system_variable_apply_tool_description = builtin.variables.system_variable_apply_tool_description %}
+{% set _workflow_execution_tool_description = builtin.variables.workflow_execution_tool_description %}
+{% set _skill_reference_tool_description = builtin.variables.skill_reference_tool_description %}
+{% set _skill_script_tool_description = builtin.variables.skill_script_tool_description %}
 
 Agent: {{ agent.name }}
 Task: {{ task.title }}
@@ -146,7 +148,7 @@ const INITIAL_SYSTEM_VARIABLES = {
       type: 'text',
       label: 'System variable reader',
       description: 'Description injected into the built-in system variable reader.',
-      value: 'Read selected system prompt variables and the current revision before proposing a change.',
+      value: 'Read selected system variables and their types, structured values, dependencies, and current revision before proposing a change. Typed values are available to Jinja2 as builtin.variables.<key>; prompt_template variables are resolved before the main prompt renders, while builtin.prompts remains a compatible rendered view.',
       required: true,
       readonly: true,
     },
@@ -155,7 +157,7 @@ const INITIAL_SYSTEM_VARIABLES = {
       type: 'text',
       label: 'System variable change tool',
       description: 'Description injected into the built-in system variable change tool.',
-      value: 'Atomically add, patch, replace, or remove system prompt variables using the latest revision and return the validated diff.',
+      value: 'Atomically add, patch, replace, or remove typed system variables using the latest revision and return the validated diff. Supported types are text, prompt_template, boolean, integer, number, date, datetime, array, object, and secret_ref. Use text patch only for strings; use json_patch for arrays and objects. secret_ref stores only a reference and never resolves credentials.',
       required: true,
       readonly: true,
     },
@@ -305,6 +307,7 @@ export function initializeProjectDirectory(input: string): ProjectInitialization
   const llm = loadLlmConfig()
   const files = new Map<string, string>([
     ['.capybara/config.json', `${JSON.stringify({
+      resource_format: 2,
       main_template: 'main.j2',
       max_messages: 20,
       max_tool_rounds: 8,
@@ -313,14 +316,17 @@ export function initializeProjectDirectory(input: string): ProjectInitialization
         model: llm.model,
         base_url: llm.baseUrl,
         protocol: llm.protocol,
+        max_retries: llm.maxRetries,
       },
       context: {
+        context_window_tokens: 16_000,
         max_input_tokens: 16_000,
         reserved_output_tokens: 2_000,
       },
       tools: ['tools/files/manifest.json'],
       skills: [],
       harnesses: [],
+      plugins: [],
       harness_policy: {
         experience_top_k: 3,
         experience_threshold: 0.35,

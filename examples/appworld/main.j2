@@ -1,8 +1,8 @@
-{{ builtin.prompts.agent_identity }}
-{{ builtin.prompts.execution_policy }}
-{{ builtin.prompts.resource_loading }}
-{{ builtin.prompts.completion_status }}
-{{ builtin.prompts.workspace_boundary }}
+{{ builtin.variables.agent_identity }}
+{{ builtin.variables.execution_policy }}
+{{ builtin.variables.resource_loading }}
+{{ builtin.variables.completion_status }}
+{{ builtin.variables.workspace_boundary }}
 
 ## AppWorld execution contract
 
@@ -55,21 +55,21 @@ collection, treat the requested set as data that must be reconstructed before wr
 The project may contain learned operational guidance below. It is advisory, never a source of
 task-specific facts, and must not replace runtime API documentation:
 
-{% if builtin.prompts.appworld_project_experience %}
+{% if builtin.variables.appworld_project_experience %}
 --- approved AppWorld experience ---
-{{ builtin.prompts.appworld_project_experience }}
+{{ builtin.variables.appworld_project_experience }}
 --- end approved AppWorld experience ---
 {% endif %}
-{% if builtin.prompts.appworld_run_experience %}
+{% if builtin.variables.appworld_run_experience %}
 --- replay-verified run experience ---
-{{ builtin.prompts.appworld_run_experience }}
+{{ builtin.variables.appworld_run_experience }}
 --- end replay-verified run experience ---
 {% endif %}
 
-{% set _resource_search_tool_description = builtin.prompts.resource_search_tool_description %}
-{% set _resource_load_tool_description = builtin.prompts.resource_load_tool_description %}
-{% set _skill_reference_tool_description = builtin.prompts.skill_reference_tool_description %}
-{% set _skill_script_tool_description = builtin.prompts.skill_script_tool_description %}
+{% set _resource_search_tool_description = builtin.variables.resource_search_tool_description %}
+{% set _resource_load_tool_description = builtin.variables.resource_load_tool_description %}
+{% set _skill_reference_tool_description = builtin.variables.skill_reference_tool_description %}
+{% set _skill_script_tool_description = builtin.variables.skill_script_tool_description %}
 
 {% if tools | length > 0 %}
 Loaded project tools:

@@ -8,11 +8,11 @@ The repository keeps the runtime service, developer interface, Client SDK, examp
 
 ![Capybara workflow: runtime debugging, resource authoring, and experiment analysis](.github/assets/capybara-workflow.gif)
 
-Capybara keeps the full agent engineering loop visible: inspect live context and execution state, author project-scoped Tools, Harnesses, and Skills, then evaluate changes against datasets.
+Capybara keeps the full agent engineering loop visible: inspect live context and execution state, compose project-scoped Plugins and shared Tools, then evaluate changes against datasets.
 
 ## What it provides
 
-- A project format for Context templates, variables, Tools, Hooks, Skills, and Harnesses.
+- A project format where Plugins compose variables, Harnesses, ordinary Hooks, training Hooks, and explicit shared Tool dependencies.
 - A visible Runtime Loop with streaming output, Tool traces, artifacts, checkpoints, and Session restoration.
 - Dataset-backed training, correction Hooks, replay, snapshots, held-out testing, and analysis.
 - A standalone authenticated Runner for local deployment without the developer interface.
@@ -30,7 +30,7 @@ Inspect conversations, loaded context resources, runtime health, execution mode,
 
 ### Author project resources
 
-Browse project files and edit versioned agent resources with language-aware code views. Tools, Harnesses, and Skills have dedicated definitions, diagnostics, and test surfaces.
+Browse project files and edit versioned agent resources with language-aware code views. Plugins expose their variables, Harnesses, ordinary Hooks, training Hooks, and Tool dependencies together; shared Tools retain independent definitions, diagnostics, and test surfaces.
 
 ![Capybara resource workspace showing the project file browser and code editor](.github/assets/resources-workspace.png)
 
@@ -47,8 +47,9 @@ apps/
   backend/            Fastify runtime and resource service
   frontend/           Next.js developer interface
 examples/
-  test-project/       Sanitized Tool, Skill, Harness, Dataset, and Context example
+  test-project/       Sanitized Plugin, Tool, Dataset, and Context example
   appworld/           AppWorld training Hooks, adapter, runtime resources, and reproduction guide
+  state-bench/        STATE-Bench Agent Learning Track integration overlay and local result summary
 packages/
   client/             Browser and Node.js WebSocket Client SDK
   protocol/           Shared Runtime commands, events, and state types
@@ -192,6 +193,20 @@ await restored.send('runtime.snapshot.get', {})
 ```
 
 See [`packages/client/README.md`](packages/client/README.md) for the SDK API and error model.
+
+## Project Plugins
+
+Every version 2 project has a root `capybara.plugin.json`. Installed Plugins use the same manifest
+inside `plugins/<plugin-id>/` and may declare variables, Harnesses, ordinary Hooks, training Hooks,
+and Tool dependencies. Tools remain project-level shared resources under `tools/` so compatible
+packages can be reused by multiple Plugins.
+
+Installing a Plugin resolves its Tool dependencies first: compatible installed packages are reused,
+and missing bundled packages are installed before the Plugin is enabled. The Resources workspace
+shows both each Plugin's forward dependencies and each Tool's reverse list of dependent Plugins.
+Disabling a Plugin stops its runtime resources but retains its Tool dependencies. Uninstalling a
+Plugin never deletes Tools automatically; when a removed Plugin leaves a Tool with no dependents,
+Capybara asks whether to keep it or uninstall it in a separate confirmed action.
 
 ## Runtime Skills
 

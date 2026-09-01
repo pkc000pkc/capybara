@@ -598,14 +598,18 @@ export class ExperimentManager {
           }
         })
         abortTimer = setTimeout(() => {
-          timeoutController.abort()
-          try {
-            this.command(loop, 'run.cancel', { reason: 'experiment case timed out' })
-          } catch {
-            loop.close()
+          const timeoutError = new Error(`experiment case exceeded ${run.config.timeoutMs} ms`)
+          timeoutController.abort(timeoutError)
+          const snapshot = loop.getSnapshot(0)
+          if (snapshot.run.runId && !TERMINAL_RUN_STATUSES.has(snapshot.run.status)) {
+            try {
+              this.command(loop, 'run.cancel', { reason: 'experiment case timed out' })
+            } catch {
+              loop.close()
+            }
           }
           unsubscribe()
-          reject(new Error(`experiment case exceeded ${run.config.timeoutMs} ms`))
+          reject(timeoutError)
         }, run.config.timeoutMs)
       })
       this.command(loop, 'chat.message.send', {
@@ -614,7 +618,6 @@ export class ExperimentManager {
         autoStart: true,
       })
       const runState = await terminal
-      if (abortTimer) clearTimeout(abortTimer)
       const state = loop.exportState()
       const snapshot = state.snapshot
       const runtimeRunId = runState.runId ?? undefined
@@ -733,7 +736,6 @@ export class ExperimentManager {
         completedAt: new Date().toISOString(),
       })
     } catch (error) {
-      if (abortTimer) clearTimeout(abortTimer)
       await cleanupAdapter().catch(() => undefined)
       const state = loop.exportState()
       const snapshot = state.snapshot
@@ -782,6 +784,7 @@ export class ExperimentManager {
         completedAt: new Date().toISOString(),
       })
     } finally {
+      if (abortTimer) clearTimeout(abortTimer)
       await cleanupAdapter().catch(() => undefined)
       active.controller.signal.removeEventListener('abort', cancel)
       active.loops.delete(loop)
@@ -951,6 +954,7 @@ export class ExperimentManager {
       baseUrl: settings.llm.base_url,
       protocol: settings.llm.protocol,
       apiKey: settings.llm.api_key,
+      maxRetries: settings.llm.max_retries,
     })
   }
 

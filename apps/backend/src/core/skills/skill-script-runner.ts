@@ -56,10 +56,12 @@ export class SkillScriptRunner {
         child.kill()
       }
       const abort = () => stop(fail('ABORTED', 'skill script was aborted'))
-      const timer = setTimeout(
-        () => stop(fail('TIMEOUT', `skill script exceeded ${this.timeoutMs} ms`)),
-        this.timeoutMs,
-      )
+      const timer = this.timeoutMs === -1
+        ? undefined
+        : setTimeout(
+            () => stop(fail('TIMEOUT', `skill script exceeded ${this.timeoutMs} ms`)),
+            this.timeoutMs,
+          )
       this.abortActive = abort
       signal?.addEventListener('abort', abort, { once: true })
       child.stdout.setEncoding('utf8').on('data', (chunk: string) => {

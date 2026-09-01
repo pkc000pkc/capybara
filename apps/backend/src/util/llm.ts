@@ -3,10 +3,13 @@ import { OpenAiCompatibleProvider } from '#util/llm/openai-compatible'
 import type {
   LlmChatRequest,
   LlmChatResponse,
+  LlmClientMetadata,
   LlmConfig,
   LlmProvider,
   LlmTextDeltaHandler,
 } from '#util/llm/types'
+
+export { LlmRequestError } from '#util/llm/openai-compatible'
 
 export type {
   LlmChatRequest,
@@ -15,6 +18,7 @@ export type {
   LlmMessage,
   LlmProtocol,
   LlmProviderName,
+  LlmRequestDiagnostics,
   LlmRetryHandler,
   LlmRetryNotification,
   LlmRole,
