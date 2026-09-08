@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "appworld-guidance",
+  "name": "AppWorld Guidance",
+  "description": "Validated AppWorld execution guidance, training Hooks, and project variables.",
+  "version": "1.0.0",
+  "resources": {
+    "variables": "variables.json",
+    "harnesses": ["harnesses/appworld/manifest.json"],
+    "hooks": [],
+    "trainingHooks": ["training-hooks"]
+  },
+  "toolDependencies": [
+    { "package": "appworld", "version": "1.0.0" }
+  ]
+}

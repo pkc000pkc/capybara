@@ -9,7 +9,7 @@ import type {
 } from '#core/hooks/types'
 import type { JsonValue } from '#protocol/runtime-protocol'
 import type { RuntimeLlm } from '#core/runtime-loop'
-import type { LlmChatRequest, LlmMessage, LlmUsage } from '#util/llm'
+import type { LlmChatRequest, LlmMessage, LlmUsage, LlmRetryNotification } from '#util/llm'
 
 const WORKER_SOURCE = String.raw`
 const { parentPort, workerData } = require('node:worker_threads');
@@ -137,6 +137,15 @@ interface WorkerDone {
 
 export interface HookRunLimits {
   maxTotalTokens?: number
+  onLlmActivity?: (activity: HookLlmActivity) => void
+}
+
+export interface HookLlmActivity {
+  hookId: string
+  requestId: string
+  phase: 'waiting' | 'retrying' | 'completed' | 'failed'
+  elapsedMs: number
+  retry?: LlmRetryNotification
 }
 
 class HookAttemptError extends Error {
@@ -190,7 +199,7 @@ export class HookRunner {
         throw new HookRunError('Hook token budget was exhausted before retry.', cumulativeUsage, attempt - 1)
       }
       try {
-        const result = await this.runAttempt(hook, fixture, signal, remainingTokens)
+        const result = await this.runAttempt(hook, fixture, signal, remainingTokens, limits.onLlmActivity)
         return { ...result, attempts: attempt, usage: addUsage(cumulativeUsage, result.usage) }
       } catch (error) {
         const attemptUsage = error instanceof HookAttemptError ? error.usage : {}
@@ -207,6 +216,7 @@ export class HookRunner {
     fixture: HookFixture,
     signal?: AbortSignal,
     maxTotalTokens?: number,
+    onLlmActivity?: HookRunLimits['onLlmActivity'],
   ): Promise<Omit<HookRunResult, 'attempts'>> {
     const started = Date.now()
     const usage: LlmUsage = {}
@@ -251,7 +261,7 @@ export class HookRunner {
       worker.on('message', (message: unknown) => {
         if (!isObject(message)) return
         if (message.type === 'rpc') {
-          void this.handleRpc(message, attemptController.signal, usage, maxTotalTokens).then(
+          void this.handleRpc(message, attemptController.signal, usage, maxTotalTokens, hook.id, onLlmActivity).then(
             (result) => {
               if (!settled) worker.postMessage({ type: 'rpc-result', id: message.id, ok: true, result })
             },
@@ -281,6 +291,8 @@ export class HookRunner {
     signal: AbortSignal | undefined,
     usage: LlmUsage,
     maxTotalTokens?: number,
+    hookId = '',
+    onLlmActivity?: HookRunLimits['onLlmActivity'],
   ): Promise<JsonValue> {
     if (message.method !== 'llm.responses.create' || !isObject(message.params)) {
       throw new Error(`unsupported Hook RPC method: ${String(message.method)}`)
@@ -303,7 +315,34 @@ export class HookRunner {
       ...(maxTokens === undefined ? {} : { maxTokens }),
       signal,
     }
-    const response = await this.llm.chat(request)
+    const started = Date.now()
+    const requestId = randomUUID()
+    let finished = false
+    const notify = (phase: HookLlmActivity['phase'], retry?: LlmRetryNotification) => {
+      if (finished) return
+      if (phase === 'completed' || phase === 'failed') finished = true
+      try {
+        onLlmActivity?.({ hookId, requestId, phase, elapsedMs: Date.now() - started, ...(retry ? { retry } : {}) })
+      } catch { /* An observer must not change Hook execution. */ }
+    }
+    Object.defineProperty(request, 'onRetry', {
+      enumerable: false,
+      value: (retry: LlmRetryNotification) => notify(retry.phase === 'waiting' ? 'retrying' : 'waiting', retry),
+    })
+    const aborted = () => notify('failed')
+    signal?.addEventListener('abort', aborted, { once: true })
+    let response
+    try {
+      if (signal?.aborted) throw new Error('Hook model request was aborted')
+      notify('waiting')
+      response = await this.llm.chat(request)
+      notify('completed')
+    } catch (error) {
+      notify('failed')
+      throw error
+    } finally {
+      signal?.removeEventListener('abort', aborted)
+    }
     for (const key of ['inputTokens', 'outputTokens', 'totalTokens', 'cacheReadTokens'] as const) {
       if (response.usage?.[key] !== undefined) usage[key] = (usage[key] ?? 0) + Number(response.usage[key])
     }

@@ -154,10 +154,21 @@ test("resource workspace combines plugins and keeps tools independently manageab
   await expect(systemVariablesPanel.locator('[data-language="jinja2"]')).toContainText(
     "builtin.prompts.template_level_2",
   );
+  const promptFragment = systemVariablesPanel.getByLabel("Jinja2 注入片段");
+  await promptFragment.fill("前缀：{{ builtin.variables.template_level_1 }}；后缀");
+  await systemVariablesPanel.getByLabel("默认值").fill("更新后的模板 {{ builtin.prompts.template_level_2 }}");
+  await expect(promptFragment).toHaveValue("前缀：{{ builtin.variables.template_level_1 }}；后缀");
+  const testValue = systemVariablesPanel.getByLabel("值测试");
+  await expect(testValue).toHaveValue("更新后的模板 {{ builtin.prompts.template_level_2 }}");
+  await testValue.fill("");
+  await expect(testValue).toHaveValue("更新后的模板 {{ builtin.prompts.template_level_2 }}");
+  const renderedPreview = systemVariablesPanel.locator('section[aria-label="提示词渲染预览"] pre');
+  await expect(renderedPreview).toContainText("前缀：");
+  await expect(renderedPreview).toContainText("后缀");
   await page.getByRole("button", { name: /resource_loading.*只读/ }).click();
   await expect(page.getByLabel("变量名")).toBeDisabled();
   await expect(systemVariablesPanel.getByLabel("变量类型")).toBeDisabled();
-  await expect(page.getByLabel("变量值")).toHaveAttribute("contenteditable", "false");
+  await expect(page.getByLabel("默认值")).toHaveAttribute("contenteditable", "false");
   await expect(page.getByRole("button", { name: "删除系统变量" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "添加系统变量" }).click();
@@ -165,7 +176,7 @@ test("resource workspace combines plugins and keeps tools independently manageab
   await expect(systemVariablesPanel.getByLabel("作用域")).toHaveValue("session");
   await systemVariablesPanel.getByLabel("变量名").fill("e2e_shared_prompt");
   await systemVariablesPanel.getByLabel("作用域").selectOption("project");
-  await systemVariablesPanel.getByLabel("变量值").fill("shared value");
+  await systemVariablesPanel.getByLabel("默认值").fill("shared value");
   const saveSharedVariable = page.waitForResponse((response) =>
     response.request().method() === "PUT"
       && response.url().includes("/api/resources/system-variables")
@@ -174,6 +185,19 @@ test("resource workspace combines plugins and keeps tools independently manageab
   await systemVariablesPanel.getByRole("button", { name: "保存", exact: true }).click();
   await saveSharedVariable;
   await expect(page.getByRole("button", { name: /e2e_shared_prompt.*项目共享/ })).toBeVisible();
+  await systemVariablesPanel.getByRole("button", { name: "设为只读" }).click();
+  await expect(systemVariablesPanel.getByLabel("默认值")).toHaveAttribute("contenteditable", "false");
+  await systemVariablesPanel.getByRole("button", { name: "编辑只读变量" }).click();
+  await expect(systemVariablesPanel.getByLabel("默认值")).toHaveAttribute("contenteditable", "true");
+  await systemVariablesPanel.getByLabel("默认值").fill("edited while unlocked");
+  const saveUnlockedVariable = page.waitForResponse((response) =>
+    response.request().method() === "PUT"
+      && response.url().includes("/api/resources/system-variables")
+      && response.status() === 200,
+  );
+  await systemVariablesPanel.getByRole("button", { name: "保存", exact: true }).click();
+  await saveUnlockedVariable;
+  await expect(systemVariablesPanel.getByLabel("默认值")).toContainText("edited while unlocked");
   await systemVariablesPanel.getByRole("button", { name: "删除系统变量" }).click();
   const deleteSharedVariable = page.waitForResponse((response) =>
     response.request().method() === "PUT"
@@ -228,6 +252,65 @@ test("resource workspace combines plugins and keeps tools independently manageab
   await expect(page.getByRole("button", { name: /external_refresh_probe/ })).toHaveCount(0);
 
   expect(pageErrors).toEqual([]);
+});
+
+test("prompt workspace opens the configured main template and follows Jinja2 includes", async ({ page }) => {
+  test.setTimeout(60_000);
+  const mainFile = path.join(resourceProject, "main.j2");
+  const originalMain = fs.readFileSync(mainFile, "utf8");
+  const partialFile = path.join(resourceProject, "partials", "e2e.j2");
+  fs.mkdirSync(path.dirname(partialFile), { recursive: true });
+  fs.writeFileSync(partialFile, "Included prompt content\n", "utf8");
+  fs.writeFileSync(mainFile, `{% include "partials/e2e.j2" %}\n${originalMain}`, "utf8");
+  try {
+    await page.goto("/");
+    await expect(page.locator('[title="已连接"]')).toBeVisible({ timeout: 20_000 });
+    await page.locator("#app-resources-tab").click();
+    await page.locator("#resource-prompts-tab").click();
+
+    const promptsPanel = page.locator("#resource-prompts-panel");
+    await expect(promptsPanel).toBeVisible();
+    await expect(page.getByRole("button", { name: /main\.j2/ })).toBeVisible();
+    await expect(promptsPanel.getByLabel("文件内容")).toContainText('include "partials/e2e.j2"');
+    await promptsPanel.getByRole("button", { name: /partials\/e2e\.j2/ }).click();
+    await expect(promptsPanel.getByLabel("文件内容")).toContainText("Included prompt content");
+  } finally {
+    fs.writeFileSync(mainFile, originalMain, "utf8");
+    fs.rmSync(partialFile, { force: true });
+    try {
+      fs.rmSync(path.dirname(partialFile), { recursive: true, force: true });
+    } catch {
+      // The test fixture cleanup is best effort on Windows file watchers.
+    }
+  }
+});
+
+test("recall workspace exposes rules, test flow, benchmarks, evaluation, and versions", async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.goto("/");
+  await expect(page.locator('[title="已连接"]')).toBeVisible({ timeout: 20_000 });
+  await page.locator("#app-recall-tab").click();
+
+  const recallView = page.locator("#recall-view");
+  await expect(recallView).toBeVisible();
+  await expect(recallView.getByLabel("召回规则代码")).toContainText("export async function recall");
+
+  await page.locator("#recall-testing-tab").click();
+  await expect(page.locator("#recall-testing-panel").getByText("原始候选")).toBeVisible();
+  await expect(page.locator("#recall-testing-panel").getByText("最终注入")).toBeVisible();
+
+  await page.locator("#recall-benchmarks-tab").click();
+  await expect(page.locator("#recall-benchmarks-panel").getByText("core-recall", { exact: true }).first()).toBeVisible();
+
+  await page.locator("#recall-evaluation-tab").click();
+  await expect(page.locator("#recall-evaluation-panel").getByText("Recall@5").first()).toBeVisible();
+  await expect(page.locator("#recall-evaluation-panel").getByText("历史版本演进")).toBeVisible();
+  await expect(page.locator("#recall-evaluation-panel").getByText("历史对比数据")).toBeVisible();
+  await expect(page.locator("#recall-evaluation-panel").getByText("v8", { exact: true }).first()).toBeVisible();
+  await expect(page.locator("#recall-evaluation-panel").getByText("v12", { exact: true }).first()).toBeVisible();
+
+  await page.locator("#recall-versions-tab").click();
+  await expect(page.locator("#recall-versions-panel").getByText("发布检查")).toBeVisible();
 });
 
 test("plugin tool dependencies are explicit and orphan cleanup requires confirmation", async ({ page }) => {
@@ -363,7 +446,7 @@ export default defineHook({
     await expect(variableDialog.getByRole("button", { name: "保存变量" })).toBeDisabled();
     await variableDialog.getByLabel("变量名").fill("e2e_plugin_extra");
     await variableDialog.getByLabel("显示名称").fill("E2E plugin extra");
-    await variableDialog.getByLabel("变量值").fill("extra value");
+    await variableDialog.getByLabel("默认值").fill("extra value");
     const addPluginVariable = page.waitForResponse((response) => (
       response.request().method() === "PUT"
         && response.url().includes("/api/resources/plugins/e2e-addon/variables")
@@ -374,7 +457,7 @@ export default defineHook({
     await expect(pluginPanel.getByText("e2e_plugin_extra", { exact: true })).toBeVisible();
     await pluginPanel.getByRole("button", { name: "编辑变量 e2e_plugin_extra" }).click();
     const editVariableDialog = page.getByRole("dialog", { name: "编辑插件变量" });
-    await editVariableDialog.getByLabel("变量值").fill("edited value");
+    await editVariableDialog.getByLabel("默认值").fill("edited value");
     const editPluginVariable = page.waitForResponse((response) => (
       response.request().method() === "PUT"
         && response.url().includes("/api/resources/plugins/e2e-addon/variables")

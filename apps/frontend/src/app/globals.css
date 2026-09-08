@@ -384,6 +384,26 @@ html[data-theme="dark"] .resize-handle:focus-visible {
   color: #914545;
 }
 
+.experiment-status[data-status="unscored"] {
+  background: #f4eddd;
+  color: #7c5c25;
+}
+
+.recall-status[data-status="active"] {
+  background: #deefeb;
+  color: #246e64;
+}
+
+.recall-status[data-status="validated"] {
+  background: #e8eff0;
+  color: #536f74;
+}
+
+.recall-status[data-status="draft"] {
+  background: #f5ebdc;
+  color: #8a5d2d;
+}
+
 html[data-theme="dark"] .experiment-status[data-status="completed"],
 html[data-theme="dark"] .experiment-status[data-status="running"] {
   background: #203c38 !important;
@@ -398,6 +418,26 @@ html[data-theme="dark"] .experiment-status[data-status="queued"] {
 html[data-theme="dark"] .experiment-status[data-status="failed"] {
   background: #432b2d !important;
   color: #e4a3a3 !important;
+}
+
+html[data-theme="dark"] .experiment-status[data-status="unscored"] {
+  background: #443b27 !important;
+  color: #e2c37f !important;
+}
+
+html[data-theme="dark"] .recall-status[data-status="active"] {
+  background: #203c38 !important;
+  color: #8bd2ca !important;
+}
+
+html[data-theme="dark"] .recall-status[data-status="validated"] {
+  background: #293638 !important;
+  color: #b8c8ca !important;
+}
+
+html[data-theme="dark"] .recall-status[data-status="draft"] {
+  background: #463b29 !important;
+  color: #e1bd7b !important;
 }
 
 html[data-theme="dark"] .message-role-divider {

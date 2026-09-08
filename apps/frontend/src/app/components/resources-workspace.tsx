@@ -11,6 +11,8 @@ import {
   GitBranch,
   LoaderCircle,
   LockKeyhole,
+  LockKeyholeOpen,
+  MessageSquareText,
   Plus,
   Save,
   Settings2,
@@ -28,6 +30,7 @@ import CodeSurface from "./code-surface";
 import GitResourceWorkspace from "./git-resource-workspace";
 import PluginResourceWorkspace from "./plugin-resource-workspace";
 import ProjectFilesWorkspace from "./project-files-workspace";
+import ProjectPromptsWorkspace from "./project-prompts-workspace";
 import ResourceDefinitionWorkspace from "./resource-definition-workspace";
 import ResizeHandle from "./resize-handle";
 import {
@@ -38,6 +41,7 @@ import {
 
 export type ResourceSection =
   | "files"
+  | "prompts"
   | "version-control"
   | "plugins"
   | "tools"
@@ -62,17 +66,25 @@ type SystemVariablesResource = {
   variables: SystemVariableDefinition[];
 };
 
+type SystemVariableReference = {
+  path: string;
+  count: number;
+};
+
 type ProjectSettings = {
   main_template: string;
   max_messages: number;
   max_tool_rounds: number;
   llm: {
+    provider: "openai" | "ollama" | "deepseek" | "custom";
     model: string;
     base_url: string;
     protocol: "responses" | "codex-like" | "chat-completions";
     max_retries: number;
     api_key: string;
     api_key_configured: boolean;
+    active_profile: string;
+    profiles: ProjectLlmProfile[];
   };
   harness_policy: {
     experience_top_k: number;
@@ -85,6 +97,56 @@ type ProjectSettings = {
     reserved_output_tokens: number;
   };
 };
+
+type ProjectLlmProfile = {
+  id: string;
+  name: string;
+  provider: ProjectSettings["llm"]["provider"];
+  model: string;
+  base_url: string;
+  protocol: ProjectSettings["llm"]["protocol"];
+  max_retries: number;
+  api_key?: string;
+  api_key_configured?: boolean;
+};
+
+function normalizeProjectSettings(value: ProjectSettings): ProjectSettings {
+  const rawLlm = value.llm;
+  const provider = rawLlm.provider ?? "custom";
+  const legacyProfile: ProjectLlmProfile = {
+    id: "default",
+    name: "Default",
+    provider,
+    model: rawLlm.model ?? "",
+    base_url: rawLlm.base_url ?? "",
+    protocol: rawLlm.protocol ?? "responses",
+    max_retries: rawLlm.max_retries ?? 3,
+    api_key_configured: Boolean(rawLlm.api_key_configured),
+  };
+  const profiles = rawLlm.profiles?.length
+    ? rawLlm.profiles.map((profile) => ({
+        ...legacyProfile,
+        ...profile,
+        api_key: "",
+        api_key_configured: Boolean(profile.api_key_configured),
+      }))
+    : [legacyProfile];
+  const activeId = rawLlm.active_profile && profiles.some((profile) => profile.id === rawLlm.active_profile)
+    ? rawLlm.active_profile
+    : profiles[0].id;
+  const active = profiles.find((profile) => profile.id === activeId) ?? profiles[0];
+  return {
+    ...value,
+    llm: {
+      ...rawLlm,
+      ...active,
+      api_key: rawLlm.api_key ?? "",
+      api_key_configured: Boolean(rawLlm.api_key_configured ?? active.api_key_configured),
+      active_profile: activeId,
+      profiles,
+    },
+  };
+}
 
 const validMaxToolRounds = (value: number) =>
   Number.isInteger(value) && (value === -1 || value >= 1);
@@ -152,8 +214,9 @@ function PromptRenderPreview({ variable, variables }: { variable: SystemVariable
   const { t } = useI18n();
   const fragment = variable.type === "prompt_template" ? String(variable.value) : `{{ builtin.variables.${variable.key} }}`;
   const [fragmentText, setFragmentText] = useState(fragment);
-  const [testText, setTestText] = useState(() => previewValue(variable.value));
-  const testValue = parseValueText(variable.type, testText);
+  const [testText, setTestText] = useState<string>();
+  const effectiveTestText = testText ?? previewValue(variable.value);
+  const testValue = parseValueText(variable.type, effectiveTestText);
   const rendered = renderPreviewFragment(fragmentText, variables, variable.key, testValue);
   return (
     <section className="grid gap-2 border border-[#c6d4d4] bg-[#f7faf9] p-3" aria-label={t("resources.variableRenderPreview")}>
@@ -168,7 +231,7 @@ function PromptRenderPreview({ variable, variables }: { variable: SystemVariable
         </label>
         <label className="grid gap-1">
           <span className="text-[9px] font-semibold text-[#718488]">{t("resources.variableTestValue")}</span>
-          <textarea aria-label={t("resources.variableTestValue")} className="min-h-14 resize-y border border-[#d6e1e0] bg-white p-2 font-mono text-[10px] leading-4 text-[#294247] outline-none focus:border-[#0c766e]" onChange={(event) => setTestText(event.target.value)} value={testText} />
+          <textarea aria-label={t("resources.variableTestValue")} className="min-h-14 resize-y border border-[#d6e1e0] bg-white p-2 font-mono text-[10px] leading-4 text-[#294247] outline-none focus:border-[#0c766e]" onChange={(event) => setTestText(event.target.value || undefined)} value={effectiveTestText} />
         </label>
       </div>
       <div className="grid gap-1">
@@ -193,6 +256,7 @@ const RESOURCE_SECTIONS: {
   icon: LucideIcon;
 }[] = [
   { id: "files", icon: FileText },
+  { id: "prompts", icon: MessageSquareText },
   { id: "version-control", icon: GitBranch },
   { id: "plugins", icon: Blocks },
   { id: "tools", icon: Wrench },
@@ -231,6 +295,8 @@ function sectionLabel(
   switch (section) {
     case "files":
       return t("resources.files");
+    case "prompts":
+      return t("resources.prompts");
     case "version-control":
       return t("resources.versionControl");
     case "plugins":
@@ -365,6 +431,7 @@ function SystemVariableDetails({
   onChange,
   onDelete,
   onSave,
+  onToggleReadonly,
   variable,
   variables,
 }: {
@@ -372,6 +439,7 @@ function SystemVariableDetails({
   onChange: (changes: Partial<SystemVariableDefinition>) => void;
   onDelete: () => void;
   onSave: () => void;
+  onToggleReadonly: () => void;
   variable?: SystemVariableDefinition;
   variables?: readonly SystemVariableDefinition[];
 }) {
@@ -390,17 +458,40 @@ function SystemVariableDetails({
   }
   const fieldClass = "h-8 w-full border border-[#c6d4d4] bg-white px-2 text-xs text-[#294247] outline-none focus:border-[#0c766e] focus:ring-1 focus:ring-[#0c766e] disabled:bg-[#f1f5f4] disabled:text-[#718488]";
   const allVariables = variables ?? [variable];
+  const runtimeManaged = variable.key === "sys_message" || variable.key === "cache";
+  const readOnly = variable.readonly || runtimeManaged;
   return (
     <section className="grid h-full min-h-0 grid-rows-[34px_1fr] bg-white">
       <PanelHeader
         actions={(
           <>
-          {variable.readonly ? (
-            <span className="flex items-center gap-1 font-mono text-[9px] text-[#718488]">
-              <LockKeyhole aria-hidden="true" size={11} />
-              {t("resources.readOnly")}
+          {variable.readonly && (
+            <span className="font-mono text-[9px] text-[#718488]">
+              {runtimeManaged ? t("resources.runtimeManaged") : t("resources.readOnly")}
             </span>
-          ) : (
+          )}
+          {variable.readonly && !runtimeManaged ? (
+            <button
+              aria-label={t("resources.unlockReadOnly")}
+              className="flex h-6 w-6 items-center justify-center text-[#536d72] outline-none hover:bg-[#dcecea] focus-visible:ring-2 focus-visible:ring-[#0c766e]"
+              onClick={onToggleReadonly}
+              title={t("resources.unlockReadOnly")}
+              type="button"
+            >
+              <LockKeyholeOpen aria-hidden="true" size={13} />
+            </button>
+          ) : !variable.readonly && !runtimeManaged ? (
+            <button
+              aria-label={t("resources.setReadOnly")}
+              className="flex h-6 w-6 items-center justify-center text-[#536d72] outline-none hover:bg-[#dcecea] focus-visible:ring-2 focus-visible:ring-[#0c766e]"
+              onClick={onToggleReadonly}
+              title={t("resources.setReadOnly")}
+              type="button"
+            >
+              <LockKeyhole aria-hidden="true" size={13} />
+            </button>
+          ) : null}
+          {!variable.readonly && !runtimeManaged && (
             <button
               aria-label={t("resources.deleteVariable")}
               className="flex h-6 w-6 items-center justify-center text-[#8d4b4b] outline-none hover:bg-[#eadbda] focus-visible:ring-2 focus-visible:ring-[#9b4141]"
@@ -421,21 +512,21 @@ function SystemVariableDetails({
         <div className="grid max-w-3xl gap-4">
           <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
             {t("resources.variableKey")}
-            <input className={fieldClass + " font-mono"} disabled={variable.readonly} onChange={(event) => onChange({ key: event.target.value })} value={variable.key} />
+            <input className={fieldClass + " font-mono"} disabled={readOnly} onChange={(event) => onChange({ key: event.target.value })} value={variable.key} />
           </label>
           <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
             {t("resources.variableLabel")}
-            <input className={fieldClass} disabled={variable.readonly} onChange={(event) => onChange({ label: event.target.value })} value={variable.label} />
+            <input className={fieldClass} disabled={readOnly} onChange={(event) => onChange({ label: event.target.value })} value={variable.label} />
           </label>
           <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
             {t("resources.variableDescription")}
-            <input className={fieldClass} disabled={variable.readonly} onChange={(event) => onChange({ description: event.target.value })} value={variable.description} />
+            <input className={fieldClass} disabled={readOnly} onChange={(event) => onChange({ description: event.target.value })} value={variable.description} />
           </label>
           <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
             {t("resources.variableType")}
             <select
               className={fieldClass}
-              disabled={variable.readonly}
+              disabled={readOnly}
               onChange={(event) => { const type = event.target.value as SystemVariableType; onChange({ type, value: valueForType(type) }); }}
               value={variable.type}
             >
@@ -443,35 +534,35 @@ function SystemVariableDetails({
             </select>
           </label>
           <div className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
-            <span>{t("resources.variableValue")}</span>
-            {variable.type === "boolean" ? <select aria-label={t("resources.variableValue")} className={fieldClass} disabled={variable.readonly} onChange={(event) => onChange({ value: event.target.value === "true" })} value={String(variable.value)}><option value="true">true</option><option value="false">false</option></select> : ["integer", "number"].includes(variable.type) ? <input aria-label={t("resources.variableValue")} className={fieldClass} disabled={variable.readonly} onChange={(event) => onChange({ value: parseValueText(variable.type, event.target.value) })} type="number" step={variable.type === "integer" ? 1 : "any"} value={String(variable.value)} /> : variable.type === "date" ? <input aria-label={t("resources.variableValue")} className={fieldClass} disabled={variable.readonly} onChange={(event) => onChange({ value: event.target.value })} type="date" value={String(variable.value)} /> : variable.type === "datetime" ? <input aria-label={t("resources.variableValue")} className={fieldClass} disabled={variable.readonly} onChange={(event) => onChange({ value: event.target.value })} placeholder="2026-08-19T12:30:00Z" type="text" value={String(variable.value)} /> : <CodeSurface
-              ariaLabel={t("resources.variableValue")}
+            <span>{t("resources.variableDefaultValue")}</span>
+            {variable.type === "boolean" ? <select aria-label={t("resources.variableDefaultValue")} className={fieldClass} disabled={readOnly} onChange={(event) => onChange({ value: event.target.value === "true" })} value={String(variable.value)}><option value="true">true</option><option value="false">false</option></select> : ["integer", "number"].includes(variable.type) ? <input aria-label={t("resources.variableDefaultValue")} className={fieldClass} disabled={readOnly} onChange={(event) => onChange({ value: parseValueText(variable.type, event.target.value) })} type="number" step={variable.type === "integer" ? 1 : "any"} value={String(variable.value)} /> : variable.type === "date" ? <input aria-label={t("resources.variableDefaultValue")} className={fieldClass} disabled={readOnly} onChange={(event) => onChange({ value: event.target.value })} type="date" value={String(variable.value)} /> : variable.type === "datetime" ? <input aria-label={t("resources.variableDefaultValue")} className={fieldClass} disabled={readOnly} onChange={(event) => onChange({ value: event.target.value })} placeholder="2026-08-19T12:30:00Z" type="text" value={String(variable.value)} /> : <CodeSurface
+              ariaLabel={t("resources.variableDefaultValue")}
               className="h-32 border border-[#c6d4d4]"
-              key={`${variable.type}:${variable.readonly ? "readonly" : "editable"}`}
+              key={`${variable.type}:${readOnly ? "readonly" : "editable"}`}
               language={variable.type === "prompt_template" ? "Jinja2" : "Markdown"}
               lineNumbers={false}
               lineWrapping
               onChange={(value) => onChange({ value: parseValueText(variable.type, value) })}
               onSave={onSave}
-              readOnly={variable.readonly}
+              readOnly={readOnly}
               statusBar={false}
               value={valueText(variable.value)}
             />}
           </div>
-          <PromptRenderPreview key={`${variable.key}:${variable.type}:${valueText(variable.value)}`} variable={variable} variables={allVariables} />
+          <PromptRenderPreview key={`${variable.key}:${variable.type}`} variable={variable} variables={allVariables} />
           <label className="flex items-center gap-2 text-[11px] text-[#35555a]">
-            <input checked={variable.required} disabled={variable.readonly} onChange={(event) => onChange({ required: event.target.checked })} type="checkbox" />
+            <input checked={variable.required} disabled={readOnly} onChange={(event) => onChange({ required: event.target.checked })} type="checkbox" />
             {t("resources.variableRequired")}
           </label>
           <label className="flex items-center gap-2 text-[11px] text-[#35555a]">
-            <input checked={variable.show_in_status} disabled={variable.readonly} onChange={(event) => onChange({ show_in_status: event.target.checked })} type="checkbox" />
+            <input checked={variable.show_in_status} disabled={readOnly} onChange={(event) => onChange({ show_in_status: event.target.checked })} type="checkbox" />
             {t("resources.variableShowInStatus")}
           </label>
           <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
             {t("resources.variableScope")}
             <select
               className={fieldClass}
-              disabled={variable.readonly}
+              disabled={readOnly}
               onChange={(event) => onChange({ scope: event.target.value as SystemVariableDefinition["scope"] })}
               value={variable.scope ?? "session"}
             >
@@ -509,6 +600,84 @@ function ProjectSettingsPanel({
   const maxToolRoundsValid = validMaxToolRounds(settings.max_tool_rounds);
   const maxRetriesValid = validMaxRetries(settings.llm.max_retries);
   const contextSettingsValid = validContextSettings(settings.context);
+  const activeProfile = settings.llm.profiles.find((profile) => profile.id === settings.llm.active_profile)
+    ?? settings.llm.profiles[0];
+  const updateActiveProfile = (patch: Partial<ProjectLlmProfile>) => {
+    if (!activeProfile) return;
+    const profiles = settings.llm.profiles.map((profile) => profile.id === activeProfile.id
+      ? { ...profile, ...patch }
+      : profile);
+    onChange({
+      ...settings,
+      llm: {
+        ...settings.llm,
+        ...patch,
+        active_profile: activeProfile.id,
+        profiles,
+      },
+    });
+  };
+  const selectProfile = (id: string) => {
+    const profile = settings.llm.profiles.find((candidate) => candidate.id === id);
+    if (!profile) return;
+    onChange({
+      ...settings,
+      llm: {
+        ...settings.llm,
+        ...profile,
+        api_key: "",
+        api_key_configured: Boolean(profile.api_key_configured),
+        active_profile: profile.id,
+      },
+    });
+    setShowApiKey(false);
+  };
+  const addProfile = () => {
+    let index = settings.llm.profiles.length + 1;
+    let id = `profile-${index}`;
+    while (settings.llm.profiles.some((profile) => profile.id === id)) {
+      index += 1;
+      id = `profile-${index}`;
+    }
+    const profile: ProjectLlmProfile = {
+      id,
+      name: `Profile ${index}`,
+      provider: activeProfile?.provider ?? "custom",
+      model: activeProfile?.model ?? "",
+      base_url: activeProfile?.base_url ?? "",
+      protocol: activeProfile?.protocol ?? "responses",
+      max_retries: activeProfile?.max_retries ?? 3,
+    };
+    onChange({
+      ...settings,
+      llm: {
+        ...settings.llm,
+        ...profile,
+        api_key: "",
+        api_key_configured: false,
+        active_profile: id,
+        profiles: [...settings.llm.profiles, profile],
+      },
+    });
+    setShowApiKey(false);
+  };
+  const removeProfile = () => {
+    if (!activeProfile || settings.llm.profiles.length <= 1) return;
+    const profiles = settings.llm.profiles.filter((profile) => profile.id !== activeProfile.id);
+    const next = profiles[0];
+    onChange({
+      ...settings,
+      llm: {
+        ...settings.llm,
+        ...next,
+        api_key: "",
+        api_key_configured: Boolean(next.api_key_configured),
+        active_profile: next.id,
+        profiles,
+      },
+    });
+    setShowApiKey(false);
+  };
   const fieldClass = "h-8 border border-[#c6d4d4] bg-white px-2 font-mono text-xs text-[#294247] outline-none focus:border-[#0c766e] focus:ring-1 focus:ring-[#0c766e]";
   return (
     <section className="grid h-full min-h-0 grid-rows-[34px_1fr] bg-white">
@@ -629,15 +798,73 @@ function ProjectSettingsPanel({
                 {testingLlm ? t("resources.testingLlm") : t("resources.testLlm")}
               </button>
             </div>
+            <div className="mt-3 flex max-w-xl items-end gap-2 border border-[#cbd8d9] bg-[#f6f9f8] p-2">
+              <label className="grid min-w-0 flex-1 gap-1 text-[10px] font-semibold text-[#536d72]">
+                {t("resources.llmProfile")}
+                <select
+                  aria-label={t("resources.llmProfile")}
+                  className={fieldClass}
+                  disabled={settings.llm.profiles.length === 0}
+                  onChange={(event) => selectProfile(event.target.value)}
+                  value={activeProfile?.id ?? ""}
+                >
+                  {settings.llm.profiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>{profile.name} · {profile.provider} · {profile.model}</option>
+                  ))}
+                </select>
+              </label>
+              <button
+                aria-label={t("resources.addLlmProfileAccessible")}
+                className="grid h-8 w-8 shrink-0 place-items-center border border-[#8aafab] bg-white text-[#0c655f] hover:bg-[#edf6f4] disabled:cursor-not-allowed disabled:text-[#9babab]"
+                onClick={addProfile}
+                title={t("resources.addLlmProfile")}
+                type="button"
+              >
+                <Plus aria-hidden="true" size={14} />
+              </button>
+              <button
+                aria-label={t("resources.removeLlmProfileAccessible")}
+                className="grid h-8 w-8 shrink-0 place-items-center border border-[#d5aaa5] bg-white text-[#9b3d35] hover:bg-[#fff3f1] disabled:cursor-not-allowed disabled:text-[#c3aaaa]"
+                disabled={settings.llm.profiles.length <= 1}
+                onClick={removeProfile}
+                title={t("resources.removeLlmProfile")}
+                type="button"
+              >
+                <Trash2 aria-hidden="true" size={14} />
+              </button>
+            </div>
+            {activeProfile && (
+              <p className="mt-1.5 max-w-xl text-[10px] text-[#718488]">
+                {t("resources.llmProfileHelp", { provider: activeProfile.provider, model: activeProfile.model })}
+              </p>
+            )}
             <div className="mt-3 grid max-w-xl grid-cols-2 gap-3">
+              <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
+                {t("resources.llmProvider")}
+                <select
+                  className={fieldClass}
+                  onChange={(event) => updateActiveProfile({ provider: event.target.value as ProjectLlmProfile["provider"] })}
+                  value={activeProfile?.provider ?? "custom"}
+                >
+                  <option value="openai">OpenAI</option>
+                  <option value="ollama">Ollama</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
+                {t("resources.llmProfileName")}
+                <input
+                  className={fieldClass}
+                  onChange={(event) => updateActiveProfile({ name: event.target.value })}
+                  value={activeProfile?.name ?? ""}
+                />
+              </label>
               <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
                 {t("resources.llmModel")}
                 <input
                   className={fieldClass}
-                  onChange={(event) => onChange({
-                    ...settings,
-                    llm: { ...settings.llm, model: event.target.value },
-                  })}
+                  onChange={(event) => updateActiveProfile({ model: event.target.value })}
                   value={settings.llm.model}
                 />
               </label>
@@ -645,13 +872,7 @@ function ProjectSettingsPanel({
                 {t("resources.llmProtocol")}
                 <select
                   className={fieldClass}
-                  onChange={(event) => onChange({
-                    ...settings,
-                    llm: {
-                      ...settings.llm,
-                      protocol: event.target.value as ProjectSettings["llm"]["protocol"],
-                    },
-                  })}
+                  onChange={(event) => updateActiveProfile({ protocol: event.target.value as ProjectSettings["llm"]["protocol"] })}
                   value={settings.llm.protocol}
                 >
                   <option value="responses">Responses API</option>
@@ -663,10 +884,7 @@ function ProjectSettingsPanel({
                 {t("resources.llmBaseUrl")}
                 <input
                   className={fieldClass}
-                  onChange={(event) => onChange({
-                    ...settings,
-                    llm: { ...settings.llm, base_url: event.target.value },
-                  })}
+                  onChange={(event) => updateActiveProfile({ base_url: event.target.value })}
                   type="url"
                   value={settings.llm.base_url}
                 />
@@ -678,10 +896,7 @@ function ProjectSettingsPanel({
                     autoComplete="new-password"
                     className={`${fieldClass} w-full pr-9`}
                     id="project-llm-api-key"
-                    onChange={(event) => onChange({
-                      ...settings,
-                      llm: { ...settings.llm, api_key: event.target.value },
-                    })}
+                    onChange={(event) => updateActiveProfile({ api_key: event.target.value })}
                     placeholder={settings.llm.api_key_configured
                       ? t("resources.llmApiKeyConfigured")
                       : t("resources.llmApiKeyPlaceholder")}
@@ -704,10 +919,7 @@ function ProjectSettingsPanel({
                 <input
                   aria-invalid={!maxRetriesValid}
                   className={fieldClass}
-                  onChange={(event) => onChange({
-                    ...settings,
-                    llm: { ...settings.llm, max_retries: Number(event.target.value) },
-                  })}
+                  onChange={(event) => updateActiveProfile({ max_retries: Number(event.target.value) })}
                   type="number"
                   value={settings.llm.max_retries}
                 />
@@ -843,6 +1055,7 @@ export default function ResourcesWorkspace({
   const [query, setQuery] = useState("");
   const [systemVariables, setSystemVariables] = useState<SystemVariableDefinition[]>([]);
   const [selectedSystemVariableKey, setSelectedSystemVariableKey] = useState<string>();
+  const [allowReadonlyChanges, setAllowReadonlyChanges] = useState(false);
   const [systemVariablesDirty, setSystemVariablesDirty] = useState(false);
   const systemVariablesDirtyRef = useRef(false);
   const [settings, setSettings] = useState<ProjectSettings>({
@@ -850,12 +1063,23 @@ export default function ResourcesWorkspace({
     max_messages: 20,
     max_tool_rounds: 8,
     llm: {
+      provider: "custom",
       model: "",
       base_url: "",
       protocol: "responses",
       max_retries: 3,
       api_key: "",
       api_key_configured: false,
+      active_profile: "default",
+      profiles: [{
+        id: "default",
+        name: "Default",
+        provider: "custom",
+        model: "",
+        base_url: "",
+        protocol: "responses",
+        max_retries: 3,
+      }],
     },
     harness_policy: {
       experience_top_k: 3,
@@ -885,12 +1109,13 @@ export default function ResourcesWorkspace({
     ]).then(([variablesResource, loadedSettings]) => {
       if (cancelled || systemVariablesDirtyRef.current) return;
       setSystemVariables(variablesResource.variables);
+      setAllowReadonlyChanges(false);
       setSelectedSystemVariableKey((current) =>
         current && variablesResource.variables.some((variable) => variable.key === current)
           ? current
           : variablesResource.variables[0]?.key,
       );
-      setSettings(loadedSettings);
+      setSettings(normalizeProjectSettings(loadedSettings));
       setLlmTestState(null);
       setResourceError(null);
     }).catch((error: unknown) => {
@@ -924,14 +1149,20 @@ export default function ResourcesWorkspace({
   );
   const selectedSystemVariable = systemVariables[selectedSystemVariableIndex];
 
-  const updateSystemVariable = (changes: Partial<SystemVariableDefinition>) => {
-    if (selectedSystemVariable?.readonly) return;
+  const updateSystemVariable = (changes: Partial<SystemVariableDefinition>, force = false) => {
+    if (selectedSystemVariable?.readonly && !allowReadonlyChanges && !force) return;
     setSystemVariables((current) => current.map((variable, index) =>
       index === selectedSystemVariableIndex ? { ...variable, ...changes } : variable,
     ));
     if (typeof changes.key === "string") setSelectedSystemVariableKey(changes.key);
     systemVariablesDirtyRef.current = true;
     setSystemVariablesDirty(true);
+  };
+
+  const toggleSystemVariableReadonly = () => {
+    if (!selectedSystemVariable || selectedSystemVariable.key === "sys_message" || selectedSystemVariable.key === "cache") return;
+    if (selectedSystemVariable.readonly) setAllowReadonlyChanges(true);
+    updateSystemVariable({ readonly: !selectedSystemVariable.readonly }, true);
   };
 
   const addSystemVariable = () => {
@@ -955,13 +1186,33 @@ export default function ResourcesWorkspace({
     setSystemVariablesDirty(true);
   };
 
-  const deleteSystemVariable = () => {
-    if (selectedSystemVariable?.readonly) return;
-    const next = systemVariables.filter((variable) => variable.key !== selectedSystemVariable?.key);
-    setSystemVariables(next);
-    setSelectedSystemVariableKey(next[Math.max(0, selectedSystemVariableIndex - 1)]?.key);
-    systemVariablesDirtyRef.current = true;
-    setSystemVariablesDirty(true);
+  const deleteSystemVariable = async () => {
+    const variable = selectedSystemVariable;
+    if (!variable || (variable.readonly && !allowReadonlyChanges) || saving) return;
+    setSaving(true);
+    try {
+      const result = await resourceRequest<{
+        key: string;
+        references: SystemVariableReference[];
+      }>(projectPath, `system-variables/${encodeURIComponent(variable.key)}/references`);
+      if (result.references.length > 0) {
+        const detail = result.references
+          .map((reference) => `${reference.path} (${reference.count})`)
+          .join(", ");
+        setResourceError(t("resources.variableDeleteReferenced", { key: variable.key, references: detail }));
+        return;
+      }
+      const next = systemVariables.filter((item) => item.key !== variable.key);
+      setSystemVariables(next);
+      setSelectedSystemVariableKey(next[Math.max(0, selectedSystemVariableIndex - 1)]?.key);
+      systemVariablesDirtyRef.current = true;
+      setSystemVariablesDirty(true);
+      setResourceError(null);
+    } catch (error) {
+      setResourceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const saveSystemVariables = async () => {
@@ -970,6 +1221,7 @@ export default function ResourcesWorkspace({
     try {
       const saved = await resourceRequest<SystemVariablesResource>(projectPath, "system-variables", {
         version: 1,
+        allow_readonly_changes: allowReadonlyChanges,
         variables: systemVariables,
       });
       setSystemVariables(saved.variables);
@@ -980,6 +1232,7 @@ export default function ResourcesWorkspace({
       );
       systemVariablesDirtyRef.current = false;
       setSystemVariablesDirty(false);
+      setAllowReadonlyChanges(false);
       setResourceError(null);
     } catch (error) {
       setResourceError(error instanceof Error ? error.message : String(error));
@@ -1002,16 +1255,27 @@ export default function ResourcesWorkspace({
         max_messages: settings.max_messages,
         max_tool_rounds: settings.max_tool_rounds,
         llm: {
+          provider: settings.llm.provider,
           model: settings.llm.model,
           base_url: settings.llm.base_url,
           protocol: settings.llm.protocol,
           max_retries: settings.llm.max_retries,
+          active_profile: settings.llm.active_profile,
+          profiles: settings.llm.profiles.map((profile) => ({
+            id: profile.id,
+            name: profile.name,
+            provider: profile.provider,
+            model: profile.model,
+            base_url: profile.base_url,
+            protocol: profile.protocol,
+            max_retries: profile.max_retries,
+          })),
           ...(settings.llm.api_key ? { api_key: settings.llm.api_key } : {}),
         },
         harness_policy: settings.harness_policy,
         context: settings.context,
       });
-      setSettings(saved);
+      setSettings(normalizeProjectSettings(saved));
       setSettingsDirty(false);
       setResourceError(null);
     } catch (error) {
@@ -1031,6 +1295,7 @@ export default function ResourcesWorkspace({
         model: string;
         duration_ms: number;
       }>(projectPath, "project-settings/llm/test", {
+        provider: settings.llm.provider,
         model: settings.llm.model,
         base_url: settings.llm.base_url,
         protocol: settings.llm.protocol,
@@ -1110,6 +1375,10 @@ export default function ResourcesWorkspace({
         <ProjectFilesWorkspace divider={catalogDivider} key={projectPath} projectPath={projectPath} />
       )}
 
+      {activeSection === "prompts" && (
+        <ProjectPromptsWorkspace divider={catalogDivider} key={`prompts:${projectPath}`} projectPath={projectPath} />
+      )}
+
       {activeSection === "version-control" && (
         <GitResourceWorkspace divider={catalogDivider} projectPath={projectPath} />
       )}
@@ -1151,11 +1420,13 @@ export default function ResourcesWorkspace({
             {filteredSystemVariables.map(({ variable, index }) => (
               <DefinitionListItem
                 key={`${variable.key}-${index}`}
-                metadata={variable.readonly
-                  ? t("resources.readOnly")
-                  : variable.scope === "project"
-                    ? t("resources.variableScopeProject")
-                  : variable.required ? t("resources.required") : t("resources.optional")}
+                metadata={variable.key === "sys_message" || variable.key === "cache"
+                  ? t("resources.runtimeManaged")
+                  : variable.readonly
+                    ? t("resources.readOnly")
+                    : variable.scope === "project"
+                      ? t("resources.variableScopeProject")
+                      : variable.required ? t("resources.required") : t("resources.optional")}
                 name={variable.key}
                 onSelect={() => setSelectedSystemVariableKey(variable.key)}
                 selected={selectedSystemVariableKey === variable.key}
@@ -1172,8 +1443,9 @@ export default function ResourcesWorkspace({
             <SystemVariableDetails
               dirty={systemVariablesDirty && !saving}
               onChange={updateSystemVariable}
-              onDelete={deleteSystemVariable}
+              onDelete={() => void deleteSystemVariable()}
               onSave={() => void saveSystemVariables()}
+              onToggleReadonly={toggleSystemVariableReadonly}
               variable={selectedSystemVariable}
               variables={systemVariables}
             />

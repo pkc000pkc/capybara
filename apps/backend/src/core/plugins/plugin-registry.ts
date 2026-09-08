@@ -24,6 +24,7 @@ import type {
   ToolPackageResource,
   ToolResourceModule,
 } from '#core/resources/types'
+import { variableReferenceCount } from '#core/system-variable-references'
 
 const PLUGIN_MANIFEST_FILE = 'capybara.plugin.json'
 const SEMVER = '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$'
@@ -324,7 +325,10 @@ export class PluginRegistry {
         keys.set(variable.key, plugin.pluginId)
         variables.push({
           ...variable,
-          readonly: true,
+          // Preserve the plugin declaration. Session-scoped plugin variables
+          // (for example correction_context) must be writable by runtime Hooks;
+          // project-scoped variables remain protected by the mutation service.
+          readonly: variable.readonly,
           source: 'plugin',
           owner: plugin.pluginId,
         })
@@ -705,14 +709,4 @@ export function isPluginManifest(value: unknown): value is PluginManifest {
   return isObject(value) && value.schemaVersion === 1 && typeof value.id === 'string'
 }
 
-export function variableReferenceCount(content: string, key: string): number {
-  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const patterns = [
-    new RegExp(`(?<![A-Za-z0-9_.])variables\\.builtin\\.prompts\\.${escaped}(?![A-Za-z0-9_])`, 'g'),
-    new RegExp(`(?<![A-Za-z0-9_.])variables\\.builtin\\.variables\\.${escaped}(?![A-Za-z0-9_])`, 'g'),
-    new RegExp(`(?<![A-Za-z0-9_.])builtin\\.prompts\\.${escaped}(?![A-Za-z0-9_])`, 'g'),
-    new RegExp(`(?<![A-Za-z0-9_.])builtin\\.variables\\.${escaped}(?![A-Za-z0-9_])`, 'g'),
-    new RegExp(`(?<![A-Za-z0-9_.])prompts\\.${escaped}(?![A-Za-z0-9_])`, 'g'),
-  ]
-  return patterns.reduce((count, pattern) => count + [...content.matchAll(pattern)].length, 0)
-}
+export { variableReferenceCount } from '#core/system-variable-references'

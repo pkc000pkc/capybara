@@ -43,10 +43,12 @@ import {
 import type { HookExperienceCandidate, HookTrainingContext } from '#core/hooks/types'
 import { HookRegistry } from '#core/hooks/hook-registry'
 import { ProjectResources } from '#core/project-resources'
+import { PluginRegistry } from '#core/plugins/plugin-registry'
 import type { JsonObject } from '#protocol/runtime-protocol'
 
 const DEFAULT_TIMEOUT_MS = 15 * 60_000
-const DEFAULT_MAX_CORRECTION_ATTEMPTS = 4
+const MAX_TIMEOUT_MS = 3 * 60 * 60_000
+const DEFAULT_MAX_CORRECTION_ATTEMPTS = 5
 const DEFAULT_MAX_CORRECTION_TOKENS = 40_000
 const DEFAULT_MAX_CORRECTION_WALL_TIME_MS = 20 * 60_000
 const DEFAULT_MAX_REPLAY_REVISIONS = 2
@@ -101,10 +103,6 @@ function binding(value: unknown, field: string, required: boolean): TrainingHook
 
 function failure(error: unknown, code = 'TRAINING_FAILED'): ExperimentFailure {
   return { code, message: error instanceof Error ? error.message : String(error) }
-}
-
-class TrainingReferenceError extends Error {
-  readonly code = 'TRAINING_REFERENCE_UNAVAILABLE'
 }
 
 class CorrectionBudgetError extends Error {
@@ -188,6 +186,9 @@ export class TrainingManager {
     if (trainDatasetId === testDatasetId) throw new Error('training and testing datasets must be different')
     const trainDataset = this.datasets.get(trainDatasetId)
     const testDataset = this.datasets.get(testDatasetId)
+    if (trainDataset.tags.some((tag) => tag.toLowerCase() === 'closed-book-eval')) {
+      throw new Error(`dataset is evaluation-only and cannot be used for training: ${trainDataset.id}`)
+    }
     const trainLimit = boundedInteger(input.trainLimit, MAX_TRAINING_CASES, MAX_TRAINING_CASES, 'trainLimit')
     const testLimit = boundedInteger(input.testLimit, MAX_TEST_CASES, MAX_TEST_CASES, 'testLimit')
     const learningMode = (input.learningMode ?? 'review') as TrainingLearningMode
@@ -205,9 +206,9 @@ export class TrainingManager {
     if (sourceRun && !['ready_to_freeze', 'ready_for_test', 'completed'].includes(sourceRun.status)) {
       throw new Error('variable source run must have completed training')
     }
-    const timeoutMs = boundedInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, 60 * 60_000, 'timeoutMs')
+    const timeoutMs = boundedInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, 'timeoutMs')
     const maxCorrectionAttempts = boundedInteger(
-      input.maxCorrectionAttempts, DEFAULT_MAX_CORRECTION_ATTEMPTS, 4, 'maxCorrectionAttempts',
+      input.maxCorrectionAttempts, DEFAULT_MAX_CORRECTION_ATTEMPTS, 5, 'maxCorrectionAttempts',
     )
     const maxCorrectionTokens = boundedInteger(
       input.maxCorrectionTokens, DEFAULT_MAX_CORRECTION_TOKENS, 2_000_000, 'maxCorrectionTokens',
@@ -257,12 +258,12 @@ export class TrainingManager {
     const baselineVariables = sourceRun
       ? (this.store.getSnapshot(sourceRun.id)?.variables ?? this.store.runVariables(sourceRun.id))
       : Object.fromEntries(
-        new ProjectResources(this.projectDir).readSystemVariables().variables
+        new PluginRegistry(this.projectDir).effectiveSystemVariablesState().resource.variables
           .filter((variable) => (
-            variable.scope === 'project'
-            && !variable.readonly
+            variable.scope === 'project' || variable.scope === 'session'
+          ) && !variable.readonly
             && typeof variable.value === 'string'
-          ))
+          )
           .map((variable) => [variable.key, variable.value as string]),
       )
     const run = this.store.createRun({
@@ -727,10 +728,7 @@ export class TrainingManager {
       }
     } catch (error) {
       if (this.stopped) return
-      const problem = failure(
-        error,
-        error instanceof TrainingReferenceError ? error.code : 'TRAINING_FAILED',
-      )
+      const problem = failure(error)
       const currentCaseId = this.store.getRun(id).currentCaseId
       if (currentCaseId) {
         const currentCase = this.store.getCase(currentCaseId)
@@ -856,10 +854,8 @@ export class TrainingManager {
       item.evaluation?.reference,
       item.completedAt ?? item.updatedAt,
     )
-    if (!reference) {
-      throw new TrainingReferenceError(
-        `Training case ${item.sampleId} has no correct answer or available official state reference.`,
-      )
+    if (typeof item.passed !== 'boolean') {
+      throw new Error(`Training case ${item.sampleId} has no success/failure signal.`)
     }
     this.store.setCaseStatus(item.id, 'learning')
     const hookRunner = new LearningHookRunner(this.projectDir, this.experiments.runtimeLlm())
@@ -867,7 +863,7 @@ export class TrainingManager {
       ...item,
       evaluation: {
         ...(item.evaluation ?? { source: 'llm', metrics: {} }),
-        reference,
+        ...(reference ? { reference } : {}),
       },
     }
     const correctionStartedAt = Date.now()
@@ -894,6 +890,11 @@ export class TrainingManager {
       const variableValues = this.store.runVariables(run.id)
       const extraction = await hookRunner.run(
         'after_evaluation', run.config.experienceExtractorHook, context, variableValues,
+        undefined,
+        {
+          referencePolicy: 'hidden',
+          onLlmActivity: (activity) => this.store.recordEvent(run.id, 'hook.llm', { sourceCaseId: item.id, ...activity }),
+        },
       )
       const generated = extraction.experiences.map((candidate) =>
         this.candidate(run, item, run.config.experienceExtractorHook.hookId, candidate))
@@ -1001,7 +1002,10 @@ export class TrainingManager {
           this.hookContext(run, failedItem, 'training', undefined, attempts),
           this.store.runVariables(run.id),
           undefined,
-          { referencePolicy: 'hidden', maxTotalTokens: remainingTokens },
+          {
+            referencePolicy: 'hidden', maxTotalTokens: remainingTokens,
+            onLlmActivity: (activity) => this.store.recordEvent(run.id, 'hook.llm', { sourceCaseId: source.id, ...activity }),
+          },
         )
       } catch (error) {
         const hookUsage = error instanceof LearningHookExecutionError ? error.usage : { ...EMPTY_USAGE }
@@ -1237,6 +1241,8 @@ export class TrainingManager {
               })),
             }, correctionAttempts),
             overrides,
+            undefined,
+            { onLlmActivity: (activity) => this.store.recordEvent(run.id, 'hook.llm', { sourceCaseId: source.id, candidateId: candidate.id, ...activity }) },
           )
           if (execution.admission) decisions.push(execution.admission)
         }
@@ -1414,6 +1420,11 @@ export class TrainingManager {
     candidate?: HookTrainingContext['candidate'],
     correctionAttempts: TrainingCorrectionAttempt[] = [],
   ): Omit<HookTrainingContext, 'parameters'> {
+    // Only actor-visible messages enter learning. Never forward the complete trace:
+    // it also contains scoring prompts, reference answers and adapter evaluation.
+    const transcript = item.experimentRunId && item.experimentCaseId
+      ? this.experiments.case(item.experimentRunId, item.experimentCaseId).trace?.actorMessages
+      : undefined
     return {
       runId: run.id,
       phase,
@@ -1427,6 +1438,7 @@ export class TrainingManager {
         expectedTools: item.expectedTools,
         actualTools: item.actualTools,
         toolCalls: item.toolCalls,
+        ...(transcript ? { transcript } : {}),
       },
       evaluation: {
         passed: item.passed === true,

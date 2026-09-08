@@ -15,6 +15,35 @@ import { initializeProjectDirectory } from '#core/project-initializer'
 import { ProjectResources } from '#core/project-resources'
 import type { RuntimeLlm } from '#core/runtime-loop'
 
+test('training rejects datasets marked as closed-book evaluation data', async (context) => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-evaluation-only-dataset-'))
+  let manager: TrainingManager | undefined
+  context.after(async () => {
+    await manager?.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  })
+  const datasets = new DatasetStore(projectDir)
+  const train = datasets.create({
+    name: 'Private validation benchmark',
+    storage: 'jsonl',
+    path: 'datasets/private-validation.jsonl',
+    tags: ['closed-book-eval'],
+    scoringPrompt: '',
+  })
+  const testDataset = datasets.create({
+    name: 'Held out fixture',
+    storage: 'jsonl',
+    path: 'datasets/held-out.jsonl',
+    tags: [],
+    scoringPrompt: '',
+  })
+  manager = new TrainingManager(projectDir, undefined as unknown as ExperimentManager)
+  assert.throws(() => manager.create({
+    trainDatasetId: train.id,
+    testDatasetId: testDataset.id,
+  }), /evaluation-only and cannot be used for training/)
+})
+
 const EXPERIENCE_HOOK = `import { defineHook } from "@capybara-agent/sdk";
 
 export default defineHook({
@@ -28,10 +57,16 @@ export default defineHook({
   schedule: { priority: 1, timeoutMs: 2000, onError: "continue" },
   permissions: { variables: "patch" },
   run({ variables, training }) {
+    if (training.case.expectedAnswer || training.case.thinking || training.case.expectedTools.length) {
+      throw new Error("experience Hook received hidden expected-case fields");
+    }
+    if (training.evaluation.reference || training.evaluation.details || Object.keys(training.evaluation.metrics).length) {
+      throw new Error("experience Hook received hidden evaluator evidence");
+    }
     const before = variables.builtin.prompts.agent_identity;
     return { experiences: [{
       summary: "Persist a replayed rule",
-      rationale: "Integration test with " + training.case.toolCalls.length + " tool calls and " + training.evaluation.reference.kind + " reference",
+      rationale: "Integration test with " + training.case.toolCalls.length + " observable tool calls",
       patches: [{
         variableName: "agent_identity",
         unifiedDiff: [
@@ -70,7 +105,7 @@ export default defineHook({
   enabled: true,
   checkpoint: "after_evaluation",
   trigger() { return true; },
-  schedule: { priority: 1, timeoutMs: 100, onError: "retry" },
+  schedule: { priority: 1, timeoutMs: 500, onError: "retry" },
   permissions: { llm: "project" },
   async run({ llm }) {
     await llm.responses.create({ input: "learning-hook-probe" });
@@ -103,6 +138,9 @@ export default defineHook({
     }
     if (training.failureEvidence.actualAnswer !== training.case.actualAnswer) {
       throw new Error("correction Hook received inconsistent observable evidence");
+    }
+    if (!training.case.transcript?.some((message) => message.role === "assistant" && message.content)) {
+      throw new Error("correction Hook did not receive the actor's observable execution transcript");
     }
     if (training.correctionAttempts?.some((attempt) => ![
       "The clean correction attempt passed.",
@@ -374,7 +412,7 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     assert.equal(learnedVariable?.changed, true)
     assert.equal(learnedVariable?.sourceCaseIds.length, 1)
     assert.equal(training.list().some((item) => item.id === created.id), true)
-    assert.match(training.experiences(created.id)[0]?.rationale ?? '', /text reference/)
+    assert.match(training.experiences(created.id)[0]?.rationale ?? '', /observable tool calls/)
 
     const snapshot = training.freeze(created.id)
     assert.match(snapshot.variables.agent_identity ?? '', /learned replay rule/)
@@ -588,7 +626,7 @@ test('official state references hydrate before training Hooks without changing s
   }
 })
 
-test('training rejects after-evaluation Hooks when no correct answer or official state reference exists', async () => {
+test('training accepts a failure signal without a reference and marks a case unresolved when no correction Hook exists', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-training-no-reference-'))
   initializeProjectDirectory(projectDir)
   fs.mkdirSync(path.join(projectDir, '.capybara', 'hooks'), { recursive: true })
@@ -630,10 +668,9 @@ test('training rejects after-evaluation Hooks when no correct answer or official
       experienceExtractorHook: { hookId: 'empty-extractor', parameters: {} },
       timeoutMs: 10_000,
     })
-    const failed = await waitFor(training, created.id, ['failed'])
-    assert.equal(failed.failure?.code, 'TRAINING_REFERENCE_UNAVAILABLE')
-    assert.match(failed.failure?.message ?? '', /no correct answer or available official state reference/)
-    assert.equal(training.cases(created.id).find((item) => item.phase === 'training')?.status, 'error')
+    const completed = await waitFor(training, created.id, ['ready_to_freeze', 'failed'])
+    assert.equal(completed.status, 'ready_to_freeze', completed.failure?.message ?? 'training did not finish')
+    assert.equal(training.cases(created.id).find((item) => item.phase === 'training')?.status, 'unresolved')
     assert.equal(training.experiences(created.id).length, 0)
   } finally {
     await training.close()
@@ -784,7 +821,7 @@ test('Hook failures mark the evaluated case retryable and resume without rerunni
       timeoutMs: 10_000,
     })
     const failed = await waitFor(training, created.id, ['failed'])
-    assert.match(failed.failure?.message ?? '', /Hook exceeded 100 ms/)
+    assert.match(failed.failure?.message ?? '', /Hook exceeded 500 ms/)
     const failedCase = training.cases(created.id).find((item) => item.phase === 'training')
     assert.equal(failedCase?.status, 'error')
     assert.equal(failedCase?.passed, true)
@@ -806,15 +843,17 @@ test('Hook failures mark the evaluated case retryable and resume without rerunni
   }
 })
 
-test('automatic training corrects in clean environments, preserves the chain, and applies only replay-admitted memory', async () => {
+for (const withReference of [true, false]) {
+test(`automatic training corrects in clean environments and applies replay-admitted memory (${withReference ? 'hidden reference' : 'signal only, no answer'})`, async () => {
+  const successAttempt = withReference ? 2 : 5
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-training-correction-chain-'))
   initializeProjectDirectory(projectDir)
   configureCorrectionFixture(projectDir)
   const datasets = new DatasetStore(projectDir)
   const train = datasets.create({ name: 'train', storage: 'jsonl', path: 'datasets/train.jsonl', tags: ['train'], scoringPrompt: '' })
   const heldOut = datasets.create({ name: 'test', storage: 'jsonl', path: 'datasets/test.jsonl', tags: ['test'], scoringPrompt: '' })
-  datasets.createRecord(train.id, { question: 'correct this state task', thinking: '', answer: 'done' })
-  datasets.createRecord(heldOut.id, { question: 'held-out', thinking: '', answer: 'done' })
+  datasets.createRecord(train.id, { question: 'correct this state task', thinking: '', answer: withReference ? 'done' : '' })
+  datasets.createRecord(heldOut.id, { question: 'held-out', thinking: '', answer: withReference ? 'done' : '' })
   git(projectDir, 'init', '--initial-branch=main')
   git(projectDir, 'config', 'user.name', 'Capybara Test')
   git(projectDir, 'config', 'user.email', 'capybara@example.invalid')
@@ -824,7 +863,7 @@ test('automatic training corrects in clean environments, preserves the chain, an
   const correctionLlm: RuntimeLlm = {
     async chat(request) {
       const prompt = request.messages.map((message) => message.content).join('\n')
-      const passed = prompt.includes('attempt-2') || prompt.includes('learned replay rule')
+      const passed = prompt.includes(`attempt-${successAttempt}`) || prompt.includes('learned replay rule')
       return {
         provider: 'custom',
         model: 'correction-test-model',
@@ -851,7 +890,7 @@ test('automatic training corrects in clean environments, preserves the chain, an
       pauseOnFailure: true,
       correctionHook: { hookId: 'iterative-correction', parameters: {} },
       experienceExtractorHook: { hookId: 'correction-extractor', parameters: {} },
-      maxCorrectionAttempts: 3,
+      maxCorrectionAttempts: 5,
       maxCorrectionTokens: 10_000,
       maxCorrectionWallTimeMs: 60_000,
       maxReplayRevisions: 2,
@@ -862,28 +901,35 @@ test('automatic training corrects in clean environments, preserves the chain, an
     const source = training.cases(created.id).find((item) => item.phase === 'training')
     assert.equal(source?.status, 'completed')
     assert.equal(source?.passed, false, 'the immutable source evaluation remains visible')
+    if (!withReference) {
+      assert.equal(source?.expectedAnswer, '')
+      assert.equal(source?.evaluation?.reference, undefined)
+    }
     const attempts = training.correctionAttempts(created.id, source?.id)
-    assert.equal(attempts.length, 2)
-    assert.deepEqual(attempts.map((attempt) => attempt.variableOverrides.correction_context), ['attempt-1', 'attempt-2'])
-    assert.deepEqual(attempts.map((attempt) => attempt.passed), [false, true])
-    assert.deepEqual(attempts.map((attempt) => attempt.terminalReason), [undefined, 'succeeded'])
-    assert.equal(new Set(attempts.map((attempt) => attempt.experimentRunId)).size, 2)
+    assert.equal(attempts.length, successAttempt)
+    assert.deepEqual(attempts.map((attempt) => attempt.variableOverrides.correction_context),
+      Array.from({ length: successAttempt }, (_, index) => `attempt-${index + 1}`))
+    assert.deepEqual(attempts.map((attempt) => attempt.passed),
+      Array.from({ length: successAttempt }, (_, index) => index === successAttempt - 1))
+    assert.equal(attempts.at(-1)?.terminalReason, 'succeeded')
+    assert.equal(new Set(attempts.map((attempt) => attempt.experimentRunId)).size, successAttempt)
     assert.equal(attempts.every((attempt) => attempt.experimentRunId !== source?.experimentRunId), true)
     const candidates = training.experiences(created.id)
     assert.equal(candidates.length, 1)
     assert.equal(candidates[0]?.status, 'applied')
     assert.equal(candidates[0]?.replayPassed, true)
-    assert.match(candidates[0]?.rationale ?? '', /after 2 corrections/)
+    assert.match(candidates[0]?.rationale ?? '', new RegExp(`after ${successAttempt} corrections`))
     assert.match(training.store.runVariables(created.id).agent_identity ?? '', /learned replay rule revised/)
     const admissionEvents = training.analysis(created.id).events.filter((event) => event.type === 'admission.decided')
     assert.deepEqual(admissionEvents.map((event) => (event.payload as { verdict: string }).verdict), ['revise', 'accept'])
-    assert.equal(training.analysis(created.id).correctionAttempts.length, 2)
+    assert.equal(training.analysis(created.id).correctionAttempts.length, successAttempt)
   } finally {
     await training.close()
     await experiments.close()
     fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
+}
 
 test('automatic training exhausts correction limits without human review or long-term memory', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-training-correction-exhaustion-'))
@@ -900,8 +946,10 @@ test('automatic training exhausts correction limits without human review or long
   git(projectDir, 'add', '.')
   git(projectDir, 'commit', '-m', 'fixture')
 
+  let actorCalls = 0
   const failedLlm: RuntimeLlm = {
     async chat() {
+      actorCalls += 1
       return {
         provider: 'custom', model: 'exhaustion-test-model',
         text: JSON.stringify({ status: 'completed', content: 'wrong' }),
@@ -926,7 +974,6 @@ test('automatic training exhausts correction limits without human review or long
       pauseOnFailure: true,
       correctionHook: { hookId: 'iterative-correction', parameters: {} },
       experienceExtractorHook: { hookId: 'correction-extractor', parameters: {} },
-      maxCorrectionAttempts: 2,
       maxCorrectionTokens: 10_000,
       maxCorrectionWallTimeMs: 60_000,
       maxReplayRevisions: 1,
@@ -937,8 +984,10 @@ test('automatic training exhausts correction limits without human review or long
     const source = training.cases(created.id).find((item) => item.phase === 'training')
     assert.equal(source?.status, 'unresolved')
     const attempts = training.correctionAttempts(created.id, source?.id)
-    assert.equal(attempts.length, 2)
-    assert.equal(attempts[1]?.terminalReason, 'max_attempts')
+    assert.equal(created.config.maxCorrectionAttempts, 5)
+    assert.equal(attempts.length, 5)
+    assert.equal(actorCalls, 6, 'one initial execution plus at most five immediate correction retries')
+    assert.equal(attempts[4]?.terminalReason, 'max_attempts')
     assert.equal(training.experiences(created.id).length, 0)
     assert.equal(training.analysis(created.id).experiences.generated, 0)
     assert.equal(training.analysis(created.id).events.some((event) => event.type === 'correction.unresolved'), true)

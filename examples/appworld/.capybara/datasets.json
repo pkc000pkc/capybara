@@ -3,19 +3,20 @@
   "items": [
     {
       "id": "appworld-dev-d1-tasks-1",
-      "name": "AppWorld dev task smoke",
+      "name": "AppWorld dev task smoke 1",
       "storage": "huggingface",
       "path": "datasets/appworld-dev-d1-tasks-1",
-      "version": 1,
+      "version": 2,
       "tags": [
         "appworld",
         "dev",
+        "closed-book-eval",
         "state-evaluated",
         "smoke-only"
       ],
       "scoringPrompt": "",
       "createdAt": "2026-07-30T13:40:19.737908Z",
-      "updatedAt": "2026-07-30T13:40:19.737908Z"
+      "updatedAt": "2026-09-01T09:33:02.534099Z"
     },
     {
       "id": "appworld-dev-d1-scenarios-1",

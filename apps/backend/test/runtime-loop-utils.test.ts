@@ -71,8 +71,19 @@ test('runtime utility JSON Patch is immutable and rejects unsafe paths', () => {
 
 test('runtime utility validates cache shape and parses model output', () => {
   const cache = emptyRuntimeCache()
+  assert.equal(cache.version, 2)
+  assert.deepEqual(cache.reviews, [])
   assert.doesNotThrow(() => assertRuntimeCache(cache))
+  assert.doesNotThrow(() => assertRuntimeCache({
+    version: 1,
+    summary: '',
+    messages: [],
+    loop: { run_id: '', iteration: 0, tool_round: 0, continuation_round: 0 },
+    compression_count: 0,
+    compressed_at: '',
+  }))
   assert.throws(() => assertRuntimeCache({ ...cache, loop: { ...cache.loop, iteration: -1 } }))
+  assert.throws(() => assertRuntimeCache({ ...cache, reviews: null }))
   assert.deepEqual(parseModelOutput('{"status":"completed","content":"done"}'), {
     status: 'completed',
     content: 'done',

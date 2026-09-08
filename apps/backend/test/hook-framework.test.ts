@@ -5,7 +5,7 @@ import path from 'node:path'
 import { test } from 'node:test'
 
 import { HookRegistry } from '#core/hooks/hook-registry'
-import { HookRunError, HookRunner } from '#core/hooks/hook-runner'
+import { HookRunError, HookRunner, type HookLlmActivity } from '#core/hooks/hook-runner'
 import type { HookFixture } from '#core/hooks/types'
 import { initializeProjectDirectory } from '#core/project-initializer'
 import { ProjectResources } from '#core/project-resources'
@@ -291,6 +291,12 @@ test('Runtime installs a generated user Hook and executes it on the next Loop', 
     }),
   }
   const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
+  const activityPhases: string[] = []
+  const unsubscribe = loop.onEvent((event) => {
+    if (event.type === 'runtime.status.updated' && event.payload.activity?.phase) {
+      activityPhases.push(event.payload.activity.phase)
+    }
+  })
   try {
     await runLoopOnce(loop, 'install-generated-hook', 1)
     assert.equal(inspectedAuthoringProtocol, true)
@@ -305,7 +311,9 @@ test('Runtime installs a generated user Hook and executes it on the next Loop', 
     assert.ok(loop.getSnapshot(0).artifacts.items.some(
       (artifact) => artifact.label === 'generated execution',
     ))
+    assert.ok(activityPhases.includes('hook_running'))
   } finally {
+    unsubscribe()
     loop.close()
     fs.rmSync(projectDir, { recursive: true, force: true })
   }
@@ -397,21 +405,28 @@ test('Hook runner evaluates after-Loop triggers and proxies the project LLM', as
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-runner-'))
   const registry = new HookRegistry(projectDir)
   const hook = registry.validateContent('summary-hook', SOURCE)
+  const activity: HookLlmActivity[] = []
   const llm: RuntimeLlm = {
-    chat: async () => ({
+    chat: async (request) => {
+      request.onRetry?.({ phase: 'waiting', attempt: 2, maxAttempts: 5, delayMs: 1000, reason: 'upstream_error' })
+      request.onRetry?.({ phase: 'attempting', attempt: 2, maxAttempts: 5, delayMs: 0, reason: 'upstream_error' })
+      return {
       provider: 'custom',
       model: 'hook-model',
       text: 'durable summary',
       usage: { inputTokens: 8, outputTokens: 3, totalTokens: 11 },
       raw: {},
-    }),
+      }
+    },
     getConfig: () => ({
       provider: 'custom', protocol: 'responses', model: 'hook-model',
       baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
     }),
   }
   try {
-    const result = await new HookRunner(llm).run(hook, fixture())
+    const result = await new HookRunner(llm).run(hook, fixture(), undefined, {
+      onLlmActivity: (event) => activity.push(event),
+    })
     assert.equal(result.matched, true)
     assert.equal(result.result?.patches?.[0]?.op, 'replace')
     assert.equal(result.result?.patches?.[0] && 'value' in result.result.patches[0]
@@ -419,6 +434,40 @@ test('Hook runner evaluates after-Loop triggers and proxies the project LLM', as
       : undefined, 'durable summary')
     assert.equal(result.result?.messages?.length, 2)
     assert.equal(result.usage.totalTokens, 11)
+    assert.deepEqual(activity.map((event) => event.phase), ['waiting', 'retrying', 'waiting', 'completed'])
+    assert.equal(activity[1]?.retry?.delayMs, 1000)
+    assert.equal(activity[1]?.retry?.attempt, 2)
+    assert.equal(new Set(activity.map((event) => event.requestId)).size, 1)
+    assert.ok(activity.every((event) => event.hookId === 'summary-hook' && event.elapsedMs >= 0))
+    assert.ok(!JSON.stringify(activity).includes('durable summary'))
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('Hook model activity reports cancellation once and ignores late provider retries', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-cancel-activity-'))
+  const hook = new HookRegistry(projectDir).validateContent('summary-hook', SOURCE)
+  const controller = new AbortController()
+  const activity: HookLlmActivity[] = []
+  let capturedRequest: Parameters<RuntimeLlm['chat']>[0] | undefined
+  const llm: RuntimeLlm = {
+    chat: async (request) => {
+      capturedRequest = request
+      controller.abort()
+      throw new Error('aborted')
+    },
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'hook-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
+    }),
+  }
+  try {
+    await assert.rejects(new HookRunner(llm).run(hook, fixture(), controller.signal, {
+      onLlmActivity: (event) => activity.push(event),
+    }), /aborted/)
+    capturedRequest?.onRetry?.({ phase: 'waiting', attempt: 2, maxAttempts: -1, delayMs: 5000, reason: 'late' })
+    assert.deepEqual(activity.map((event) => event.phase), ['waiting', 'failed'])
   } finally {
     fs.rmSync(projectDir, { recursive: true, force: true })
   }
@@ -830,6 +879,65 @@ export default defineHook({
       resources.readSystemVariables().variables.find((variable) => variable.key === 'agent_identity')?.value,
       projectValue,
     )
+  } finally {
+    loop.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('permissioned Hook can require one bounded model continuation', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-continuation-'))
+  initializeProjectDirectory(projectDir)
+  fs.writeFileSync(path.join(projectDir, 'hooks', 'review-continuation.ts'), `import { defineHook } from "@capybara-agent/sdk";
+
+export default defineHook({
+  name: "review-continuation",
+  description: "Requires one review continuation.",
+  enabled: true,
+  checkpoint: "after_loop",
+  trigger({ loop, variables }) {
+    return loop.terminal && variables.builtin.cache.reviews.length === 0;
+  },
+  schedule: { priority: 1, timeoutMs: 2000, onError: "continue" },
+  permissions: { variables: "patch", loop: "continue" },
+  run({ loop }) {
+    return {
+      patches: [{ op: "replace", path: "/builtin/cache/reviews", value: [{ run_id: loop.runId, round: 1 }] }],
+      loop: { action: "continue", reason: "Run one independent review." },
+    };
+  },
+});
+`, 'utf8')
+  let calls = 0
+  const llm: RuntimeLlm = {
+    chat: async () => {
+      calls += 1
+      return {
+        provider: 'custom',
+        model: 'hook-model',
+        text: JSON.stringify({ status: 'completed', content: `answer-${calls}` }),
+        usage: { inputTokens: 4, outputTokens: 2, totalTokens: 6 },
+        raw: {},
+      }
+    },
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'hook-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
+    }),
+  }
+  const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
+  try {
+    await runLoopOnce(loop, 'hook-continuation', 1)
+    const snapshot = loop.getSnapshot(0)
+    const cache = snapshot.variables.value.builtin.cache
+    assert.equal(cache.version, 2)
+    if (cache.version !== 2) throw new Error('runtime cache was not upgraded')
+    assert.equal(calls, 2)
+    assert.equal(cache.reviews.length, 1)
+    assert.equal(cache.loop.continuation_round, 1)
+    assert.ok(snapshot.artifacts.items.some(
+      (artifact) => artifact.label === 'Hook requested another model Loop',
+    ))
   } finally {
     loop.close()
     fs.rmSync(projectDir, { recursive: true, force: true })

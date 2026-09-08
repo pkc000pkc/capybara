@@ -111,8 +111,7 @@ export interface RuntimeVariables extends JsonObject {
   }
 }
 
-export interface RuntimeCache extends JsonObject {
-  version: 1
+interface RuntimeCacheBase extends JsonObject {
   summary: string
   messages: JsonValue[]
   loop: {
@@ -124,6 +123,27 @@ export interface RuntimeCache extends JsonObject {
   compression_count: number
   compressed_at: string
 }
+
+export interface RuntimeCacheV1 extends RuntimeCacheBase {
+  version: 1
+}
+
+export interface RuntimeCacheV2 extends RuntimeCacheBase {
+  version: 2
+  task_profile: JsonObject
+  plan: JsonValue[]
+  claims: JsonValue[]
+  evidence: JsonValue[]
+  hypotheses: JsonValue[]
+  contradictions: JsonValue[]
+  reviews: JsonValue[]
+  candidate_answer: string
+  tool_history: JsonValue[]
+  failure_history: JsonValue[]
+  budget: JsonObject
+}
+
+export type RuntimeCache = RuntimeCacheV1 | RuntimeCacheV2
 
 export interface VariablesState {
   revision: number
@@ -556,6 +576,20 @@ export interface RuntimeStatusState {
     cacheUtilization?: number
   }
   loopStatus?: 'idle' | 'running' | 'completed'
+  activity?: {
+    phase:
+      | 'idle'
+      | 'model_preparing'
+      | 'model_waiting'
+      | 'model_retry'
+      | 'model_streaming'
+      | 'model_processing'
+      | 'tool_running'
+      | 'workflow_running'
+      | 'hook_running'
+    label?: string
+    startedAt: string
+  }
   queueDepth: number
   messageCount: number
   variableTokens: Array<{

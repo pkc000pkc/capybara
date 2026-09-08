@@ -77,6 +77,57 @@ test('project settings persist the codex-like model protocol', () => {
   }
 })
 
+test('project settings persist multiple provider profiles and keep their keys in secrets', () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-provider-profiles-'))
+  try {
+    initializeProjectDirectory(projectDir)
+    const resources = new ProjectResources(projectDir)
+    const saved = resources.saveSettings({
+      llm: {
+        active_profile: 'deepseek-main',
+        provider: 'deepseek',
+        model: 'deepseek-chat',
+        base_url: 'https://api.deepseek.com/v1',
+        protocol: 'chat-completions',
+        max_retries: 2,
+        api_key: 'deepseek-key',
+        profiles: [
+          {
+            id: 'deepseek-main',
+            name: 'DeepSeek main',
+            provider: 'deepseek',
+            model: 'deepseek-chat',
+            base_url: 'https://api.deepseek.com/v1',
+            protocol: 'chat-completions',
+            max_retries: 2,
+          },
+          {
+            id: 'ollama-local',
+            name: 'Ollama local',
+            provider: 'ollama',
+            model: 'llama3.2',
+            base_url: 'http://127.0.0.1:11434/v1',
+            protocol: 'responses',
+            max_retries: 0,
+          },
+        ],
+      },
+    })
+    assert.equal(saved.llm.active_profile, 'deepseek-main')
+    assert.equal(saved.llm.provider, 'deepseek')
+    assert.equal(saved.llm.profiles.length, 2)
+    assert.equal(resources.readSettings().llm.profiles[1]?.provider, 'ollama')
+
+    const persisted = JSON.parse(fs.readFileSync(path.join(projectDir, '.capybara', 'config.json'), 'utf8'))
+    assert.equal(persisted.llm.profiles[0].api_key, undefined)
+    assert.equal(persisted.llm.profiles[1].api_key, undefined)
+    const secrets = JSON.parse(fs.readFileSync(path.join(projectDir, '.capybara', 'secrets.json'), 'utf8'))
+    assert.equal(secrets.profiles['deepseek-main'].api_key, 'deepseek-key')
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
 test('project settings accept -1 or any positive integer as the Loop round limit', () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-project-settings-'))
   try {

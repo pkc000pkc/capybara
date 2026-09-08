@@ -18,6 +18,7 @@ export interface HookPermissions {
   artifacts?: 'write'
   hooks?: 'write'
   research?: 'append'
+  loop?: 'continue'
 }
 
 export interface HookResearchEvent {
@@ -98,6 +99,10 @@ export interface HookResult {
     source: string
   }>
   researchEvents?: HookResearchEvent[]
+  loop?: {
+    action: 'continue'
+    reason: string
+  }
 }
 
 export interface HookCorrectionProposal {
@@ -127,6 +132,8 @@ export interface HookExperienceCandidate {
 }
 
 export interface HookTrainingCase {
+  /** Observable actor messages, excluding dataset reasoning and evaluator output. */
+  transcript?: Array<{ role: 'user' | 'assistant'; content: string }>
   id: string
   sampleId: string
   question: string

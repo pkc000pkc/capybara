@@ -2,6 +2,11 @@
 
 This project runs AppWorld through Capybara's project-owned Tool, Skill, Harness, and experiment-adapter interfaces. AppWorld-specific code and dependencies stay in this directory.
 
+The AppWorld guidance layer is packaged as the enabled `appworld-guidance` plugin. The plugin owns
+the `appworld_*` variables, the AppWorld model Harness, and training Hooks; the
+`tools/appworld` package remains the only AppWorld execution Tool dependency. This keeps runtime
+execution and learning resources versioned together while preserving the Tool boundary.
+
 This directory is the sanitized public snapshot for the `kecaipan capybara` official evaluation.
 See [REPRODUCIBILITY.md](REPRODUCIBILITY.md) for exact provenance, scores, release boundaries, and
 verification commands. The case-level training evidence buffer is intentionally empty in Git;
@@ -55,6 +60,16 @@ official state evaluator.
 AppWorld's downloaded data and generated dataset projections are local-only. The official data license requires public redistribution of the protected data or its derivatives to remain encrypted, so `.venv/` and `datasets/` are ignored.
 
 ## Execution
+
+Before installing protected AppWorld data, run the dependency-free adapter smoke test:
+
+```powershell
+node .\scripts\smoke_adapter.mjs
+```
+
+This validates adapter protocol handling, task/scenario aggregation, and post-evaluation
+reference loading without contacting an LLM or starting an AppWorld server. It is a code smoke
+test only; a real environment smoke requires the local Python environment and data root below.
 
 Select this directory as the Capybara project and choose an AppWorld dataset. Use concurrency `1` for smoke diagnosis and `2` for the full local benchmark. The adapter starts one isolated AppWorld environment server per Case, evaluates the resulting database state, records TGC and SGC metrics, and terminates the server during cleanup.
 

@@ -72,6 +72,7 @@ type ScoreResult = {
 
 const TERMINAL_RUN_STATUSES = new Set<RunState['status']>(['completed', 'failed', 'cancelled'])
 const DEFAULT_TIMEOUT_MS = 10 * 60_000
+const MAX_TIMEOUT_MS = 3 * 60 * 60_000
 const MAX_EXPERIMENT_CASES = 10_000
 
 function requiredString(value: unknown, field: string): string {
@@ -221,7 +222,7 @@ export class ExperimentManager {
       : records
     const concurrency = boundedInteger(input.concurrency, 1, 1, 4, 'concurrency')
     const repetitions = boundedInteger(input.repetitions, 1, 1, 20, 'repetitions')
-    const timeoutMs = boundedInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, 1_000, 60 * 60_000, 'timeoutMs')
+    const timeoutMs = boundedInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, 1_000, MAX_TIMEOUT_MS, 'timeoutMs')
     const keepWorkspaces = input.keepWorkspaces === undefined ? false : input.keepWorkspaces
     if (typeof keepWorkspaces !== 'boolean') throw new Error('keepWorkspaces must be a boolean')
     const totalCases = selected.length * repetitions
@@ -641,6 +642,9 @@ export class ExperimentManager {
         ...(observation.durationMs === undefined ? {} : { durationMs: observation.durationMs }),
       }))
       const trace: ExperimentTrace = {
+        actorMessages: snapshot.conversation.messages.map((message) => ({
+          role: message.role, content: messageText(message),
+        })),
         ...(runtimeRunId ? { runtimeRunId } : {}),
         ...(runState.failure ? { failure: runState.failure } : {}),
         timeline: snapshot.timeline.steps,
@@ -690,10 +694,9 @@ export class ExperimentManager {
         trace.adapter = { ...(trace.adapter ?? {}), evaluation }
         await cleanupAdapter()
         this.store.completeCase(item.id, {
-          status: evaluation.passed ? 'passed' : 'failed',
+          status: evaluation.unscored ? 'unscored' : evaluation.passed ? 'passed' : 'failed',
           actualAnswer,
-          score: evaluation.score,
-          passed: evaluation.passed,
+          ...(evaluation.unscored ? {} : { score: evaluation.score, passed: evaluation.passed }),
           rationale: evaluation.rationale,
           toolStatus: toolStatus(item.expectedTools, actualTools),
           actualTools,
@@ -768,6 +771,9 @@ export class ExperimentManager {
         ...(runtimeRunId ? { runtimeRunId } : {}),
         failure: caseFailure,
         trace: {
+          actorMessages: snapshot.conversation.messages.map((message) => ({
+            role: message.role, content: messageText(message),
+          })),
           ...(runtimeRunId ? { runtimeRunId } : {}),
           ...(snapshot.run.failure ? { failure: snapshot.run.failure } : {}),
           timeline: snapshot.timeline.steps,
@@ -829,10 +835,11 @@ export class ExperimentManager {
 
   private calculateMetrics(run: ExperimentRunDetail): ExperimentMetrics {
     const cases = this.allCases(run.id)
-    const finished = cases.filter((item) => ['passed', 'failed', 'error', 'cancelled'].includes(item.status))
-    const scored = finished.filter((item) => item.score !== undefined)
+    const finished = cases.filter((item) => ['passed', 'failed', 'unscored', 'error', 'cancelled'].includes(item.status))
+    const scored = finished.filter((item) => item.status !== 'unscored' && item.score !== undefined)
     const passed = finished.filter((item) => item.status === 'passed').length
     const failed = finished.filter((item) => item.status === 'failed').length
+    const unscored = finished.filter((item) => item.status === 'unscored').length
     const errors = finished.filter((item) => item.status === 'error').length
     const cancelled = finished.filter((item) => item.status === 'cancelled').length
     const aggregateUsage = finished.reduce((total, item) => addUsage(total, item.usage), usage())
@@ -870,13 +877,14 @@ export class ExperimentManager {
       agentTokensPerCase: finished.length ? agentUsage.totalTokens / finished.length : 0,
       scoringTokensPerCase: finished.length ? scoringUsage.totalTokens / finished.length : 0,
       averageScore: scored.length ? scored.reduce((sum, item) => sum + (item.score ?? 0), 0) / scored.length : 0,
-      passRate: finished.length ? passed / finished.length * 100 : 0,
+      passRate: passed + failed ? passed / (passed + failed) * 100 : 0,
       errorRate: finished.length ? errors / finished.length * 100 : 0,
       toolPrecision: actualCount ? hits / actualCount * 100 : null,
       toolRecall: expectedCount ? hits / expectedCount * 100 : null,
       p95LatencyMs: percentile(finished.map((item) => item.latencyMs), 0.95),
       passed,
       failed,
+      unscored,
       errors,
       cancelled,
       regressions,
@@ -950,6 +958,7 @@ export class ExperimentManager {
   private projectLlm(): RuntimeLlm {
     const settings = new ProjectResources(this.projectDir).readSettings()
     return createLlmService({
+      provider: settings.llm.provider,
       model: settings.llm.model,
       baseUrl: settings.llm.base_url,
       protocol: settings.llm.protocol,
@@ -1017,7 +1026,7 @@ export class ExperimentManager {
   }
 
   private averageScore(cases: ExperimentCaseSummary[]): number | undefined {
-    const scores = cases.flatMap((item) => item.score === undefined ? [] : [item.score])
+    const scores = cases.flatMap((item) => item.status === 'unscored' || item.score === undefined ? [] : [item.score])
     return scores.length ? scores.reduce((sum, value) => sum + value, 0) / scores.length : undefined
   }
 }

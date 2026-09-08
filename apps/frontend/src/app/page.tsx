@@ -28,6 +28,7 @@ import ContextWorkspace from "./components/context-workspace";
 import CapybaraLogo from "./components/capybara-logo";
 import DebugControlPanel from "./components/debug-control-panel";
 import ResizeHandle from "./components/resize-handle";
+import RecallWorkspace from "./components/recall-workspace";
 import ExperimentsWorkspace from "./components/experiments-workspace";
 import MarkdownContent from "./components/markdown-content";
 import {
@@ -930,6 +931,7 @@ function VariableStatusPanel({
   const [detailDirty, setDetailDirty] = useState(false);
   const [variableQuery, setVariableQuery] = useState("");
   const [ownerFilter, setOwnerFilter] = useState<RuntimeVariableOwnerFilter>("all");
+  const [statusClockMs, setStatusClockMs] = useState(() => Date.now());
   const plugins = buildRuntimePluginViews(runtimePlugins);
   const resolveOwner = (path: RuntimeVariablePath) =>
     resolveRuntimeVariableOwner(path, runtimeVariables, runtimePlugins);
@@ -1029,6 +1031,21 @@ function VariableStatusPanel({
     )
     ? latestModelStep.detail.responseArtifactId
     : undefined;
+  const activity = runtimeStatus.activity;
+  const activityPhase = activity?.phase ?? "idle";
+  const activityStartedAt = activity?.startedAt ? Date.parse(activity.startedAt) : Number.NaN;
+  const activityElapsedSeconds = Number.isFinite(activityStartedAt)
+    ? Math.max(0, Math.floor((statusClockMs - activityStartedAt) / 1_000))
+    : 0;
+  const activityDetail = [activity?.label, currentStep?.summary]
+    .filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index)
+    .join(" · ");
+
+  useEffect(() => {
+    if (!activity || activity.phase === "idle") return;
+    const timer = window.setInterval(() => setStatusClockMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [activity]);
 
   useEffect(() => {
     if (
@@ -1119,6 +1136,15 @@ function VariableStatusPanel({
       loopStatus === "completed"
         ? "bg-[#25806f]"
         : loopStatus === "running" ? "bg-[#c58a27]" : "bg-[#6b858b]",
+    ],
+    [
+      t("status.activity"),
+      t(`status.activity.${activityPhase}` as Parameters<typeof t>[0]),
+      activityPhase === "idle"
+        ? t("status.now")
+        : t("status.elapsed", { seconds: activityElapsedSeconds }),
+      activityPhase === "idle" ? "bg-[#6b858b]" : "bg-[#c58a27]",
+      activityDetail,
     ],
     [
       t("status.context"),
@@ -1937,12 +1963,21 @@ function HomeContent() {
 
       <main
         aria-labelledby="app-recall-tab"
-        className="min-h-0 flex-1 bg-white"
+        className="minimal-scrollbar min-h-0 flex-1 overflow-auto bg-white"
         hidden={activeView !== "recall"}
         id="recall-view"
         role="tabpanel"
         tabIndex={0}
-      />
+      >
+        {runtime.project ? (
+          <RecallWorkspace />
+        ) : (
+          <div className="flex h-full items-center justify-center text-xs text-[#60777a]">
+            <FolderOpen aria-hidden="true" className="mr-2" size={16} />
+            {t("project.select")}
+          </div>
+        )}
+      </main>
     </div>
   );
 }

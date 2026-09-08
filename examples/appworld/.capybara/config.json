@@ -18,9 +18,7 @@
   "skills": [
     "skills/solve-appworld-tasks"
   ],
-  "harnesses": [
-    "harnesses/tool/appworld/manifest.json"
-  ],
+  "harnesses": [],
   "harness_policy": {
     "experience_top_k": 3,
     "experience_threshold": 0.35,
@@ -28,5 +26,13 @@
   },
   "tool_permissions": [
     "network:appworld"
+  ],
+  "resource_format": 2,
+  "plugins": [
+    {
+      "id": "appworld-guidance",
+      "path": "plugins/appworld-guidance",
+      "enabled": true
+    }
   ]
 }

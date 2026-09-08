@@ -682,6 +682,151 @@ test('system variable scope defaults to session for legacy files', () => {
   }
 })
 
+test('read-only variables can be explicitly unlocked, edited, removed, and relocked', () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-system-variable-locks-'))
+  try {
+    const resources = new ProjectResources(projectDir)
+    resources.saveSystemVariables({
+      version: 1,
+      variables: [{
+        key: 'locked_prompt',
+        type: 'text',
+        label: 'Locked prompt',
+        description: 'Initially protected.',
+        value: 'before',
+        required: false,
+        readonly: true,
+        show_in_status: false,
+        scope: 'session',
+      }],
+    })
+
+    assert.throws(() => resources.saveSystemVariables({
+      version: 1,
+      variables: [{
+        key: 'locked_prompt',
+        type: 'text',
+        label: 'Changed without unlock',
+        description: 'Should be rejected.',
+        value: 'rejected',
+        required: false,
+        readonly: false,
+        show_in_status: false,
+        scope: 'session',
+      }],
+    }), /immutable/)
+
+    const unlocked = resources.saveSystemVariables({
+      version: 1,
+      allow_readonly_changes: true,
+      variables: [{
+        key: 'locked_prompt',
+        type: 'text',
+        label: 'Edited prompt',
+        description: 'Now editable.',
+        value: 'after',
+        required: false,
+        readonly: false,
+        show_in_status: false,
+        scope: 'session',
+      }],
+    })
+    assert.deepEqual(unlocked.variables[0], {
+      key: 'locked_prompt',
+      type: 'text',
+      label: 'Edited prompt',
+      description: 'Now editable.',
+      value: 'after',
+      required: false,
+      readonly: false,
+      show_in_status: false,
+      scope: 'session',
+      source: 'project',
+    })
+
+    const relocked = resources.saveSystemVariables({
+      version: 1,
+      variables: [{ ...unlocked.variables[0], readonly: true }],
+    })
+    assert.equal(relocked.variables[0]?.readonly, true)
+    assert.throws(() => resources.saveSystemVariables({
+      version: 1,
+      variables: [{ ...relocked.variables[0], value: 'blocked' }],
+    }), /immutable/)
+
+    const lockedTemplate = resources.saveSystemVariables({
+      version: 1,
+      allow_readonly_changes: true,
+      variables: [{
+        ...relocked.variables[0],
+        type: 'prompt_template',
+        template: 'templates/locked.j2',
+        value: 'template value',
+      }],
+    })
+    assert.equal(lockedTemplate.variables[0]?.template, 'templates/locked.j2')
+    assert.throws(() => resources.saveSystemVariables({
+      version: 1,
+      variables: [{ ...lockedTemplate.variables[0], template: 'templates/changed.j2' }],
+    }), /immutable/)
+
+    const removed = resources.saveSystemVariables({
+      version: 1,
+      allow_readonly_changes: true,
+      variables: [],
+    })
+    assert.deepEqual(removed.variables.map((variable) => variable.key), ['sys_message', 'cache'])
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('system variable removal rejects references from the main template and plugin resources', () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-system-variable-references-'))
+  try {
+    fs.mkdirSync(path.join(projectDir, '.capybara'), { recursive: true })
+    fs.writeFileSync(path.join(projectDir, '.capybara', 'config.json'), JSON.stringify({ main_template: 'main.j2' }))
+    fs.writeFileSync(path.join(projectDir, 'main.j2'), 'Hello {{ builtin.variables.customer_name }}')
+    const resources = new ProjectResources(projectDir)
+    resources.saveSystemVariables({
+      version: 1,
+      variables: [{
+        key: 'customer_name',
+        type: 'text',
+        label: 'Customer name',
+        description: '',
+        value: 'Ada',
+        required: false,
+        readonly: false,
+        show_in_status: false,
+        scope: 'project',
+      }],
+    })
+
+    assert.throws(
+      () => resources.saveSystemVariables({ version: 1, variables: [] }),
+      /customer_name.*main\.j2.*Remove these references/,
+    )
+
+    fs.writeFileSync(path.join(projectDir, 'main.j2'), 'Hello')
+    fs.mkdirSync(path.join(projectDir, 'plugins', 'customer-context'), { recursive: true })
+    fs.writeFileSync(
+      path.join(projectDir, 'plugins', 'customer-context', 'context.j2'),
+      '{{ builtin.prompts.customer_name }}',
+    )
+    assert.throws(
+      () => resources.saveSystemVariables({ version: 1, variables: [] }),
+      /customer_name.*plugins[\\/]customer-context[\\/]context\.j2.*Remove these references/,
+    )
+
+    fs.writeFileSync(path.join(projectDir, 'plugins', 'customer-context', 'context.j2'), 'No variable reference')
+    const removed = resources.saveSystemVariables({ version: 1, variables: [] })
+    assert.deepEqual(removed.variables.map((variable) => variable.key), ['sys_message', 'cache'])
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime resolves and refreshes nested prompt_template values with transitive required references', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-prompt-templates-runtime-'))
   createRuntimeProject(projectDir)

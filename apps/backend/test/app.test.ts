@@ -644,6 +644,15 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
         show_in_status: boolean
       }>
     }>()
+    const referencesResponse = await app.inject({
+      method: 'GET',
+      url: '/api/resources/system-variables/agent_identity/references',
+    })
+    assert.equal(referencesResponse.statusCode, 200)
+    assert.deepEqual(referencesResponse.json<{ key: string; references: Array<{ path: string; count: number }> }>(), {
+      key: 'agent_identity',
+      references: [{ path: 'main.j2', count: 1 }],
+    })
     assert.deepEqual(
       systemVariables.variables.slice(0, 2).map(({ key, readonly, source }) => ({
         key,
@@ -678,12 +687,23 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
       label: 'Runtime cache',
       description: 'Runtime-managed temporary Loop, model, and tool-call context exposed as builtin.cache.',
       value: {
-        version: 1,
+        version: 2,
         summary: '',
         messages: [],
         loop: { run_id: '', iteration: 0, tool_round: 0, continuation_round: 0 },
         compression_count: 0,
         compressed_at: '',
+        task_profile: { objective: '', answer_type: 'unknown', constraints: [] },
+        plan: [],
+        claims: [],
+        evidence: [],
+        hypotheses: [],
+        contradictions: [],
+        reviews: [],
+        candidate_answer: '',
+        tool_history: [],
+        failure_history: [],
+        budget: { review_rounds_used: 0, max_review_rounds: 3 },
       },
       required: false,
       readonly: true,
@@ -717,6 +737,9 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
             required: true,
             show_in_status: true,
           },
+          ...systemVariables.variables.filter((variable) => (
+            variable.key === 'dynamic_context' || variable.key.startsWith('template_')
+          )),
         ],
       },
     })
@@ -2061,6 +2084,115 @@ test('model-generated workflow chains list, filter, and read without intermediat
     assert.equal(snapshot.payload.workflows.items.at(-1)?.status, 'completed')
     assert.ok(snapshot.payload.timeline.steps.some((step) =>
       step.type === 'workflow' && step.detail?.workflowNodeType === 'filter'))
+  }, { llm })
+})
+
+test('a failed generated workflow Tool is returned to the model for recovery', async () => {
+  const requests: LlmChatRequest[] = []
+  const llm = fakeLlm(async (request) => {
+    requests.push(structuredClone({ ...request, signal: undefined }))
+    if (requests.length === 1) {
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: '',
+        toolCalls: [{
+          id: 'load-workflow-recovery-tools',
+          name: 'load_resources',
+          arguments: { ids: ['project-files:list_files', 'project-files:read_file'] },
+        }],
+        finishReason: 'tool_calls',
+        raw: {},
+      }
+    }
+    if (requests.length === 2) {
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: '',
+        toolCalls: [{
+          id: 'execute-failing-workflow',
+          name: 'execute_workflow',
+          arguments: {
+            version: 1,
+            goal: 'Read a missing file, then list documents.',
+            steps: [
+              {
+                id: 'read_missing',
+                type: 'tool',
+                tool: 'project-files:read_file',
+                arguments: { file_name: 'test-docs/missing.md', include_line_numbers: false },
+              },
+              {
+                id: 'must_not_run',
+                type: 'tool',
+                tool: 'project-files:list_files',
+                arguments: { path: 'test-docs', recursive: false, max_entries: 100 },
+              },
+            ],
+          },
+        }],
+        finishReason: 'tool_calls',
+        raw: {},
+      }
+    }
+    const workflowResult = request.messages.find(
+      (message) => message.toolCallId === 'execute-failing-workflow',
+    )
+    assert.match(workflowResult?.content ?? '', /"ok":false/)
+    assert.match(workflowResult?.content ?? '', /missing\.md/)
+    return {
+      provider: 'custom',
+      model: 'test-model',
+      text: JSON.stringify({
+        status: 'completed',
+        content: 'The temporary workflow failed, so I recovered in the next model turn.',
+      }),
+      finishReason: 'stop',
+      raw: {},
+    }
+  })
+
+  await withRuntime(async (client) => {
+    const start = client.events.length
+    client.send('chat.message.send', {
+      clientMessageId: 'generated-workflow-recovery-message',
+      content: [{ type: 'text', text: 'Exercise workflow failure recovery.' }],
+      autoStart: true,
+    })
+    await client.waitFor(
+      'run.state.changed',
+      (event) => event.payload.status === 'completed',
+      start,
+    )
+    assert.equal(requests.length, 3)
+    const events = client.events.slice(start)
+    const workflow = events
+      .filter(
+        (event): event is EventOf<'runtime.workflows.updated'> =>
+          event.type === 'runtime.workflows.updated',
+      )
+      .at(-1)?.payload.items.at(-1)
+    assert.equal(workflow?.status, 'failed')
+    assert.equal(workflow?.nodes.find((node) => node.id === 'read_missing')?.status, 'failed')
+    assert.equal(workflow?.nodes.find((node) => node.id === 'must_not_run')?.status, 'cancelled')
+    assert.ok(events.some(
+      (event) => event.type === 'tool.call.failed'
+        && event.payload.toolName === 'execute_workflow',
+    ))
+    assert.equal(events.some(
+      (event) => event.type === 'tool.call.started'
+        && event.payload.toolName === 'list_files',
+    ), false)
+    const activityPhases = events
+      .filter(
+        (event): event is EventOf<'runtime.status.updated'> =>
+          event.type === 'runtime.status.updated',
+      )
+      .map((event) => event.payload.activity?.phase)
+    assert.ok(activityPhases.includes('model_waiting'))
+    assert.ok(activityPhases.includes('workflow_running'))
+    assert.ok(activityPhases.includes('tool_running'))
   }, { llm })
 })
 

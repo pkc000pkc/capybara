@@ -407,6 +407,8 @@ async function request<T>(projectPath: string, path: string, method = "GET", bod
 }
 
 export const resourceApi = {
+  projectSettings: (projectPath: string) =>
+    request<{ main_template: string }>(projectPath, "project-settings"),
   projectDirectory: (projectPath: string, path = "") =>
     request<ProjectDirectoryListing>(projectPath, `files?path=${encodeURIComponent(path)}`),
   projectFile: (projectPath: string, path: string) =>

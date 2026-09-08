@@ -1,5 +1,5 @@
 import { HookRegistry } from '#core/hooks/hook-registry'
-import { HookRunError, HookRunner } from '#core/hooks/hook-runner'
+import { HookRunError, HookRunner, type HookRunLimits } from '#core/hooks/hook-runner'
 import type {
   HookAdmissionDecision,
   HookCheckpoint,
@@ -26,6 +26,7 @@ export interface LearningHookExecution {
 export interface LearningHookRunOptions {
   referencePolicy?: 'required' | 'hidden'
   maxTotalTokens?: number
+  onLlmActivity?: HookRunLimits['onLlmActivity']
 }
 
 export class LearningHookExecutionError extends Error {
@@ -57,7 +58,15 @@ function hiddenContext(
     runId: context.runId,
     phase: context.phase,
     case: {
-      ...context.case,
+      id: context.case.id,
+      sampleId: context.case.sampleId,
+      question: context.case.question,
+      actualAnswer: context.case.actualAnswer,
+      actualTools: context.case.actualTools,
+      toolCalls: context.case.toolCalls,
+      ...(context.case.transcript ? {
+        transcript: context.case.transcript.map(({ role, content }) => ({ role, content })),
+      } : {}),
       thinking: '',
       expectedAnswer: '',
       expectedTools: [],
@@ -82,7 +91,14 @@ function hiddenContext(
     ...(context.candidate ? { candidate: context.candidate } : {}),
     ...(context.correctionAttempts ? {
       correctionAttempts: context.correctionAttempts.map((attempt) => ({
-        ...attempt,
+        ordinal: attempt.ordinal,
+        summary: attempt.summary,
+        strategy: attempt.strategy,
+        passed: attempt.passed,
+        variableOverrides: attempt.variableOverrides,
+        actualAnswer: attempt.actualAnswer,
+        actualTools: attempt.actualTools,
+        toolCalls: attempt.toolCalls,
         score: attempt.passed ? 1 : 0,
         rationale: attempt.passed
           ? 'The clean correction attempt passed.'
@@ -190,13 +206,16 @@ export class LearningHookRunner {
     signal?: AbortSignal,
     options: LearningHookRunOptions = {},
   ): Promise<LearningHookExecution> {
-    const referencePolicy = options.referencePolicy ?? 'required'
+    if (checkpoint === 'after_evaluation' && context.phase !== 'training') {
+      throw new Error('after_evaluation Hooks are only available in training mode')
+    }
+    if (typeof context.evaluation.passed !== 'boolean') {
+      throw new Error('learning Hook requires a success/failure signal')
+    }
+    const referencePolicy = options.referencePolicy ?? 'hidden'
     if (checkpoint === 'after_replay' || referencePolicy === 'hidden') {
       context = hiddenContext(context)
     } else if (checkpoint === 'after_evaluation') {
-      if (context.phase !== 'training') {
-        throw new Error('after_evaluation Hooks are only available in training mode')
-      }
       const reference = resolveTrainingReference(
         context.case.expectedAnswer,
         context.evaluation.reference,
@@ -227,7 +246,7 @@ export class LearningHookRunner {
           variableValues,
         ),
         signal,
-        options.maxTotalTokens === undefined ? {} : { maxTotalTokens: options.maxTotalTokens },
+        { maxTotalTokens: options.maxTotalTokens, onLlmActivity: options.onLlmActivity },
       )
     } catch (error) {
       const usage = error instanceof HookRunError ? experimentUsage(error.usage) : EMPTY_USAGE

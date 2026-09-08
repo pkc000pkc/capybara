@@ -1,5 +1,5 @@
 export type ExperimentStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
-export type ExperimentCaseStatus = "queued" | "running" | "passed" | "failed" | "error" | "cancelled";
+export type ExperimentCaseStatus = "queued" | "running" | "passed" | "failed" | "unscored" | "error" | "cancelled";
 export type ExperimentToolStatus = "hit" | "missed" | "unexpected" | "none";
 
 export type ExperimentEvaluator =
@@ -33,6 +33,7 @@ export type ExperimentMetrics = ExperimentUsage & {
   p95LatencyMs: number;
   passed: number;
   failed: number;
+  unscored: number;
   errors: number;
   cancelled: number;
   regressions: number;

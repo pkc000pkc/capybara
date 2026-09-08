@@ -20,6 +20,7 @@ export type ExperimentCaseStatus =
   | 'running'
   | 'passed'
   | 'failed'
+  | 'unscored'
   | 'error'
   | 'cancelled'
 
@@ -45,6 +46,7 @@ export interface ExperimentMetrics extends ExperimentUsage {
   p95LatencyMs: number
   passed: number
   failed: number
+  unscored: number
   errors: number
   cancelled: number
   regressions: number
@@ -122,6 +124,7 @@ export interface ExperimentReference {
 export interface ExperimentAdapterEvaluation {
   score: number
   passed: boolean
+  unscored?: boolean
   rationale: string
   metrics: JsonObject
   details?: JsonValue
@@ -199,6 +202,7 @@ export interface ExperimentToolCall {
 }
 
 export interface ExperimentTrace {
+  actorMessages?: Array<{ role: 'user' | 'assistant'; content: string }>
   runtimeRunId?: string
   failure?: RuntimeFailure
   timeline: TimelineStep[]

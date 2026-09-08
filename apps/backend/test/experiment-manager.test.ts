@@ -106,7 +106,7 @@ function commitProject(projectDir: string, message: string): void {
   git(projectDir, 'commit', '-m', message)
 }
 
-function writeExperimentAdapter(projectDir: string): void {
+function writeExperimentAdapter(projectDir: string, evaluationStatus: 'passed' | 'unscored' = 'passed'): void {
   const manifestFile = path.join(projectDir, '.capybara', 'experiment-adapter.json')
   const entryFile = path.join(projectDir, 'experiments', 'deterministic-adapter.mjs')
   fs.mkdirSync(path.dirname(manifestFile), { recursive: true })
@@ -131,9 +131,10 @@ if (request.phase === 'prepare') {
   result = { endpoint: 'memory://case', taskId: request.payload.case.metadata.public.task_id }
 } else if (request.phase === 'evaluate') {
   result = {
-    score: 0.75,
-    passed: true,
-    rationale: 'Project evaluator accepted the persisted environment state.',
+    score: ${evaluationStatus === 'passed' ? '0.75' : '0'},
+    passed: ${evaluationStatus === 'passed' ? 'true' : 'false'},
+    ${evaluationStatus === 'unscored' ? "unscored: true," : ''}
+    rationale: ${evaluationStatus === 'passed' ? "'Project evaluator accepted the persisted environment state.'" : "'Reference is intentionally unavailable.'"},
     metrics: { passed_tests: 3, failed_tests: 1, difficulty: 2 },
     details: { task_id: request.payload.case.metadata.public.task_id },
     reference: {
@@ -190,6 +191,39 @@ test('experiment adapter revision includes declared helper files and reaches the
   fs.writeFileSync(helperFile, 'second')
   const second = new ExperimentAdapterRunner(projectDir)
   assert.notEqual(second.revision, first.revision)
+})
+
+test('experiment adapter accepts an explicit unscored result and rejects contradictory status', async (context) => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-adapter-unscored-'))
+  context.after(() => fs.rmSync(projectDir, { recursive: true, force: true }))
+  const manifestFile = path.join(projectDir, '.capybara', 'experiment-adapter.json')
+  const entryFile = path.join(projectDir, 'adapter.mjs')
+  fs.mkdirSync(path.dirname(manifestFile), { recursive: true })
+  fs.writeFileSync(manifestFile, JSON.stringify({
+    version: 1,
+    runner: { type: 'stdio', entry: 'adapter.mjs' },
+    phases: ['evaluate'],
+  }))
+  fs.writeFileSync(entryFile, [
+    "let input = '';",
+    'for await (const chunk of process.stdin) input += chunk;',
+    'const request = JSON.parse(input);',
+    "process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { score: 0, passed: false, unscored: true, rationale: 'private test reference', metrics: {} } }));",
+  ].join('\n'))
+  const evaluation = await new ExperimentAdapterRunner(projectDir).evaluate({})
+  assert.equal(evaluation.unscored, true)
+  assert.equal(evaluation.passed, false)
+
+  fs.writeFileSync(entryFile, [
+    "let input = '';",
+    'for await (const chunk of process.stdin) input += chunk;',
+    'const request = JSON.parse(input);',
+    "process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { score: 1, passed: true, unscored: true, rationale: 'contradiction', metrics: {} } }));",
+  ].join('\n'))
+  await assert.rejects(
+    new ExperimentAdapterRunner(projectDir).evaluate({}),
+    /cannot be both passed and unscored/,
+  )
 })
 
 async function waitForRun(
@@ -298,6 +332,8 @@ test('experiment API runs dataset cases through tools and scoring, then persists
   assert.equal(caseDetail.toolCalls.length, 3)
   assert.match(caseDetail.toolCalls[2].resultPreview, /main\.j2/)
   assert.ok(caseDetail.trace.timeline.length > 0)
+  assert.ok(caseDetail.trace.actorMessages.some((message: { role: string }) => message.role === 'assistant'))
+  assert.ok(!JSON.stringify(caseDetail.trace.actorMessages).includes('SCORER_REQUEST'))
   assert.equal(caseDetail.trace.observations.length, 3)
   assert.ok(caseDetail.trace.effectiveContexts.length > 0)
   assert.match(caseDetail.trace.scoring.prompt, /SCORER_REQUEST/)
@@ -579,4 +615,55 @@ test('project experiment adapters own case lifecycle, deterministic evaluation, 
   assert.match(events, /"phase":"evaluate"/)
   assert.match(events, /"phase":"cleanup"/)
   assert.equal(requests.length, 1)
+})
+
+test('project adapters persist unscored as a terminal case without a false score', async (context) => {
+  const projectDir = temporaryExperimentProject()
+  let app: Awaited<ReturnType<typeof buildApp>> | undefined
+  context.after(async () => {
+    await app?.close()
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  })
+  writeExperimentAdapter(projectDir, 'unscored')
+  const datasets = new DatasetStore(projectDir)
+  const dataset = datasets.create({
+    name: 'Private-reference test split',
+    storage: 'jsonl',
+    path: 'datasets/private-test.jsonl',
+    scoringPrompt: '',
+  })
+  datasets.createRecord(dataset.id, {
+    question: 'Return a submission answer.',
+    answer: '',
+    metadata: { public: { task_id: 'private-test-1', split: 'test' } },
+  })
+  commitProject(projectDir, 'test: add unscored experiment adapter')
+  const llm: RuntimeLlm = {
+    async chat() {
+      return response(JSON.stringify({ status: 'completed', content: 'FINAL ANSWER: example' }))
+    },
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'adapter-test-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1_000, maxRetries: 0,
+    }),
+  }
+  app = await buildApp({ runtimeLoop: { projectDir, llm, streamDelayMs: 0, stepDelayMs: 0 } })
+  const projectQuery = `projectPath=${encodeURIComponent(projectDir)}`
+  const startResponse = await app.inject({
+    method: 'POST',
+    url: `/api/experiments?${projectQuery}`,
+    payload: { datasetId: dataset.id, concurrency: 1, repetitions: 1, timeoutMs: 10_000 },
+  })
+  assert.equal(startResponse.statusCode, 202, startResponse.body)
+  const run = await waitForRun(app, projectQuery, (startResponse.json() as ExperimentRunDetail).id)
+  assert.equal(run.metrics.unscored, 1)
+  assert.equal(run.metrics.passed, 0)
+  assert.equal(run.metrics.failed, 0)
+  assert.equal(run.metrics.averageScore, 0)
+  assert.equal(run.metrics.passRate, 0)
+  const casesResponse = await app.inject({ method: 'GET', url: `/api/experiments/${run.id}/cases?${projectQuery}` })
+  const item = casesResponse.json().items[0]
+  assert.equal(item.status, 'unscored')
+  assert.equal(item.score, undefined)
+  assert.equal(item.passed, undefined)
 })
