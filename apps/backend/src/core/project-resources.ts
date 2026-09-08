@@ -3,7 +3,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { loadLlmConfig } from '#util/llm/config'
+import type { LlmProtocol, LlmProviderName } from '#util/llm/types'
 import { enqueueProjectWrite } from '#core/project-write-queue'
+import { findSystemVariableReferences } from '#core/system-variable-references'
 import {
   resolveSystemPromptVariables,
   validateSystemPromptVariableValue,
@@ -94,11 +96,14 @@ export interface ProjectSettings {
   max_tool_rounds: number
   tool_timeout_ms: number
   llm: {
+    provider: LlmProviderName
     model: string
     base_url: string
-    protocol: 'responses' | 'codex-like' | 'chat-completions'
+    protocol: LlmProtocol
     max_retries: number
     api_key?: string
+    active_profile: string
+    profiles: ProjectLlmProfile[]
   }
   context: {
     context_window_tokens: number
@@ -119,6 +124,17 @@ export interface ProjectSettings {
     experience_auto_attach: boolean
   }
   tool_permissions: string[]
+}
+
+export interface ProjectLlmProfile {
+  id: string
+  name: string
+  provider: LlmProviderName
+  model: string
+  base_url: string
+  protocol: LlmProtocol
+  max_retries: number
+  api_key?: string
 }
 
 export type ProjectResourceChange =
@@ -148,12 +164,23 @@ const CACHE_VARIABLE: SystemVariableDefinition = {
   label: 'Runtime cache',
   description: 'Runtime-managed temporary Loop, model, and tool-call context exposed as builtin.cache.',
   value: {
-    version: 1,
+    version: 2,
     summary: '',
     messages: [],
     loop: { run_id: '', iteration: 0, tool_round: 0, continuation_round: 0 },
     compression_count: 0,
     compressed_at: '',
+    task_profile: { objective: '', answer_type: 'unknown', constraints: [] },
+    plan: [],
+    claims: [],
+    evidence: [],
+    hypotheses: [],
+    contradictions: [],
+    reviews: [],
+    candidate_answer: '',
+    tool_history: [],
+    failure_history: [],
+    budget: { review_rounds_used: 0, max_review_rounds: 3 },
   },
   required: false,
   readonly: true,
@@ -283,20 +310,54 @@ export class ProjectResources {
     if (typeof mainTemplate !== 'string' || !mainTemplate.trim()) {
       throw new Error('main_template must be a non-empty string')
     }
-    const configuredLlm = value.llm === undefined
+    const configuredLlm = value.llm === undefined ? {} : value.llm
+    if (!isObject(configuredLlm)) throw new Error('llm must be an object')
+    const secrets = this.readApiKeys()
+    const configuredProfiles = Array.isArray(configuredLlm.profiles) ? configuredLlm.profiles : []
+    const legacyProfile = {
+      id: 'default',
+      name: 'Default',
+      provider: configuredLlm.provider ?? llm.provider,
+      model: configuredLlm.model ?? llm.model,
+      base_url: configuredLlm.base_url ?? llm.baseUrl,
+      protocol: configuredLlm.protocol ?? llm.protocol,
+      max_retries: configuredLlm.max_retries ?? llm.maxRetries,
+    }
+    const profileValues = (configuredProfiles.length > 0 ? configuredProfiles : [legacyProfile]).map((item, index) => {
+      if (!isObject(item)) return item
+      const id = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : `profile-${index + 1}`
+      const apiKey = secrets.profiles[id] ?? (id === 'default' ? secrets.legacy : undefined)
+      return {
+        id,
+        name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : id,
+        provider: item.provider ?? llm.provider,
+        model: item.model ?? llm.model,
+        base_url: item.base_url ?? llm.baseUrl,
+        protocol: item.protocol ?? llm.protocol,
+        max_retries: item.max_retries ?? llm.maxRetries,
+        ...(apiKey ? { api_key: apiKey } : {}),
+      }
+    })
+    const requestedActiveProfile = typeof configuredLlm.active_profile === 'string'
+      ? configuredLlm.active_profile.trim()
+      : profileValues[0] && isObject(profileValues[0]) ? profileValues[0].id : 'default'
+    const activeProfile = profileValues.find((profile) => isObject(profile) && profile.id === requestedActiveProfile)
+    const activeApiKey = activeProfile && isObject(activeProfile)
+      ? activeProfile.api_key ?? secrets.legacy
+      : secrets.legacy
+    const projectLlm = activeProfile && isObject(activeProfile)
       ? {
-          model: llm.model,
-          base_url: llm.baseUrl,
-          protocol: llm.protocol,
-          max_retries: llm.maxRetries,
+          ...activeProfile,
+          active_profile: requestedActiveProfile,
+          profiles: profileValues,
+          ...(activeApiKey ? { api_key: activeApiKey } : {}),
         }
-      : isObject(value.llm)
-        ? { ...value.llm, max_retries: value.llm.max_retries ?? llm.maxRetries }
-        : value.llm
-    const secretApiKey = this.readApiKey()
-    const projectLlm = secretApiKey && isObject(configuredLlm)
-      ? { ...configuredLlm, api_key: secretApiKey }
-      : configuredLlm
+      : {
+          ...legacyProfile,
+          active_profile: requestedActiveProfile,
+          profiles: profileValues,
+          ...(secrets.legacy ? { api_key: secrets.legacy } : {}),
+        }
     return this.validateSettings({
       resource_format: value.resource_format ?? (Array.isArray(value.plugins) ? 2 : 1),
       main_template: mainTemplate,
@@ -333,17 +394,64 @@ export class ProjectResources {
     let nextLlm: unknown = current.llm
     if (value.llm !== undefined) {
       if (!isObject(value.llm)) throw new Error('llm must be an object')
-      const { api_key: _apiKey, ...withoutApiKey } = current.llm
-      const base = value.llm.api_key === null ? withoutApiKey : current.llm
+      const incomingLlm = value.llm
+      const activeProfileId = typeof incomingLlm.active_profile === 'string' && incomingLlm.active_profile.trim()
+        ? incomingLlm.active_profile.trim()
+        : current.llm.active_profile
+      const mergeProfile = (base: ProjectLlmProfile, patch: Record<string, unknown>): ProjectLlmProfile => {
+        const merged = {
+          ...base,
+          ...(typeof patch.id === 'string' ? { id: patch.id } : {}),
+          ...(typeof patch.name === 'string' ? { name: patch.name } : {}),
+          ...(patch.provider === undefined ? {} : { provider: patch.provider }),
+          ...(patch.model === undefined ? {} : { model: patch.model }),
+          ...(patch.base_url === undefined ? {} : { base_url: patch.base_url }),
+          ...(patch.protocol === undefined ? {} : { protocol: patch.protocol }),
+          ...(patch.max_retries === undefined ? {} : { max_retries: patch.max_retries }),
+        } as ProjectLlmProfile
+        if (patch.api_key === null) delete merged.api_key
+        else if (typeof patch.api_key === 'string' && patch.api_key.trim()) merged.api_key = patch.api_key
+        return merged
+      }
+      let profiles = current.llm.profiles.map((profile) => ({ ...profile }))
+      if (Array.isArray(incomingLlm.profiles)) {
+        profiles = incomingLlm.profiles.map((item, index) => {
+          if (!isObject(item)) return item as unknown as ProjectLlmProfile
+          const id = typeof item.id === 'string' ? item.id : `profile-${index + 1}`
+          const base = current.llm.profiles.find((profile) => profile.id === id)
+            ?? {
+              id: current.llm.active_profile,
+              name: current.llm.active_profile,
+              provider: current.llm.provider,
+              model: current.llm.model,
+              base_url: current.llm.base_url,
+              protocol: current.llm.protocol,
+              max_retries: current.llm.max_retries,
+              ...(current.llm.api_key ? { api_key: current.llm.api_key } : {}),
+            }
+          return mergeProfile(base, { ...item, id })
+        })
+      }
+      const activeBase = profiles.find((profile) => profile.id === activeProfileId)
+        ?? current.llm.profiles.find((profile) => profile.id === activeProfileId)
+        ?? current.llm.profiles[0]
+      if (!activeBase) throw new Error('llm must contain at least one profile')
+      const activePatch = {
+        ...(incomingLlm.provider === undefined ? {} : { provider: incomingLlm.provider }),
+        ...(incomingLlm.model === undefined ? {} : { model: incomingLlm.model }),
+        ...(incomingLlm.base_url === undefined ? {} : { base_url: incomingLlm.base_url }),
+        ...(incomingLlm.protocol === undefined ? {} : { protocol: incomingLlm.protocol }),
+        ...(incomingLlm.max_retries === undefined ? {} : { max_retries: incomingLlm.max_retries }),
+        ...(incomingLlm.api_key === undefined ? {} : { api_key: incomingLlm.api_key }),
+      }
+      const active = mergeProfile(activeBase, activePatch)
+      profiles = profiles.some((profile) => profile.id === active.id)
+        ? profiles.map((profile) => profile.id === active.id ? active : profile)
+        : [...profiles, active]
       nextLlm = {
-        ...base,
-        ...(value.llm.model === undefined ? {} : { model: value.llm.model }),
-        ...(value.llm.base_url === undefined ? {} : { base_url: value.llm.base_url }),
-        ...(value.llm.protocol === undefined ? {} : { protocol: value.llm.protocol }),
-        ...(value.llm.max_retries === undefined ? {} : { max_retries: value.llm.max_retries }),
-        ...(value.llm.api_key === undefined || value.llm.api_key === '' || value.llm.api_key === null
-          ? {}
-          : { api_key: value.llm.api_key }),
+        ...active,
+        active_profile: active.id,
+        profiles,
       }
     }
     const next = {
@@ -366,9 +474,38 @@ export class ProjectResources {
 
   saveSettings(value: unknown): ProjectSettings {
     const settings = this.resolveSettings(value)
-    const { api_key: apiKey, ...llm } = settings.llm
-    this.writeJson(this.configFile, { ...settings, llm })
-    if (apiKey) this.writeJson(this.secretsFile, { version: 1, llm: { api_key: apiKey } })
+    const { api_key: apiKey, profiles, ...llm } = settings.llm
+    const persistedProfiles = profiles.map(({ api_key: _profileApiKey, ...profile }) => profile)
+    const source = fs.existsSync(this.configFile) ? this.configFile : this.legacyConfigFile
+    const sourceValue = this.readJson(source, {})
+    const sourceLlm = isObject(sourceValue) && isObject(sourceValue.llm) ? sourceValue.llm : {}
+    const incomingLlm = isObject(value) && isObject(value.llm) ? value.llm : {}
+    const persistProfiles = Array.isArray(sourceLlm.profiles)
+      || Array.isArray(incomingLlm.profiles)
+      || profiles.length > 1
+    this.writeJson(this.configFile, {
+      ...settings,
+      llm: persistProfiles
+        ? { ...llm, profiles: persistedProfiles }
+        : {
+            model: settings.llm.model,
+            base_url: settings.llm.base_url,
+            protocol: settings.llm.protocol,
+            max_retries: settings.llm.max_retries,
+          },
+    })
+    const profileSecrets = Object.fromEntries(
+      profiles
+        .filter((profile) => profile.api_key)
+        .map((profile) => [profile.id, { api_key: profile.api_key }]),
+    )
+    if (apiKey || Object.keys(profileSecrets).length > 0) {
+      this.writeJson(this.secretsFile, {
+        version: 1,
+        ...(apiKey ? { llm: { api_key: apiKey } } : {}),
+        ...(Object.keys(profileSecrets).length > 0 ? { profiles: profileSecrets } : {}),
+      })
+    }
     else if (fs.existsSync(this.secretsFile)) fs.unlinkSync(this.secretsFile)
     return settings
   }
@@ -391,37 +528,63 @@ export class ProjectResources {
     return { revision: systemVariablesRevision(resource), resource }
   }
 
+  findSystemVariableReferences(key: string) {
+    return findSystemVariableReferences(this.projectDir, key, this.configuredMainTemplate())
+  }
+
   saveSystemVariables(value: unknown): SystemVariablesResource {
+    const allowReadonlyChanges = isObject(value) && value.allow_readonly_changes === true
     const submitted = this.validateSystemVariables(value)
     const current = this.readProjectSystemVariables()
-    const readonlyVariables = current.variables.filter((variable) => variable.readonly)
-    const readonlyByKey = new Map(readonlyVariables.map((variable) => [variable.key, variable]))
+    const submittedKeys = new Set(submitted.variables.map((variable) => variable.key))
+    for (const variable of current.variables) {
+      if (RUNTIME_VARIABLE_KEYS.has(variable.key) || submittedKeys.has(variable.key)) continue
+      if (variable.readonly && !allowReadonlyChanges) continue
+      const references = this.findSystemVariableReferences(variable.key)
+      if (references.length > 0) {
+        const detail = references.map((reference) => `${reference.path} (${reference.count})`).join(', ')
+        throw new Error(`system variable "${variable.key}" cannot be removed; it is referenced by ${detail}. Remove these references before deleting the variable.`)
+      }
+    }
+    const readonlyByKey = new Map(
+      current.variables.filter((variable) => variable.readonly).map((variable) => [variable.key, variable]),
+    )
     for (const variable of submitted.variables) {
       const existing = readonlyByKey.get(variable.key)
-      if (!existing && variable.readonly) {
-        throw new Error(`readonly system variables can only be defined in the project file: ${variable.key}`)
+      if (!existing) continue
+      const changed = variable.type !== existing.type
+        || variable.label !== existing.label
+        || variable.description !== existing.description
+        || canonicalSystemPromptVariableValue(variable.value) !== canonicalSystemPromptVariableValue(existing.value)
+        || variable.template !== existing.template
+        || variable.required !== existing.required
+        || variable.show_in_status !== existing.show_in_status
+        || (variable.scope ?? 'session') !== (existing.scope ?? 'session')
+        || variable.readonly !== existing.readonly
+      if (RUNTIME_VARIABLE_KEYS.has(variable.key) && changed) {
+        throw new Error(`runtime system variable is immutable: ${variable.key}`)
       }
-      if (existing && (
-        variable.type !== existing.type ||
-        variable.label !== existing.label ||
-        variable.description !== existing.description ||
-         canonicalSystemPromptVariableValue(variable.value) !== canonicalSystemPromptVariableValue(existing.value) ||
-         variable.required !== existing.required ||
-         variable.show_in_status !== existing.show_in_status ||
-         (variable.scope ?? 'session') !== (existing.scope ?? 'session') ||
-         !variable.readonly
-      )) {
+      if (!allowReadonlyChanges && changed) {
         throw new Error(`readonly system variable is immutable: ${variable.key}`)
       }
     }
-    const submittedKeys = new Set(submitted.variables.map((variable) => variable.key))
-    const projectVariables = [
-      ...readonlyVariables.filter((variable) => !submittedKeys.has(variable.key)),
-      ...submitted.variables,
-    ]
+    // Runtime variables are exposed for inspection but are always reconstructed
+    // from the runtime definitions and never accepted as project data.
+    const runtimeVariables = current.variables.filter((variable) => RUNTIME_VARIABLE_KEYS.has(variable.key))
+    const preservedReadonlyVariables = current.variables.filter((variable) => (
+      variable.readonly
+      && !RUNTIME_VARIABLE_KEYS.has(variable.key)
+      && !allowReadonlyChanges
+      && !submitted.variables.some((submittedVariable) => submittedVariable.key === variable.key)
+    ))
+    const projectVariables = submitted.variables.filter((variable) => !RUNTIME_VARIABLE_KEYS.has(variable.key))
     const resource = {
       version: 1 as const,
-      variables: projectVariables.map((variable) => ({
+      variables: [
+        ...preservedReadonlyVariables,
+        ...projectVariables,
+        ...runtimeVariables,
+      ].map((variable) => ({
         ...variable,
         source: variable.readonly ? 'builtin' as const : 'project' as const,
       })),
@@ -644,37 +807,40 @@ export class ProjectResources {
       throw new Error('tool_timeout_ms must be -1 or an integer between 100 and 600000')
     }
     if (!isObject(llm)) throw new Error('llm must be an object')
-    if (typeof llm.model !== 'string' || !llm.model.trim()) {
-      throw new Error('llm.model must be a non-empty string')
-    }
-    if (typeof llm.base_url !== 'string' || !llm.base_url.trim()) {
-      throw new Error('llm.base_url must be a non-empty URL')
-    }
-    let baseUrl: URL
-    try {
-      baseUrl = new URL(llm.base_url)
-    } catch {
-      throw new Error('llm.base_url must be a valid URL')
-    }
-    if (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:') {
-      throw new Error('llm.base_url must use http or https')
-    }
-    if (
-      llm.protocol !== 'responses'
-      && llm.protocol !== 'codex-like'
-      && llm.protocol !== 'chat-completions'
-    ) {
-      throw new Error('llm.protocol must be responses, codex-like, or chat-completions')
-    }
-    if (
-      !Number.isInteger(llm.max_retries)
-      || (Number(llm.max_retries) !== -1 && Number(llm.max_retries) < 0)
-    ) {
-      throw new Error('llm.max_retries must be -1 or a non-negative integer')
-    }
-    if (llm.api_key !== undefined && (typeof llm.api_key !== 'string' || !llm.api_key.trim())) {
-      throw new Error('llm.api_key must be a non-empty string')
-    }
+    const rawProfiles = Array.isArray(llm.profiles) ? llm.profiles : [llm]
+    if (rawProfiles.length === 0) throw new Error('llm.profiles must contain at least one profile')
+    const profileIds = new Set<string>()
+    const profiles = rawProfiles.map((candidate, index) => {
+      if (!isObject(candidate)) throw new Error(`llm.profiles[${index}] must be an object`)
+      const id = typeof candidate.id === 'string' ? candidate.id.trim() : ''
+      if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id)) throw new Error(`llm.profiles[${index}].id must use kebab-case`)
+      if (profileIds.has(id)) throw new Error(`duplicate llm profile: ${id}`)
+      profileIds.add(id)
+      const model = candidate.model
+      const baseUrlValue = candidate.base_url
+      if (typeof model !== 'string' || !model.trim()) throw new Error(`llm.profiles[${index}].model must be a non-empty string`)
+      if (typeof baseUrlValue !== 'string' || !baseUrlValue.trim()) throw new Error(`llm.profiles[${index}].base_url must be a non-empty URL`)
+      let baseUrl: URL
+      try { baseUrl = new URL(baseUrlValue) } catch { throw new Error(`llm.profiles[${index}].base_url must be a valid URL`) }
+      if (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:') throw new Error(`llm.profiles[${index}].base_url must use http or https`)
+      if (!['openai', 'ollama', 'deepseek', 'custom'].includes(String(candidate.provider))) throw new Error(`llm.profiles[${index}].provider is unsupported`)
+      if (!['responses', 'codex-like', 'chat-completions'].includes(String(candidate.protocol))) throw new Error(`llm.profiles[${index}].protocol is unsupported`)
+      if (!Number.isInteger(candidate.max_retries) || (Number(candidate.max_retries) !== -1 && Number(candidate.max_retries) < 0)) throw new Error(`llm.max_retries must be -1 or a non-negative integer (invalid profile ${id})`)
+      if (candidate.api_key !== undefined && (typeof candidate.api_key !== 'string' || !candidate.api_key.trim())) throw new Error(`llm.profiles[${index}].api_key must be a non-empty string`)
+      return {
+        id,
+        name: typeof candidate.name === 'string' && candidate.name.trim() ? candidate.name.trim() : id,
+        provider: candidate.provider as LlmProviderName,
+        model: model.trim(),
+        base_url: baseUrl.toString().replace(/\/$/, ''),
+        protocol: candidate.protocol as LlmProtocol,
+        max_retries: Number(candidate.max_retries),
+        ...(typeof candidate.api_key === 'string' ? { api_key: candidate.api_key.trim() } : {}),
+      }
+    })
+    const activeProfile = typeof llm.active_profile === 'string' ? llm.active_profile.trim() : (profiles[0] as ProjectLlmProfile).id
+    if (!profileIds.has(activeProfile)) throw new Error(`llm.active_profile does not match a profile: ${activeProfile}`)
+    const active = profiles.find((profile) => profile.id === activeProfile) as ProjectLlmProfile
     const context = value.context
     if (!isObject(context)) throw new Error('context must be an object')
     const contextWindowTokens = context.context_window_tokens
@@ -742,11 +908,9 @@ export class ProjectResources {
       max_tool_rounds: Number(maxToolRounds),
       tool_timeout_ms: Number(toolTimeoutMs),
       llm: {
-        model: llm.model.trim(),
-        base_url: baseUrl.toString().replace(/\/$/, ''),
-        protocol: llm.protocol,
-        max_retries: Number(llm.max_retries),
-        ...(typeof llm.api_key === 'string' ? { api_key: llm.api_key.trim() } : {}),
+        ...active,
+        active_profile: activeProfile,
+        profiles,
       },
       context: {
         context_window_tokens: Number(contextWindowTokens),
@@ -798,9 +962,6 @@ export class ProjectResources {
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : String(error))
       }
-      if (item.readonly === true && item.scope === 'project') {
-        throw new Error(`variables[${index}] readonly variables must be session-scoped`)
-      }
       return {
         key,
         type,
@@ -841,6 +1002,14 @@ export class ProjectResources {
     }
   }
 
+  private configuredMainTemplate(): string {
+    const source = fs.existsSync(this.configFile) ? this.configFile : this.legacyConfigFile
+    const config = this.readJson(source, {})
+    return isObject(config) && typeof config.main_template === 'string' && config.main_template.trim()
+      ? config.main_template.trim()
+      : 'main.j2'
+  }
+
   private readJson(file: string, fallback: unknown): unknown {
     return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : fallback
   }
@@ -853,16 +1022,34 @@ export class ProjectResources {
     })
   }
 
-  private readApiKey(): string | undefined {
-    if (!fs.existsSync(this.secretsFile)) return undefined
+  private readApiKeys(): { legacy?: string; profiles: Record<string, string> } {
+    if (!fs.existsSync(this.secretsFile)) return { profiles: {} }
     const value = this.readJson(this.secretsFile, {})
-    if (!isObject(value) || value.version !== 1 || !isObject(value.llm)) {
-      throw new Error('.capybara/secrets.json must contain version 1 and an llm object')
+    if (!isObject(value) || value.version !== 1) {
+      throw new Error('.capybara/secrets.json must contain version 1')
     }
-    if (typeof value.llm.api_key !== 'string' || !value.llm.api_key.trim()) {
-      throw new Error('.capybara/secrets.json llm.api_key must be a non-empty string')
+    let legacy: string | undefined
+    if (value.llm !== undefined) {
+      if (!isObject(value.llm) || typeof value.llm.api_key !== 'string' || !value.llm.api_key.trim()) {
+        throw new Error('.capybara/secrets.json llm.api_key must be a non-empty string')
+      }
+      legacy = value.llm.api_key.trim()
     }
-    return value.llm.api_key.trim()
+    const profiles: Record<string, string> = {}
+    if (value.profiles !== undefined) {
+      if (!isObject(value.profiles)) throw new Error('.capybara/secrets.json profiles must be an object')
+      for (const [id, entry] of Object.entries(value.profiles)) {
+        if (!isObject(entry) || typeof entry.api_key !== 'string' || !entry.api_key.trim()) {
+          throw new Error(`.capybara/secrets.json profiles.${id}.api_key must be a non-empty string`)
+        }
+        profiles[id] = entry.api_key.trim()
+      }
+    }
+    return { legacy, profiles }
+  }
+
+  private readApiKey(): string | undefined {
+    return this.readApiKeys().legacy
   }
 
   private writeJson(file: string, value: unknown): void {

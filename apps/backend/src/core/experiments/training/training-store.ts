@@ -25,7 +25,7 @@ const EMPTY_USAGE: ExperimentUsage = {
 }
 
 const TRAINING_CONFIG_DEFAULTS = {
-  maxCorrectionAttempts: 4,
+  maxCorrectionAttempts: 5,
   maxCorrectionTokens: 40_000,
   maxCorrectionWallTimeMs: 20 * 60_000,
   maxReplayRevisions: 2,

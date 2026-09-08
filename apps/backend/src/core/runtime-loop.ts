@@ -7,7 +7,7 @@ import nunjucks from 'nunjucks'
 import { ContextBuilder, type RenderEvent } from '#core/context-builder'
 import { matchesModelHarnessActivation } from '#core/harnesses/harness-registry'
 import { HookRegistry } from '#core/hooks/hook-registry'
-import { HookRunner } from '#core/hooks/hook-runner'
+import { HookRunner, type HookLlmActivity } from '#core/hooks/hook-runner'
 import type { HookFixture, HookResult, HookStatusSnapshot } from '#core/hooks/types'
 import { Loop } from '#core/loop'
 import { PluginRegistry } from '#core/plugins/plugin-registry'
@@ -427,6 +427,7 @@ export class RuntimeLoop extends Loop {
     this.skillScriptRunner = new SkillScriptRunner(this.workspaceDir, config.tool_timeout_ms)
     this.projectLlmEnabled = options.llm === undefined
     this.llm = options.llm ?? createLlmService({
+      provider: config.llm.provider,
       model: config.llm.model,
       baseUrl: config.llm.base_url,
       protocol: config.llm.protocol,
@@ -818,6 +819,7 @@ export class RuntimeLoop extends Loop {
     this.runtimeStatus = {
       ...clone(snapshot.status),
       model: 'ready',
+      activity: { phase: 'idle', startedAt: now() },
       loopStatus: snapshot.status.loopStatus ?? (
         snapshot.run.status === 'completed'
           ? 'completed'
@@ -1270,6 +1272,11 @@ export class RuntimeLoop extends Loop {
     correlationId: string,
   ): void {
     if (!retry && !this.run.modelRetry) return
+    if (retry) {
+      this.updateRuntimeStatus({
+        activity: { phase: 'model_retry', label: retry.reason, startedAt: now() },
+      }, correlationId)
+    }
     this.run = this.withRun({
       modelRetry: retry
         ? {
@@ -1280,6 +1287,20 @@ export class RuntimeLoop extends Loop {
         : undefined,
     })
     this.emitRun(correlationId)
+  }
+
+  private hookLlmObserver(hookName: string, generation: number, correlationId: string) {
+    return (activity: HookLlmActivity) => {
+      if (this.generation !== generation) return
+      this.updateModelRetry(activity.hookId, activity.retry, correlationId)
+      this.updateRuntimeStatus({ activity: {
+        phase: activity.phase === 'retrying' ? 'model_retry'
+          : activity.phase === 'waiting' ? 'model_waiting' : 'hook_running',
+        label: `Hook ${hookName}`,
+        startedAt: now(),
+      } }, correlationId)
+      this.createArtifact('hook-log', `Hook model ${activity.phase} · ${hookName}`, toJsonValue(activity), correlationId)
+    }
   }
 
   private createTimeline(): TimelineStep[] {
@@ -1356,7 +1377,12 @@ export class RuntimeLoop extends Loop {
     }, correlationId)
     this.pushCheckpoint(0, undefined, correlationId)
     this.emitRun(correlationId)
-    this.updateRuntimeStatus({ loopStatus: 'running', model: 'ready', queueDepth: 0 }, correlationId)
+    this.updateRuntimeStatus({
+      loopStatus: 'running',
+      model: 'ready',
+      queueDepth: 0,
+      activity: { phase: 'idle', startedAt: now() },
+    }, correlationId)
     if (this.run.mode === 'continuous') this.startContinuous(correlationId)
   }
 
@@ -1546,10 +1572,13 @@ export class RuntimeLoop extends Loop {
       }, correlationId)
       this.failAssistant(failure, correlationId)
       this.run = this.withRun({ status: 'waiting', failure })
-      this.updateRuntimeStatus({ model: 'ready' }, correlationId)
+      this.updateRuntimeStatus({
+        model: 'ready',
+        activity: { phase: 'idle', startedAt: now() },
+      }, correlationId)
       this.emitRun(correlationId)
       if (this.isLoopStep(runningStep)) {
-        await this.runAfterLoopHooks('failed', correlationId, generation, true)
+        await this.runAfterLoopHooks('failed', correlationId, generation, true, runningStep.index)
       }
       if (this.generation === generation && this.run.status === 'waiting') {
         this.run = this.withRun({ status: 'failed', failure })
@@ -1565,7 +1594,9 @@ export class RuntimeLoop extends Loop {
     const afterCheckpointId = `checkpoint-${this.checkpointRevision + 1}-${randomUUID()}`
     const completedStep: TimelineStep = {
       ...runningStep,
-      status: runningStep.detail?.workflowSkipped === true ? 'skipped' : 'success',
+      status: runningStep.detail?.workflowSkipped === true
+        ? 'skipped'
+        : runningStep.detail?.workflowNodeFailed === true ? 'error' : 'success',
       completedAt: now(),
       durationMs: Date.now() - started,
       detail: {
@@ -1580,7 +1611,9 @@ export class RuntimeLoop extends Loop {
       const terminalLoop = !this.timeline.slice(nextStep).some(
         (step) => step.type === 'model' && step.status === 'pending',
       )
-      await this.runAfterLoopHooks('completed', correlationId, generation, terminalLoop)
+      await this.runAfterLoopHooks(
+        'completed', correlationId, generation, terminalLoop, completedStep.index,
+      )
       if (this.generation !== generation || ['interrupted', 'cancelled'].includes(this.run.status)) {
         return false
       }
@@ -1666,7 +1699,10 @@ export class RuntimeLoop extends Loop {
       )
     }
     this.run = this.withRun({ status: 'interrupted' })
-    this.updateRuntimeStatus({ model: 'ready' }, correlationId)
+    this.updateRuntimeStatus({
+      model: 'ready',
+      activity: { phase: 'idle', startedAt: now() },
+    }, correlationId)
     this.emitRun(correlationId)
     this.releasePauseWaiters()
     if (this.activeAssistantId) this.cancelResponse(correlationId)
@@ -1678,7 +1714,11 @@ export class RuntimeLoop extends Loop {
     const current = this.timeline[this.run.currentStep]
     if (current?.status === 'running') this.updateTimeline(interruptTimelineStep(current), correlationId)
     this.run = this.withRun({ status: 'cancelled' })
-    this.updateRuntimeStatus({ model: 'ready', queueDepth: 0 }, correlationId)
+    this.updateRuntimeStatus({
+      model: 'ready',
+      queueDepth: 0,
+      activity: { phase: 'idle', startedAt: now() },
+    }, correlationId)
     this.emitRun(correlationId)
     this.releasePauseWaiters()
     if (this.activeAssistantId) this.cancelResponse(correlationId)
@@ -2036,6 +2076,28 @@ export class RuntimeLoop extends Loop {
     correlationId: string,
   ): Promise<void> {
     const nodeType = step.detail?.workflowNodeType
+    this.updateRuntimeStatus({
+      activity: {
+        phase: 'workflow_running',
+        label: nodeType ? String(nodeType) : step.summary,
+        startedAt: now(),
+      },
+    }, correlationId)
+    const planId = typeof step.detail?.workflowPlanId === 'string'
+      ? step.detail.workflowPlanId
+      : undefined
+    if (
+      planId
+      && nodeType !== 'finalize'
+      && this.workflowPlan(planId).status === 'failed'
+    ) {
+      step.detail = {
+        ...(step.detail ?? {}),
+        workflowSkipped: true,
+        reason: 'workflow stopped after an earlier Tool failure',
+      }
+      return
+    }
     if (nodeType === 'plan') {
       await this.startGeneratedWorkflow(step, correlationId)
       return
@@ -2362,15 +2424,25 @@ export class RuntimeLoop extends Loop {
       message: error instanceof Error ? error.message : String(error),
     })
     const plan = this.workflowPlan(planId)
-    const node = plan.nodes.find((item) => item.id === nodeId)
-    if (node) this.updateWorkflowNode(planId, nodeId, {
-      status: 'failed',
-      error: failure,
-      completedAt: now(),
-    }, correlationId)
+    const completedAt = now()
+    const nodes = plan.nodes.map((node) => {
+      if (node.id === nodeId) return {
+        ...node,
+        status: 'failed' as const,
+        error: failure,
+        completedAt,
+      }
+      if (node.status === 'pending' || node.status === 'running') return {
+        ...node,
+        status: 'cancelled' as const,
+        completedAt,
+      }
+      return node
+    })
     this.updateWorkflowPlan(planId, {
       status: 'failed',
-      completedAt: now(),
+      nodes,
+      completedAt,
       error: failure,
     }, correlationId)
   }
@@ -2383,16 +2455,19 @@ export class RuntimeLoop extends Loop {
     if (!request || !data) {
       throw new RuntimeStageError('workflow_execution', 'WORKFLOW_STATE_MISSING', 'workflow finalization state is missing')
     }
+    const workflowFailed = plan.status === 'failed'
     const unfinished = Object.entries(data.steps).filter(([, value]) =>
-      value.status !== 'completed' && value.status !== 'skipped')
-    if (unfinished.length > 0) {
+      value.status !== 'completed' && value.status !== 'skipped' && value.status !== 'failed')
+    if (!workflowFailed && unfinished.length > 0) {
       throw new RuntimeStageError(
         'workflow_execution',
         'WORKFLOW_INCOMPLETE',
         `workflow has unfinished steps: ${unfinished.map(([id]) => id).join(', ')}`,
       )
     }
-    const result = { ok: true, goal: plan.goal, steps: data.steps }
+    const result = workflowFailed
+      ? { ok: false, goal: plan.goal, steps: data.steps, error: plan.error ?? { message: 'workflow Tool failed' } }
+      : { ok: true, goal: plan.goal, steps: data.steps }
     const artifact = this.createArtifact(
       'workflow-result',
       `Generated workflow result · ${plan.revision}`,
@@ -2400,7 +2475,7 @@ export class RuntimeLoop extends Loop {
       correlationId,
     )
     this.updateWorkflowPlan(planId, {
-      status: 'completed',
+      status: workflowFailed ? 'failed' : 'completed',
       resultArtifactId: artifact.id,
       completedAt: now(),
     }, correlationId)
@@ -2420,24 +2495,42 @@ export class RuntimeLoop extends Loop {
     const startedAt = plan.createdAt
     const completedAt = now()
     const durationMs = Math.max(0, Date.parse(completedAt) - Date.parse(startedAt))
-    this.emit('tool.call.completed', {
-      callId: request.id,
-      toolName: request.name,
-      result: toJsonValue(result),
-      startedAt,
-      completedAt,
-      durationMs,
-    }, correlationId)
+    const workflowFailureMessage = typeof plan.error === 'object' && plan.error && 'message' in plan.error
+      ? String(plan.error.message)
+      : 'workflow Tool failed'
+    if (workflowFailed) {
+      this.emit('tool.call.failed', {
+        callId: request.id,
+        toolName: request.name,
+        code: 'WORKFLOW_TOOL_FAILED',
+        message: workflowFailureMessage,
+        startedAt,
+        completedAt,
+        durationMs,
+      }, correlationId)
+    } else {
+      this.emit('tool.call.completed', {
+        callId: request.id,
+        toolName: request.name,
+        result: toJsonValue(result),
+        startedAt,
+        completedAt,
+        durationMs,
+      }, correlationId)
+    }
     this.upsertObservation({
       id: `observation-${this.run.runId}-${request.id}`,
       runId: this.run.runId as string,
       stepId: step.id,
       callId: request.id,
       toolName: request.name,
-      status: 'completed',
+      status: workflowFailed ? 'failed' : 'completed',
       arguments: toJsonValue(request.arguments),
       resultArtifactId: artifact.id,
       resultPreview: artifact.preview,
+      ...(workflowFailed ? {
+        error: toJsonValue({ code: 'WORKFLOW_TOOL_FAILED', message: workflowFailureMessage }),
+      } : {}),
       startedAt,
       completedAt,
       durationMs,
@@ -2450,6 +2543,9 @@ export class RuntimeLoop extends Loop {
     correlationId: string,
     generation: number,
   ): Promise<void> {
+    this.updateRuntimeStatus({
+      activity: { phase: 'model_preparing', label: step.summary, startedAt: now() },
+    }, correlationId)
     const sanitizedMessages = discardOrphanToolMessages(this.llmMessages)
     if (JSON.stringify(sanitizedMessages) !== JSON.stringify(this.llmMessages)) {
       this.llmMessages = sanitizedMessages
@@ -2462,7 +2558,10 @@ export class RuntimeLoop extends Loop {
     this.ensureAssistantStarted(correlationId)
     const controller = new AbortController()
     this.activeAbortController = controller
-    this.updateRuntimeStatus({ model: 'busy' }, correlationId)
+    this.updateRuntimeStatus({
+      model: 'busy',
+      activity: { phase: 'model_waiting', label: step.summary, startedAt: now() },
+    }, correlationId)
     const request: LlmChatRequest = {
       messages: clone(this.llmMessages),
       tools: this.modelToolDefinitions(),
@@ -2541,6 +2640,11 @@ export class RuntimeLoop extends Loop {
     this.updateTimeline({ ...step }, correlationId)
     const outputStream = new ModelOutputStream((delta) => {
       if (this.generation === generation) {
+        if (firstDeltaAt === undefined) {
+          this.updateRuntimeStatus({
+            activity: { phase: 'model_streaming', label: step.summary, startedAt: now() },
+          }, correlationId)
+        }
         firstDeltaAt ??= Date.now()
         streamChunks += 1
         this.appendAssistantDelta(delta, correlationId)
@@ -2563,6 +2667,9 @@ export class RuntimeLoop extends Loop {
     }
     if (this.generation !== generation) return
 
+    this.updateRuntimeStatus({
+      activity: { phase: 'model_processing', label: step.summary, startedAt: now() },
+    }, correlationId)
     this.addUsage(response.usage)
     if (response.usage?.inputTokens !== undefined) {
       const maxTokens = this.runtimeStatus.context.maxTokens
@@ -2704,6 +2811,16 @@ export class RuntimeLoop extends Loop {
     const workflowLocals = isObject(step.detail?.workflowLocals)
       ? step.detail.workflowLocals
       : {}
+    if (workflowPlanId && this.workflowPlan(workflowPlanId).status === 'failed') {
+      this.pendingToolCalls.delete(step.id)
+      step.detail = {
+        ...(step.detail ?? {}),
+        workflowSkipped: true,
+        reason: 'workflow stopped after an earlier Tool failure',
+      }
+      this.updateRuntimeStatus({ queueDepth: this.pendingToolCalls.size }, correlationId)
+      return
+    }
     let request = pendingRequest
     if (workflowPlanId && workflowNodeId && workflowSourceStepId) {
       const definition = this.workflowDefinitions.get(workflowPlanId)?.steps.find(
@@ -2784,6 +2901,9 @@ export class RuntimeLoop extends Loop {
       toolName: request.name,
       arguments: argumentsValue,
       startedAt,
+    }, correlationId)
+    this.updateRuntimeStatus({
+      activity: { phase: 'tool_running', label: request.name, startedAt },
     }, correlationId)
 
     let result: ToolCallResult
@@ -2896,18 +3016,23 @@ export class RuntimeLoop extends Loop {
       this.pendingToolCalls.delete(step.id)
       this.updateRuntimeStatus({ queueDepth: this.pendingToolCalls.size }, correlationId)
       if (!result.ok) {
-        data.steps[workflowSourceStepId] = { status: 'failed' }
+        for (const [id, state] of Object.entries(data.steps)) {
+          if (id !== workflowSourceStepId && (state.status === 'pending' || state.status === 'running')) {
+            data.steps[id] = { status: 'skipped' }
+          }
+        }
+        data.steps[workflowSourceStepId] = {
+          status: 'failed',
+          output: { ok: false, error: result.error ?? { message: 'workflow Tool failed' } },
+        }
         this.failGeneratedWorkflow(
           workflowPlanId,
           workflowNodeId,
           result.error?.message ?? 'workflow tool failed',
           correlationId,
         )
-        throw new RuntimeStageError(
-          'workflow_execution',
-          'WORKFLOW_TOOL_FAILED',
-          `${request.name}: ${result.error?.message ?? 'tool call failed'}`,
-        )
+        step.detail = { ...step.detail, workflowNodeFailed: true }
+        return
       }
       const completedAt = now()
       this.updateWorkflowNode(workflowPlanId, workflowNodeId, {
@@ -3833,6 +3958,7 @@ export class RuntimeLoop extends Loop {
 
   private runtimeCacheValue(): RuntimeCache {
     const current = this.variables.value.builtin.cache ?? emptyRuntimeCache()
+    const structured = current.version === 2 ? current : emptyRuntimeCache()
     const summaryMessage = this.llmMessages.find((message) => (
       message.role === 'assistant' && message.name === CACHE_SUMMARY_MESSAGE_NAME
     ))
@@ -3842,7 +3968,7 @@ export class RuntimeLoop extends Loop {
         : summaryMessage?.content ?? ''
     )
     return {
-      version: 1,
+      version: 2,
       summary,
       messages: this.llmMessages
         .filter((message) => (
@@ -3857,6 +3983,17 @@ export class RuntimeLoop extends Loop {
       },
       compression_count: current.compression_count,
       compressed_at: current.compressed_at,
+      task_profile: clone(structured.task_profile ?? {}),
+      plan: clone(structured.plan ?? []),
+      claims: clone(structured.claims ?? []),
+      evidence: clone(structured.evidence ?? []),
+      hypotheses: clone(structured.hypotheses ?? []),
+      contradictions: clone(structured.contradictions ?? []),
+      reviews: clone(structured.reviews ?? []),
+      candidate_answer: structured.candidate_answer ?? '',
+      tool_history: clone(structured.tool_history ?? []),
+      failure_history: clone(structured.failure_history ?? []),
+      budget: clone(structured.budget ?? {}),
     }
   }
 
@@ -3966,6 +4103,7 @@ export class RuntimeLoop extends Loop {
     correlationId: string,
     generation: number,
     terminal = false,
+    afterStepIndex?: number,
   ): Promise<void> {
     const runId = this.run.runId
     if (!runId) return
@@ -3998,16 +4136,25 @@ export class RuntimeLoop extends Loop {
       .filter((hook) => hook.loadable && hook.enabled && hook.checkpoint === 'after_loop')
       .sort((left, right) => right.schedule.priority - left.schedule.priority || left.name.localeCompare(right.name))
     const claimedPaths = new Set<string>()
+    let continuationReason: string | undefined
     const controller = new AbortController()
     this.activeAbortController = controller
     try {
       for (const hook of hooks) {
         if (this.generation !== generation || controller.signal.aborted) return
         try {
-          const execution = await new HookRunner(this.llm).run(hook, fixture, controller.signal)
+          this.updateRuntimeStatus({
+            activity: { phase: 'hook_running', label: hook.name, startedAt: now() },
+          }, correlationId)
+          const execution = await new HookRunner(this.llm).run(hook, fixture, controller.signal, {
+            onLlmActivity: this.hookLlmObserver(hook.name, generation, correlationId),
+          })
           this.addUsage(execution.usage)
           if (execution.matched && execution.result) {
-            await this.applyHookResult(hook, execution.result, claimedPaths, correlationId)
+            const requested = await this.applyHookResult(
+              hook, execution.result, claimedPaths, correlationId,
+            )
+            continuationReason ??= requested
           }
           this.createArtifact(
             'hook-result',
@@ -4050,6 +4197,32 @@ export class RuntimeLoop extends Loop {
       }
     } finally {
       if (this.activeAbortController === controller) this.activeAbortController = undefined
+      if (this.generation === generation) {
+        this.updateRuntimeStatus({
+          activity: { phase: 'idle', startedAt: now() },
+        }, correlationId)
+      }
+    }
+    if (
+      continuationReason
+      && terminal
+      && outcome === 'completed'
+      && afterStepIndex !== undefined
+    ) {
+      if (this.maxToolRounds !== -1 && this.continuationRound >= this.maxToolRounds) {
+        this.createArtifact('runtime-error', 'Hook continuation rejected', {
+          code: 'HOOK_CONTINUATION_LIMIT',
+          reason: continuationReason,
+          maxToolRounds: this.maxToolRounds,
+        }, correlationId)
+      } else {
+        this.continuationRound += 1
+        this.insertContinuation(afterStepIndex, correlationId)
+        this.createArtifact('hook-result', 'Hook requested another model Loop', {
+          reason: continuationReason,
+          continuationRound: this.continuationRound,
+        }, correlationId)
+      }
     }
     const usedTokens = this.estimatedModelInputTokens()
     const maxTokens = this.runtimeStatus.context.maxTokens
@@ -4109,7 +4282,12 @@ export class RuntimeLoop extends Loop {
     const controller = new AbortController()
     this.activeAbortController = controller
     try {
-      const execution = await new HookRunner(this.llm).run(hook, fixture, controller.signal)
+      this.updateRuntimeStatus({
+        activity: { phase: 'hook_running', label: hook.name, startedAt: now() },
+      }, correlationId)
+      const execution = await new HookRunner(this.llm).run(hook, fixture, controller.signal, {
+        onLlmActivity: this.hookLlmObserver(hook.name, this.generation, correlationId),
+      })
       this.addUsage(execution.usage)
       if (execution.matched && execution.result) {
         await this.applyHookResult(hook, execution.result, new Set<string>(), correlationId)
@@ -4173,7 +4351,22 @@ export class RuntimeLoop extends Loop {
     result: HookResult,
     claimedPaths: Set<string>,
     correlationId: string,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
+    let continuationReason: string | undefined
+    if (result.loop !== undefined) {
+      if (hook.permissions.loop !== 'continue') {
+        throw new Error(`Hook ${hook.id} returned loop control without loop:continue permission`)
+      }
+      if (
+        !result.loop
+        || result.loop.action !== 'continue'
+        || typeof result.loop.reason !== 'string'
+        || !result.loop.reason.trim()
+      ) {
+        throw new Error(`Hook ${hook.id} returned invalid loop control`)
+      }
+      continuationReason = result.loop.reason.trim()
+    }
     if (result.hookFiles !== undefined) {
       if (hook.permissions.hooks !== 'write') {
         throw new Error(`Hook ${hook.id} returned hookFiles without hooks:write permission`)
@@ -4318,6 +4511,7 @@ export class RuntimeLoop extends Loop {
         this.createArtifact('hook-result', artifact.title, toJsonValue(artifact.value), correlationId)
       }
     }
+    return continuationReason
   }
 
   private syncSystemMessages(correlationId?: string): void {
@@ -4480,6 +4674,7 @@ export class RuntimeLoop extends Loop {
     settings: ReturnType<ProjectResources['readSettings']>,
   ): string {
     return JSON.stringify([
+      settings.llm.provider,
       settings.llm.model,
       settings.llm.base_url,
       settings.llm.protocol,
@@ -4495,6 +4690,7 @@ export class RuntimeLoop extends Loop {
     const fingerprint = this.llmConfigFingerprint(settings)
     if (fingerprint === this.projectLlmConfigFingerprint) return
     this.llm = createLlmService({
+      provider: settings.llm.provider,
       model: settings.llm.model,
       baseUrl: settings.llm.base_url,
       protocol: settings.llm.protocol,
@@ -6025,7 +6221,7 @@ export class RuntimeLoop extends Loop {
   }
 
   private updateRuntimeStatus(
-    changes: Partial<Pick<RuntimeStatusState, 'model' | 'loopStatus' | 'queueDepth' | 'context'>>,
+    changes: Partial<Pick<RuntimeStatusState, 'model' | 'loopStatus' | 'activity' | 'queueDepth' | 'context'>>,
     correlationId: string,
   ): void {
     const context = this.runtimeStatusContext(changes.context ?? this.runtimeStatus.context)

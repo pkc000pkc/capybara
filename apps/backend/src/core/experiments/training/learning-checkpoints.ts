@@ -1,5 +1,6 @@
 import type { HookFixture, HookTrainingContext } from '#core/hooks/types'
 import type { SystemVariableDefinition } from '#core/project-resources'
+import { emptyRuntimeCache } from '#core/runtime-loop-utils'
 import { resolveSystemPromptVariables } from '#core/system-prompt-templates'
 import type { RuntimeVariables } from '#protocol/runtime-protocol'
 
@@ -9,6 +10,10 @@ export function learningFixture(
   variables: SystemVariableDefinition[],
   variableValues: Record<string, import('#core/system-prompt-templates').SystemPromptVariableValue> = {},
 ): HookFixture {
+  const messages = training.case.transcript?.length ? training.case.transcript : [
+    { role: 'user' as const, content: training.case.question },
+    { role: 'assistant' as const, content: training.case.actualAnswer },
+  ]
   const resolved = resolveSystemPromptVariables(variables.map((variable) => ({
     ...variable,
     value: variableValues[variable.key] ?? variable.value,
@@ -27,12 +32,8 @@ export function learningFixture(
       missing_prompts: [],
       sys_message: [],
       cache: {
-        version: 1,
-        summary: '',
-        messages: [],
+        ...emptyRuntimeCache(),
         loop: { run_id: training.runId, iteration: 1, tool_round: 0, continuation_round: 0 },
-        compression_count: 0,
-        compressed_at: '',
       },
     },
     task: { title: training.case.question },
@@ -56,15 +57,12 @@ export function learningFixture(
       run: { status: training.evaluation.passed ? 'completed' : 'failed' },
       context: { usedTokens: 0, maxTokens: 0, utilization: 0 },
       queueDepth: 0,
-      messageCount: 2,
+      messageCount: messages.length,
       variableTokens: {},
     },
     changedVariables: [],
     variables: runtimeVariables,
-    messages: [
-      { role: 'user', content: training.case.question },
-      { role: 'assistant', content: training.case.actualAnswer },
-    ],
+    messages,
     training,
   }
 }

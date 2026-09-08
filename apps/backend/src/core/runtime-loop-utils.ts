@@ -4,6 +4,7 @@ import type {
   JsonPatchOperation,
   JsonValue,
   RuntimeCache,
+  RuntimeCacheV2,
   RuntimeVariables,
 } from '#protocol/runtime-protocol'
 import type { LlmMessage, LlmToolCall } from '#util/llm'
@@ -66,14 +67,25 @@ export function textDiff(before: string, after: string): JsonObject {
   }
 }
 
-export function emptyRuntimeCache(): RuntimeCache {
+export function emptyRuntimeCache(): RuntimeCacheV2 {
   return {
-    version: 1,
+    version: 2,
     summary: '',
     messages: [],
     loop: { run_id: '', iteration: 0, tool_round: 0, continuation_round: 0 },
     compression_count: 0,
     compressed_at: '',
+    task_profile: { objective: '', answer_type: 'unknown', constraints: [] },
+    plan: [],
+    claims: [],
+    evidence: [],
+    hypotheses: [],
+    contradictions: [],
+    reviews: [],
+    candidate_answer: '',
+    tool_history: [],
+    failure_history: [],
+    budget: { review_rounds_used: 0, max_review_rounds: 3 },
   }
 }
 
@@ -111,7 +123,7 @@ export function runtimeCacheMessages(value: unknown): LlmMessage[] {
 export function assertRuntimeCache(value: unknown): asserts value is RuntimeCache {
   if (
     !isObject(value)
-    || value.version !== 1
+    || (value.version !== 1 && value.version !== 2)
     || typeof value.summary !== 'string'
     || !isObject(value.loop)
     || typeof value.loop.run_id !== 'string'
@@ -128,6 +140,23 @@ export function assertRuntimeCache(value: unknown): asserts value is RuntimeCach
     throw new Error('builtin.cache has an invalid runtime cache shape')
   }
   runtimeCacheMessages(value.messages)
+  if (value.version === 2) {
+    if (
+      !isObject(value.task_profile)
+      || !Array.isArray(value.plan)
+      || !Array.isArray(value.claims)
+      || !Array.isArray(value.evidence)
+      || !Array.isArray(value.hypotheses)
+      || !Array.isArray(value.contradictions)
+      || !Array.isArray(value.reviews)
+      || typeof value.candidate_answer !== 'string'
+      || !Array.isArray(value.tool_history)
+      || !Array.isArray(value.failure_history)
+      || !isObject(value.budget)
+    ) {
+      throw new Error('builtin.cache has an invalid structured runtime cache shape')
+    }
+  }
 }
 
 export interface ModelOutput {

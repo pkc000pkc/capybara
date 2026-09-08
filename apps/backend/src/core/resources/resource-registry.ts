@@ -228,6 +228,7 @@ export class ProjectResourceRegistry {
     const settings = this.resources.readSettings()
     const fixture = this.hookFixture(fixtureValue)
     const llm = createLlmService({
+      provider: settings.llm.provider,
       model: settings.llm.model,
       baseUrl: settings.llm.base_url,
       protocol: settings.llm.protocol,

@@ -135,11 +135,17 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   }
   const publicProjectSettings = (resources: ProjectResources) => {
     const settings = resources.readSettings()
-    const { api_key: apiKey, ...llm } = settings.llm
+    const { api_key: apiKey, profiles, ...llm } = settings.llm
+    const publicProfiles = profiles.map(({ api_key: profileApiKey, ...profile }) => ({
+      ...profile,
+      api_key: '',
+      api_key_configured: Boolean(profileApiKey),
+    }))
     return {
       ...settings,
       llm: {
         ...llm,
+        profiles: publicProfiles,
         api_key: '',
         api_key_configured: Boolean(apiKey ?? loadLlmConfig().apiKey),
       },
@@ -694,7 +700,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     try {
       const query = request.query as { status?: unknown; offset?: unknown; limit?: unknown }
       const status = typeof query.status === 'string' ? query.status : undefined
-      const validStatuses: ExperimentCaseStatus[] = ['queued', 'running', 'passed', 'failed', 'error', 'cancelled']
+      const validStatuses: ExperimentCaseStatus[] = ['queued', 'running', 'passed', 'failed', 'unscored', 'error', 'cancelled']
       if (status && !validStatuses.includes(status as ExperimentCaseStatus)) throw new Error('invalid experiment case status')
       return getExperimentManager(requestProject(request).path).cases(
         (request.params as { id: string }).id,
@@ -728,6 +734,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.get('/api/resources/system-variables', async (request) =>
     new ProjectResources(requestProject(request).path).readSystemVariables())
+  app.get('/api/resources/system-variables/:key/references', async (request, reply) => {
+    try {
+      const key = (request.params as { key: string }).key
+      if (!/^[a-z][a-z0-9_]*$/.test(key)) throw new Error('system variable key must use lowercase snake_case')
+      const resources = new ProjectResources(requestProject(request).path)
+      return { key, references: resources.findSystemVariableReferences(key) }
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
   app.put('/api/resources/system-variables', async (request, reply) => {
     try {
       return await new ProjectResources(requestProject(request).path)
@@ -776,6 +792,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const startedAt = Date.now()
     try {
       const llm = createLlmService({
+        provider: settings.llm.provider,
         model: settings.llm.model,
         baseUrl: settings.llm.base_url,
         protocol: settings.llm.protocol,

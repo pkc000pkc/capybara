@@ -313,10 +313,21 @@ export function initializeProjectDirectory(input: string): ProjectInitialization
       max_tool_rounds: 8,
       tool_timeout_ms: 15_000,
       llm: {
+        provider: llm.provider,
         model: llm.model,
         base_url: llm.baseUrl,
         protocol: llm.protocol,
         max_retries: llm.maxRetries,
+        active_profile: 'default',
+        profiles: [{
+          id: 'default',
+          name: 'Default',
+          provider: llm.provider,
+          model: llm.model,
+          base_url: llm.baseUrl,
+          protocol: llm.protocol,
+          max_retries: llm.maxRetries,
+        }],
       },
       context: {
         context_window_tokens: 16_000,

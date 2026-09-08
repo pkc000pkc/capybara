@@ -278,6 +278,12 @@ export class ExperimentAdapterRunner {
       throw new Error('experiment adapter score must be a number between 0 and 1')
     }
     if (typeof value.passed !== 'boolean') throw new Error('experiment adapter passed must be a boolean')
+    if (value.unscored !== undefined && typeof value.unscored !== 'boolean') {
+      throw new Error('experiment adapter unscored must be a boolean')
+    }
+    if (value.unscored === true && value.passed === true) {
+      throw new Error('experiment adapter result cannot be both passed and unscored')
+    }
     if (typeof value.rationale !== 'string' || !value.rationale.trim()) {
       throw new Error('experiment adapter rationale must be a non-empty string')
     }
@@ -287,6 +293,7 @@ export class ExperimentAdapterRunner {
     return {
       score: value.score,
       passed: value.passed,
+      ...(value.unscored === true ? { unscored: true } : {}),
       rationale: value.rationale.trim(),
       metrics: (value.metrics ?? {}) as JsonObject,
       ...(value.details === undefined ? {} : { details: jsonValue(value.details, 'experiment adapter details') }),

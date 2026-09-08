@@ -99,7 +99,7 @@ function validateSchedule(value: unknown): HookSchedule {
 function validatePermissions(value: unknown): HookPermissions {
   if (value === undefined) return {}
   if (!isObject(value)) throw new Error('permissions must be an object')
-  const allowed = new Set(['llm', 'variables', 'messages', 'artifacts', 'hooks', 'research'])
+  const allowed = new Set(['llm', 'variables', 'messages', 'artifacts', 'hooks', 'research', 'loop'])
   const unknown = Object.keys(value).find((key) => !allowed.has(key))
   if (unknown) throw new Error(`unsupported Hook permission: ${unknown}`)
   if (value.llm !== undefined && value.llm !== 'project') throw new Error('permissions.llm must be project')
@@ -108,6 +108,7 @@ function validatePermissions(value: unknown): HookPermissions {
   if (value.artifacts !== undefined && value.artifacts !== 'write') throw new Error('permissions.artifacts must be write')
   if (value.hooks !== undefined && value.hooks !== 'write') throw new Error('permissions.hooks must be write')
   if (value.research !== undefined && value.research !== 'append') throw new Error('permissions.research must be append')
+  if (value.loop !== undefined && value.loop !== 'continue') throw new Error('permissions.loop must be continue')
   return value as HookPermissions
 }
 

@@ -112,7 +112,7 @@ export interface CreateExperimentCase {
 }
 
 export interface CompleteExperimentCase {
-  status: Extract<ExperimentCaseStatus, 'passed' | 'failed' | 'error' | 'cancelled'>
+  status: Extract<ExperimentCaseStatus, 'passed' | 'failed' | 'unscored' | 'error' | 'cancelled'>
   actualAnswer: string
   score?: number
   passed?: boolean
@@ -152,6 +152,7 @@ export const EMPTY_EXPERIMENT_METRICS: ExperimentMetrics = {
   p95LatencyMs: 0,
   passed: 0,
   failed: 0,
+  unscored: 0,
   errors: 0,
   cancelled: 0,
   regressions: 0,
@@ -585,7 +586,7 @@ export class ExperimentStore {
     this.database.prepare(`
       UPDATE experiment_runs SET completed_cases = (
         SELECT COUNT(*) FROM experiment_cases
-        WHERE run_id = ? AND status IN ('passed', 'failed', 'error', 'cancelled')
+        WHERE run_id = ? AND status IN ('passed', 'failed', 'unscored', 'error', 'cancelled')
       ), updated_at = ? WHERE id = ?
     `).run(runId, updatedAt, runId)
   }
@@ -602,7 +603,7 @@ export class ExperimentStore {
   scoreMap(runId: string): Map<string, number> {
     const rows = this.database.prepare(`
       SELECT sample_id, AVG(score) AS score FROM experiment_cases
-      WHERE run_id = ? AND score IS NOT NULL GROUP BY sample_id
+      WHERE run_id = ? AND status <> 'unscored' AND score IS NOT NULL GROUP BY sample_id
     `).all(runId) as Array<{ sample_id: string; score: number }>
     return new Map(rows.map((row) => [row.sample_id, row.score]))
   }
