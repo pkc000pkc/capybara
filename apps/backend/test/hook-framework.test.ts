@@ -506,6 +506,116 @@ test('Hook runner preserves LLM usage from failed retry attempts', async () => {
   }
 })
 
+test('Cache compression bounds escaped oversized tool results and preserves recent tool pairs', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-chunk-cache-'))
+  initializeProjectDirectory(projectDir)
+  const hook = new HookRegistry(projectDir).list().find((item) => item.id === 'context-compression')!
+  const input = fixture()
+  input.changedVariables = ['builtin.cache']
+  input.variables.builtin.cache.messages = [
+    { role: 'user', content: 'preserve the original task' },
+    { role: 'assistant', content: '', toolCalls: [{ id: 'old', name: 'fetch', arguments: {} }] },
+    { role: 'tool', toolCallId: 'old', content: 'escaped "\\\\" content '.repeat(9000) },
+    { role: 'assistant', content: 'intermediate conclusion' },
+    { role: 'user', content: 'verify it' },
+    { role: 'assistant', content: '', toolCalls: [{ id: 'recent', name: 'calculate', arguments: {} }] },
+    { role: 'tool', toolCallId: 'recent', content: '42' },
+  ]
+  const original = structuredClone(input.variables)
+  input.status.context = {
+    usedTokens: Math.ceil(JSON.stringify(input.variables.builtin.cache.messages).length / 4) + 1000,
+    maxTokens: 16000, utilization: 1,
+  }
+  let requests = 0
+  const llm: RuntimeLlm = {
+    getConfig: () => ({ provider: 'custom', protocol: 'responses', model: 'test',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0 }),
+    chat: async (request) => {
+      requests += 1
+      assert.ok(Math.ceil(JSON.stringify(request.messages).length / 4) < 8000)
+      return { provider: 'custom', model: 'test', text: 'Evidence summary with source references.', raw: {} }
+    },
+  }
+  try {
+    const result = await new HookRunner(llm).run(hook, input)
+    assert.ok(requests > 1)
+    assert.deepEqual(input.variables, original)
+    const cache = (result.result!.patches![0] as unknown as { value: typeof input.variables.builtin.cache }).value
+    assert.deepEqual(cache.messages, input.variables.builtin.cache.messages.slice(3))
+    assert.ok(JSON.stringify(cache).length / 4 < 8000)
+    const controller = new AbortController()
+    controller.abort()
+    await assert.rejects(new HookRunner(llm).run(hook, input, controller.signal), /aborted/)
+    let failures = 0
+    await assert.rejects(new HookRunner({
+      ...llm, chat: async () => { failures += 1; throw new Error('gateway unavailable') },
+    }).run(hook, input), /gateway unavailable/)
+    assert.equal(failures, 2)
+    assert.deepEqual(input.variables, original, 'failed attempts must not replace Cache')
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('Cache compression triggers before the hard input limit', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-proactive-cache-'))
+  initializeProjectDirectory(projectDir)
+  const hook = new HookRegistry(projectDir).list().find((item) => item.id === 'context-compression')!
+  const input = fixture()
+  input.changedVariables = ['builtin.cache']
+  input.variables.builtin.cache.messages = [{ role: 'user', content: 'evidence '.repeat(5000) }]
+  input.status.context = { usedTokens: 13000, maxTokens: 16000, utilization: 0.8125 }
+  const llm: RuntimeLlm = {
+    getConfig: () => ({ provider: 'custom', protocol: 'responses', model: 'test',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0 }),
+    chat: async () => ({ provider: 'custom', model: 'test', text: 'compact evidence', raw: {} }),
+  }
+  try {
+    assert.equal((await new HookRunner(llm).run(hook, input)).matched, true)
+    input.status.context.usedTokens = 12000
+    assert.equal((await new HookRunner(llm).run(hook, input)).matched, false)
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('Large tool results remain readable in bounded pages without exposing other artifacts', () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-artifact-pages-'))
+  initializeProjectDirectory(projectDir)
+  const loop = new RuntimeLoop({ projectDir })
+  const access = loop as unknown as {
+    createArtifact(kind: string, title: string, value: unknown, correlationId: string): { id: string }
+    boundedToolContent(id: string, value: unknown): string
+    readRuntimeArtifactTool(args: unknown): { content: string; next_offset: number | null }
+  }
+  try {
+    const original = { ok: true, result: 'quoted " evidence\\n'.repeat(15000) }
+    const text = JSON.stringify(original)
+    const artifact = access.createArtifact('tool-result', 'Large webpage', original, 'test')
+    const shortened = JSON.parse(access.boundedToolContent(artifact.id, original))
+    assert.equal(shortened.abbreviated, true)
+    assert.equal(shortened.artifact_id, artifact.id)
+    assert.ok(JSON.stringify(shortened).length < 16000)
+    let offset: number | null = 0
+    let reconstructed = ''
+    while (offset !== null) {
+      const page = access.readRuntimeArtifactTool({ artifact_id: artifact.id, offset, limit: 8000 })
+      assert.ok(page.content.length <= 8000)
+      reconstructed += page.content
+      offset = page.next_offset
+    }
+    assert.equal(reconstructed, text)
+    assert.throws(() => access.readRuntimeArtifactTool({ artifact_id: artifact.id, limit: 9000 }))
+    assert.throws(() => access.readRuntimeArtifactTool({ artifact_id: artifact.id, offset: -1 }))
+    const privateArtifact = access.createArtifact('model-request', 'Private diagnostics', { content: 'private' }, 'test')
+    assert.throws(() => access.readRuntimeArtifactTool({ artifact_id: privateArtifact.id }), /not found/)
+    assert.throws(() => access.readRuntimeArtifactTool({ artifact_id: 'other-session-artifact' }), /not found/)
+  } finally {
+    loop.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
 test('Runtime compresses only Cache after a model iteration exceeds the context limit', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-runtime-'))
   initializeProjectDirectory(projectDir)
@@ -576,13 +686,13 @@ test('Runtime compresses only Cache after a model iteration exceeds the context 
       && (artifact.value as { hookId?: string }).hookId === 'context-compression'
     ))
     assert.equal(runtimeCalls, 2, JSON.stringify(state.artifacts, null, 2))
-    assert.equal(hookCalls, 1, JSON.stringify(state.artifacts, null, 2))
+    assert.ok(hookCalls > 1, 'large Cache must use multiple bounded compression requests')
     assert.ok(runtimeRequests[1]?.messages.some((message) => (
       message.name === 'capybara_cache_summary'
       && message.content.includes('compressed cache summary')
     )))
     assert.equal(JSON.stringify(runtimeRequests[1]?.messages).includes(largeCacheMarker), false)
-    assert.equal(snapshot.variables.value.builtin.cache.summary, 'compressed cache summary')
+    assert.ok(snapshot.variables.value.builtin.cache.summary.includes('compressed cache summary'))
     assert.equal(snapshot.variables.value.builtin.cache.compression_count, 1)
     assert.equal(snapshot.variables.value.context.history_summary, '')
     assert.ok(hookArtifacts.some((artifact) => (
@@ -598,7 +708,7 @@ test('Runtime compresses only Cache after a model iteration exceeds the context 
     })
     try {
       const restoredCache = restored.getSnapshot(0).variables.value.builtin.cache
-      assert.equal(restoredCache.summary, 'compressed cache summary')
+      assert.equal(restoredCache.summary, snapshot.variables.value.builtin.cache.summary)
       assert.equal(restoredCache.compression_count, 1)
       assert.ok(restored.exportState().llmMessages.some((message) => (
         message.name === 'capybara_cache_summary'
@@ -667,7 +777,7 @@ test('Runtime invokes the same Cache compression Hook before a model request aft
     })
     await new Promise((resolve) => setTimeout(resolve, 250))
     await runLoopOnce(loop, 'preflight-cache-after-limit-change', 2)
-    assert.equal(hookCalls, 1)
+    assert.ok(hookCalls > 1)
     assert.equal(runtimeCalls, 2)
     assert.ok(runtimeRequests[1]?.messages.some((message) => (
       message.name === 'capybara_cache_summary'
@@ -675,7 +785,7 @@ test('Runtime invokes the same Cache compression Hook before a model request aft
     )))
     assert.equal(JSON.stringify(runtimeRequests[1]?.messages).includes(largeCacheMarker), false)
     const cache = loop.getSnapshot(0).variables.value.builtin.cache
-    assert.equal(cache.summary, 'preflight cache summary')
+    assert.ok(cache.summary.includes('preflight cache summary'))
     assert.equal(cache.compression_count, 1)
     assert.ok(loop.exportState().artifacts.some((artifact) => (
       artifact.meta.kind === 'hook-result'

@@ -11,6 +11,23 @@ export interface InternalResourceToolDefinition extends Omit<LlmToolDefinition, 
 
 export const INTERNAL_RESOURCE_TOOLS: InternalResourceToolDefinition[] = [
   {
+    name: 'read_runtime_artifact',
+    descriptionVariable: 'runtime_artifact_read_description',
+    defaultDescription: 'Read a page of a tool result archived in this session. Use artifact_id from an abbreviated tool result. Offsets and limits are characters in the serialized JSON, not tokens.',
+    sideEffects: 'none',
+    replay: 'safe',
+    parameters: {
+      type: 'object',
+      properties: {
+        artifact_id: { type: 'string', minLength: 1 },
+        offset: { type: 'integer', minimum: 0 },
+        limit: { type: 'integer', minimum: 1, maximum: 8000 },
+      },
+      required: ['artifact_id'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'search_resources',
     descriptionVariable: 'resource_search_tool_description',
     parameters: {

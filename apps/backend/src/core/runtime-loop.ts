@@ -2489,7 +2489,7 @@ export class RuntimeLoop extends Loop {
       role: 'tool',
       name: request.name,
       toolCallId: request.id,
-      content: JSON.stringify(result),
+      content: this.boundedToolContent(artifact.id, result),
     })
     this.publishRenderedMessages(correlationId)
     const startedAt = plan.createdAt
@@ -3082,7 +3082,9 @@ export class RuntimeLoop extends Loop {
       role: 'tool',
       name: request.name,
       toolCallId: request.id,
-      content: JSON.stringify(result.ok
+      content: request.name === 'read_runtime_artifact'
+        ? JSON.stringify(result.ok ? { ok: true, result: result.output ?? null } : { ok: false, error: result.error })
+        : this.boundedToolContent(resultArtifact.id, result.ok
         ? { ok: true, result: result.output ?? null }
         : { ok: false, error: result.error }),
     })
@@ -4150,6 +4152,7 @@ export class RuntimeLoop extends Loop {
             onLlmActivity: this.hookLlmObserver(hook.name, generation, correlationId),
           })
           this.addUsage(execution.usage)
+          if (this.generation !== generation || controller.signal.aborted) return
           if (execution.matched && execution.result) {
             const requested = await this.applyHookResult(
               hook, execution.result, claimedPaths, correlationId,
@@ -4241,6 +4244,34 @@ export class RuntimeLoop extends Loop {
     generation: number,
   ): Promise<void> {
     const maxTokens = this.runtimeStatus.context.maxTokens
+    for (let pass = 0; pass < 3; pass += 1) {
+      const before = this.estimatedModelInputTokens()
+      if (before <= maxTokens * 0.8 || this.generation !== generation) return
+      await this.compressRuntimeCachePass(correlationId, generation)
+      if (this.generation !== generation) return
+      const after = this.estimatedModelInputTokens()
+      if (after <= maxTokens * 0.8) return
+      if (after >= before) break
+    }
+    const usedTokens = this.estimatedModelInputTokens()
+    if (usedTokens > maxTokens) {
+      const systemTokens = this.estimatedModelInputTokens(this.llmMessages.filter((m) => m.role === 'system'), [])
+      const toolTokens = Math.ceil(JSON.stringify(this.modelToolDefinitions()).length / 4)
+      this.createArtifact('runtime-error', 'Context budget exhausted after Cache compression', {
+        usedTokens, maxTokens, systemTokens, toolTokens,
+        cacheTokens: Math.max(0, usedTokens - systemTokens - toolTokens),
+        estimator: 'serialized-json-characters-divided-by-four',
+      }, correlationId)
+      throw new RuntimeStageError('runtime', 'CACHE_COMPRESSION_INSUFFICIENT',
+        `Cache compression could not fit ${usedTokens} estimated tokens into ${maxTokens}; fixed system=${systemTokens}, tools=${toolTokens}`)
+    }
+  }
+
+  private async compressRuntimeCachePass(
+    correlationId: string,
+    generation: number,
+  ): Promise<void> {
+    const maxTokens = this.runtimeStatus.context.maxTokens
     const usedTokens = this.estimatedModelInputTokens()
     this.updateRuntimeStatus({
       context: {
@@ -4249,7 +4280,7 @@ export class RuntimeLoop extends Loop {
         utilization: Math.min(usedTokens / maxTokens, 1),
       },
     }, correlationId)
-    if (usedTokens <= maxTokens) return
+    if (usedTokens <= maxTokens * 0.8) return
 
     this.syncSystemMessages(correlationId)
     const tools = this.modelToolDefinitions()
@@ -4257,7 +4288,10 @@ export class RuntimeLoop extends Loop {
       this.llmMessages.filter((message) => message.role === 'system'),
       tools,
     )
-    if (fixedTokens > maxTokens) return
+    if (fixedTokens > maxTokens) {
+      throw new RuntimeStageError('runtime', 'FIXED_CONTEXT_WINDOW_EXCEEDED',
+        `Fixed system prompt and Tool schemas require ${fixedTokens} estimated tokens; input budget is ${maxTokens}`)
+    }
 
     const hook = this.hookRegistry.list().find((candidate) => (
       candidate.ownerKind === 'system'
@@ -4289,6 +4323,7 @@ export class RuntimeLoop extends Loop {
         onLlmActivity: this.hookLlmObserver(hook.name, this.generation, correlationId),
       })
       this.addUsage(execution.usage)
+      if (this.generation !== generation || controller.signal.aborted) return
       if (execution.matched && execution.result) {
         await this.applyHookResult(hook, execution.result, new Set<string>(), correlationId)
       }
@@ -4304,6 +4339,10 @@ export class RuntimeLoop extends Loop {
           matched: execution.matched,
           attempts: execution.attempts,
           durationMs: execution.durationMs,
+          beforeTokens: usedTokens,
+          afterTokens: this.estimatedModelInputTokens(),
+          fixedTokens,
+          maxTokens,
           usage: toJsonValue(execution.usage),
           result: toJsonValue(execution.result ?? {}),
         },
@@ -4491,6 +4530,11 @@ export class RuntimeLoop extends Loop {
       ))
       if (cacheChanged && result.messages !== undefined) {
         throw new Error(`Hook ${hook.id} cannot replace messages and builtin.cache together`)
+      }
+      if (cacheChanged && systemCacheCompression) {
+        this.createArtifact('hook-result', 'Cache before compression', {
+          hookId: hook.id, cache: clone(this.variables.value.builtin.cache),
+        }, correlationId)
       }
       if (cacheChanged) this.applyRuntimeCache(candidate.builtin.cache)
       hookPatches.forEach((operation) => claimedPaths.add(operation.path))
@@ -5761,7 +5805,9 @@ export class RuntimeLoop extends Loop {
           this.activeAbortController?.signal,
         )
       }
-      const output = request.name === 'search_resources'
+      const output = request.name === 'read_runtime_artifact'
+        ? this.readRuntimeArtifactTool(request.arguments)
+        : request.name === 'search_resources'
         ? this.searchResources(request.arguments)
         : request.name === 'load_resources'
           ? this.loadResources(request.arguments, correlationId)
@@ -5803,6 +5849,35 @@ export class RuntimeLoop extends Loop {
         durationMs: Date.now() - started,
       }
     }
+  }
+
+  private boundedToolContent(artifactId: string, value: unknown): string {
+    const text = JSON.stringify(value)
+    const budget = Math.max(1024, Math.min(12000, Math.floor(this.availableInputTokens() * 0.05)))
+    if (Math.ceil(text.length / 4) <= budget) return text
+    return JSON.stringify({
+      abbreviated: true, artifact_id: artifactId, total_characters: text.length,
+      preview: text.slice(0, Math.floor(budget * 1.5)),
+      instruction: 'Full result is preserved. Use read_runtime_artifact with artifact_id, offset and limit to inspect further evidence before concluding.',
+    })
+  }
+
+  private readRuntimeArtifactTool(args: unknown): JsonObject {
+    if (!isObject(args) || typeof args.artifact_id !== 'string') throw new Error('artifact_id is required')
+    const offset = args.offset ?? 0
+    const limit = args.limit ?? 4000
+    if (typeof offset !== 'number' || !Number.isInteger(offset) || offset < 0
+      || typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 8000) {
+      throw new Error('offset must be nonnegative and limit must be between 1 and 8000')
+    }
+    const artifact = this.artifacts.get(args.artifact_id)
+    if (!artifact || !['tool-result', 'workflow-result', 'skill-reference', 'skill-script-result'].includes(artifact.meta.kind)) {
+      throw new Error('Tool result artifact not found in this session')
+    }
+    const text = JSON.stringify(artifact.value)
+    return { artifact_id: args.artifact_id, offset, total_characters: text.length,
+      content: text.slice(offset, offset + limit),
+      next_offset: offset + limit < text.length ? offset + limit : null }
   }
 
   private readSystemVariablesTool(argumentsValue: unknown): JsonObject {
