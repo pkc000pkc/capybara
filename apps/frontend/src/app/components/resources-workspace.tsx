@@ -75,6 +75,7 @@ type ProjectSettings = {
   main_template: string;
   max_messages: number;
   max_tool_rounds: number;
+  tool_network_retry: { max_retries: number; initial_delay_ms: number; max_delay_ms: number; request_timeout_ms: number };
   llm: {
     provider: "openai" | "ollama" | "deepseek" | "custom";
     model: string;
@@ -110,6 +111,12 @@ type ProjectLlmProfile = {
   api_key_configured?: boolean;
 };
 
+function validToolNetworkRetry(value: ProjectSettings["tool_network_retry"]) {
+  return Number.isSafeInteger(value.max_retries) && value.max_retries >= -1
+    && [value.initial_delay_ms, value.max_delay_ms, value.request_timeout_ms].every(n => Number.isSafeInteger(n) && n >= 1 && n <= 600000)
+    && value.initial_delay_ms <= value.max_delay_ms;
+}
+
 function normalizeProjectSettings(value: ProjectSettings): ProjectSettings {
   const rawLlm = value.llm;
   const provider = rawLlm.provider ?? "custom";
@@ -137,6 +144,7 @@ function normalizeProjectSettings(value: ProjectSettings): ProjectSettings {
   const active = profiles.find((profile) => profile.id === activeId) ?? profiles[0];
   return {
     ...value,
+    tool_network_retry: { max_retries: 10, initial_delay_ms: 1000, max_delay_ms: 30000, request_timeout_ms: 30000, ...value.tool_network_retry as Partial<ProjectSettings["tool_network_retry"]> },
     llm: {
       ...rawLlm,
       ...active,
@@ -599,6 +607,7 @@ function ProjectSettingsPanel({
   const [showApiKey, setShowApiKey] = useState(false);
   const maxToolRoundsValid = validMaxToolRounds(settings.max_tool_rounds);
   const maxRetriesValid = validMaxRetries(settings.llm.max_retries);
+  const toolNetworkRetryValid = validToolNetworkRetry(settings.tool_network_retry);
   const contextSettingsValid = validContextSettings(settings.context);
   const activeProfile = settings.llm.profiles.find((profile) => profile.id === settings.llm.active_profile)
     ?? settings.llm.profiles[0];
@@ -682,7 +691,7 @@ function ProjectSettingsPanel({
   return (
     <section className="grid h-full min-h-0 grid-rows-[34px_1fr] bg-white">
       <PanelHeader
-        actions={<ResourceSaveButton disabled={!dirty || !maxToolRoundsValid || !maxRetriesValid || !contextSettingsValid} onClick={onSave} />}
+        actions={<ResourceSaveButton disabled={!dirty || !maxToolRoundsValid || !maxRetriesValid || !contextSettingsValid || !toolNetworkRetryValid} onClick={onSave} />}
         icon={SlidersHorizontal}
         title={t("resources.projectSettings")}
       />
@@ -780,6 +789,23 @@ function ProjectSettingsPanel({
             {!contextSettingsValid && (
               <p className="mt-1.5 text-[10px] text-[#a13b32]">{t("resources.contextLimitsInvalid")}</p>
             )}
+          </section>
+          <section aria-labelledby="tool-network-settings-heading" className="border-t border-[#cbd8d9] py-5">
+            <h3 id="tool-network-settings-heading" className="text-[10px] font-semibold text-[#6a7e82]">工具网络重试</h3>
+            <div className="mt-3 grid max-w-xl grid-cols-2 items-start gap-3">
+              {([
+                ["max_retries", "自动重试次数"], ["request_timeout_ms", "单次请求超时（毫秒）"],
+                ["initial_delay_ms", "初始等待（毫秒）"], ["max_delay_ms", "最大等待（毫秒）"],
+              ] as const).map(([key, label]) => (
+                <label key={key} className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
+                  {label}
+                  <input type="number" className={fieldClass} value={settings.tool_network_retry[key]}
+                    onChange={(event) => onChange({ ...settings, tool_network_retry: { ...settings.tool_network_retry, [key]: Number(event.target.value) } })} />
+                </label>
+              ))}
+            </div>
+            <p className="mt-2 text-[10px] text-[#718488]">默认重试 10 次，共 11 次请求。0 为关闭，-1 为无限；停止任务会取消请求和等待。适用于支持网络重试的工具，工具可覆盖项目默认值。</p>
+            {!toolNetworkRetryValid && <p role="alert" className="mt-2 text-[10px] text-[#a13b32]">重试次数须为 -1 或非负整数；时间须为 1–600000 毫秒，初始等待不能超过最大等待。</p>}
           </section>
           <section aria-labelledby="llm-settings-heading" className="border-t border-[#cbd8d9] py-5">
             <div className="flex max-w-xl items-center justify-between gap-3">
@@ -1062,6 +1088,7 @@ export default function ResourcesWorkspace({
     main_template: "main.j2",
     max_messages: 20,
     max_tool_rounds: 8,
+    tool_network_retry: { max_retries: 10, initial_delay_ms: 1000, max_delay_ms: 30000, request_timeout_ms: 30000 },
     llm: {
       provider: "custom",
       model: "",
@@ -1247,6 +1274,7 @@ export default function ResourcesWorkspace({
       || saving
       || !validMaxToolRounds(settings.max_tool_rounds)
       || !validMaxRetries(settings.llm.max_retries)
+      || !validToolNetworkRetry(settings.tool_network_retry)
       || !validContextSettings(settings.context)
     ) return;
     setSaving(true);
@@ -1254,6 +1282,7 @@ export default function ResourcesWorkspace({
       const saved = await resourceRequest<ProjectSettings>(projectPath, "project-settings", {
         max_messages: settings.max_messages,
         max_tool_rounds: settings.max_tool_rounds,
+        tool_network_retry: settings.tool_network_retry,
         llm: {
           provider: settings.llm.provider,
           model: settings.llm.model,

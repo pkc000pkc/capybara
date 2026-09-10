@@ -147,6 +147,7 @@ import {
   type LlmUsage,
 } from '#util/llm'
 import { estimateTokens } from '#util/token-estimate'
+import { blockedToolRequest } from '#core/tools/recovery-policy'
 
 export interface RuntimeLlm {
   chat(request: LlmChatRequest): Promise<LlmChatResponse>
@@ -422,6 +423,7 @@ export class RuntimeLoop extends Loop {
     this.hookRegistry = new HookRegistry(this.projectDir)
     this.toolDispatcher = new ToolDispatcher(this.toolRegistry, this.workspaceDir, {
       timeoutMs: config.tool_timeout_ms,
+      networkRetry: config.tool_network_retry,
       permissions: config.tool_permissions,
     })
     this.skillScriptRunner = new SkillScriptRunner(this.workspaceDir, config.tool_timeout_ms)
@@ -2582,6 +2584,7 @@ export class RuntimeLoop extends Loop {
       value: (retry: LlmRetryNotification) => {
         if (this.generation === generation) {
           this.updateModelRetry(step.id, retry, correlationId)
+          this.createArtifact('hook-log', `Model request retry · ${step.summary}`, { stepId: step.id, ...retry }, correlationId)
         }
       },
     })
@@ -2926,7 +2929,34 @@ export class RuntimeLoop extends Loop {
       const controller = new AbortController()
       this.activeAbortController = controller
       try {
-        result = await this.toolDispatcher.dispatch(request, { signal: controller.signal })
+        const blocked = blockedToolRequest(this.variables.value.builtin.variables?.runtime_recovery,
+          this.run.runId ?? '', request.name, request.arguments)
+        result = blocked ? {
+          id: request.id, name: request.name, ok: false,
+          error: { code: 'INVALID_ARGUMENTS', message: `Runtime recovery: ${blocked}`, details: { code: 'RECOVERY_BLOCKED' } },
+          startedAt, completedAt: now(), durationMs: 0,
+        } : await this.toolDispatcher.dispatch(request, {
+          signal: controller.signal,
+          resolveArtifact: (id) => {
+            const artifact = this.artifacts.get(id)
+            if (!artifact || !['tool-result', 'workflow-result', 'skill-reference', 'skill-script-result'].includes(artifact.meta.kind)) {
+              throw new Error('Tool result artifact not found in this session')
+            }
+            return clone(artifact.value)
+          },
+          onProgress: (progress) => {
+            if (controller.signal.aborted) return
+            step.detail = { ...step.detail, networkRetry: toJsonValue(progress) }
+            this.updateTimeline(step, correlationId)
+            this.updateRuntimeStatus({ activity: {
+              phase: 'tool_running', startedAt: now(),
+              label: `${request.name} · ${progress.phase} · attempt ${progress.attempt}/${progress.maxAttempts === -1 ? '∞' : progress.maxAttempts} · ${progress.reason} · ${progress.delayMs} ms`,
+            } }, correlationId)
+            this.createArtifact('hook-log', `Tool network ${progress.phase} · ${request.name}`, {
+              callId: request.id, toolName: request.name, ...progress,
+            }, correlationId)
+          },
+        })
       } finally {
         if (this.activeAbortController === controller) this.activeAbortController = undefined
       }
@@ -4959,6 +4989,7 @@ export class RuntimeLoop extends Loop {
     this.toolCatalog = nextCatalog
     this.toolDispatcher = new ToolDispatcher(this.toolRegistry, this.workspaceDir, {
       timeoutMs: settings.tool_timeout_ms,
+      networkRetry: settings.tool_network_retry,
       permissions: settings.tool_permissions,
     })
     const nextItems = this.toolCatalog.filter((tool) => enabled.has(tool.id))

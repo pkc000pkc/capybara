@@ -1,4 +1,5 @@
 import type { ValidateFunction } from 'ajv'
+import type { ToolNetworkRetrySettings } from '#core/tools/network-retry'
 
 export type ToolPermission =
   | 'filesystem:read'
@@ -20,6 +21,8 @@ export interface ProjectToolDefinition {
   examples?: Record<string, unknown>[]
   sideEffects?: 'none' | 'workspace-write' | 'external'
   replay?: 'safe' | 'confirm' | 'never'
+  /** Opt in to request-level retries implemented by the runner; overrides project defaults. */
+  networkRetry?: Partial<ToolNetworkRetrySettings>
 }
 
 export interface ToolManifest {

@@ -144,6 +144,7 @@ export class ProjectResourceRegistry {
     if (!tool) throw new Error('tool resource was not found')
     return new ToolDispatcher(registry, this.projectDir, {
       timeoutMs: settings.tool_timeout_ms,
+      networkRetry: settings.tool_network_retry,
       permissions: settings.tool_permissions,
     }).dispatch({ id: randomUUID(), name: tool.name, arguments: argumentsValue })
   }

@@ -445,6 +445,25 @@ test('Hook runner evaluates after-Loop triggers and proxies the project LLM', as
   }
 })
 
+test('Hook model deadline allows deterministic recovery to survive a provider timeout', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-deadline-'))
+  const source = SOURCE.replace('const response = await llm.responses.create({ input: "summarize" });',
+    'let response; try { response = await llm.responses.create({ input: "summarize", timeout_ms: 100 }); } catch { response = { output_text: "deterministic recovery" }; }')
+  const hook = new HookRegistry(projectDir).validateContent('summary-hook', source)
+  const llm: RuntimeLlm = {
+    chat: request => new Promise((_, reject) => {
+      request.signal?.addEventListener('abort', () => reject(new Error('request deadline')), { once: true })
+    }),
+    getConfig: () => ({ provider: 'custom', protocol: 'responses', model: 'deadline-test', baseUrl: 'http://127.0.0.1/unused', timeoutMs: 60000, maxRetries: -1 }),
+  }
+  try {
+    const result = await new HookRunner(llm).run(hook, fixture())
+    const patch = result.result?.patches?.[0]
+    assert.ok(patch && 'value' in patch)
+    assert.equal(patch.value, 'deterministic recovery')
+  } finally { fs.rmSync(projectDir, { recursive: true, force: true }) }
+})
+
 test('Hook model activity reports cancellation once and ignores late provider retries', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-cancel-activity-'))
   const hook = new HookRegistry(projectDir).validateContent('summary-hook', SOURCE)

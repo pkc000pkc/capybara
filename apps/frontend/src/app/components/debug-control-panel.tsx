@@ -153,6 +153,8 @@ export default function DebugControlPanel(props: Props) {
   const [debugView, setDebugView] = useState<DebugView>("trace");
   const selectedStep = timeline.find((step) => step.id === selectedStepId) ?? null;
   const active = ["running", "waiting", "pause_requested", "interrupting"].includes(run.status);
+  const toolRetryValue = timeline.find(step => step.type === "tool" && step.status === "running")?.detail?.networkRetry;
+  const toolRetry = toolRetryValue && typeof toolRetryValue === "object" && !Array.isArray(toolRetryValue) ? toolRetryValue : null;
   const canPause = run.status === "running" || run.status === "waiting";
   const canInterrupt = ["running", "waiting", "pause_requested", "paused"].includes(run.status);
   const canRestore = !active && checkpoints.length > 1;
@@ -281,7 +283,12 @@ export default function DebugControlPanel(props: Props) {
         <ActionButton action="interrupt" disabled={readOnly || !canInterrupt} icon={Square} label={t("debug.interrupt")} onClick={onInterrupt} tone="danger" />
         <span aria-hidden="true" className="mx-1 h-5 w-px bg-[#d5dfdf]" />
         <ActionButton action="restore-previous" disabled={readOnly || !canRestore} icon={Undo2} label={t("debug.restorePrevious")} onClick={onRestorePrevious} />
-        {run.modelRetry ? (
+        {toolRetry ? (
+          <span role="status" className="ml-auto min-w-0 truncate px-1 text-[9px] text-[#815d21]" title={String(toolRetry.reason)}>
+            工具网络{toolRetry.phase === "waiting" ? "等待重试" : "请求"} · {String(toolRetry.attempt)}/{toolRetry.maxAttempts === -1 ? "∞" : String(toolRetry.maxAttempts)}
+            {Number(toolRetry.delayMs) > 0 ? ` · ${Math.ceil(Number(toolRetry.delayMs) / 1000)} 秒后继续` : ""}
+          </span>
+        ) : run.modelRetry ? (
           <span
             className="ml-auto flex min-w-0 max-w-[48%] items-center gap-1 px-1 text-[9px] font-semibold text-[#815d21]"
             data-model-retry-summary

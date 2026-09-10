@@ -309,11 +309,17 @@ export class HookRunner {
     const maxTokens = remainingTokens === undefined
       ? requestedOutputTokens
       : Math.max(1, Math.min(requestedOutputTokens ?? remainingTokens, remainingTokens))
+    const rpcTimeout = message.params.timeout_ms
+    if (rpcTimeout !== undefined && (!Number.isInteger(rpcTimeout) || Number(rpcTimeout) < 100 || Number(rpcTimeout) > 300000)) {
+      throw new Error('Hook model timeout_ms must be an integer between 100 and 300000')
+    }
+    const requestSignal = rpcTimeout === undefined ? signal
+      : signal ? AbortSignal.any([signal, AbortSignal.timeout(Number(rpcTimeout))]) : AbortSignal.timeout(Number(rpcTimeout))
     const request: LlmChatRequest = {
       messages: responseMessages(message.params.input),
       ...(typeof message.params.model === 'string' ? { model: message.params.model } : {}),
       ...(maxTokens === undefined ? {} : { maxTokens }),
-      signal,
+      signal: requestSignal,
     }
     const started = Date.now()
     const requestId = randomUUID()
@@ -330,10 +336,10 @@ export class HookRunner {
       value: (retry: LlmRetryNotification) => notify(retry.phase === 'waiting' ? 'retrying' : 'waiting', retry),
     })
     const aborted = () => notify('failed')
-    signal?.addEventListener('abort', aborted, { once: true })
+    requestSignal?.addEventListener('abort', aborted, { once: true })
     let response
     try {
-      if (signal?.aborted) throw new Error('Hook model request was aborted')
+      if (requestSignal?.aborted) throw new Error('Hook model request was aborted')
       notify('waiting')
       response = await this.llm.chat(request)
       notify('completed')
@@ -341,7 +347,7 @@ export class HookRunner {
       notify('failed')
       throw error
     } finally {
-      signal?.removeEventListener('abort', aborted)
+      requestSignal?.removeEventListener('abort', aborted)
     }
     for (const key of ['inputTokens', 'outputTokens', 'totalTokens', 'cacheReadTokens'] as const) {
       if (response.usage?.[key] !== undefined) usage[key] = (usage[key] ?? 0) + Number(response.usage[key])

@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:chil
 import path from 'node:path'
 
 import { ToolRegistry } from '#core/tools/tool-registry'
+import { toolNetworkRetrySettings, parseToolProgress, type ToolNetworkRetrySettings, type ToolProgress } from '#core/tools/network-retry'
 import type {
   ToolCallErrorCode,
   ToolCallRequest,
@@ -12,19 +13,22 @@ const DEFAULT_OUTPUT_LIMIT = 5 * 1024 * 1024
 
 interface DispatchOptions {
   signal?: AbortSignal
+  onProgress?: (progress: ToolProgress) => void
+  resolveArtifact?: (id: string) => unknown
 }
 
 interface DispatcherOptions {
   timeoutMs?: number
   outputLimitBytes?: number
   permissions?: readonly string[]
+  networkRetry?: ToolNetworkRetrySettings
 }
 
 interface RunnerResponse {
   id?: string
   ok?: boolean
   result?: unknown
-  error?: string
+  error?: string | { code?: string; message?: string; [key: string]: unknown }
 }
 
 function now(): string {
@@ -51,6 +55,7 @@ export class ToolDispatcher {
   private readonly timeoutMs: number
   private readonly outputLimitBytes: number
   private readonly permissions: Set<string>
+  private readonly networkRetry: ToolNetworkRetrySettings
   private activeChild?: ChildProcessWithoutNullStreams
   private abortActive?: () => void
 
@@ -62,6 +67,7 @@ export class ToolDispatcher {
     this.timeoutMs = options.timeoutMs ?? 15_000
     this.outputLimitBytes = options.outputLimitBytes ?? DEFAULT_OUTPUT_LIMIT
     this.permissions = new Set(options.permissions ?? [])
+    this.networkRetry = toolNetworkRetrySettings(options.networkRetry)
   }
 
   dispatch(request: ToolCallRequest, options: DispatchOptions = {}): Promise<ToolCallResult> {
@@ -88,16 +94,38 @@ export class ToolDispatcher {
     }
     if (options.signal?.aborted) return Promise.resolve(fail('ABORTED', 'tool call was aborted'))
 
+    let boundArguments = request.arguments
+    if (boundArguments && typeof boundArguments === 'object' && 'input_artifact' in boundArguments) {
+      const args = boundArguments as Record<string, unknown>
+      if (typeof args.input_artifact !== 'string' || args.input !== undefined || args.input_file !== undefined || !options.resolveArtifact) {
+        return Promise.resolve(fail('INVALID_ARGUMENTS', 'Choose one input source; input_artifact requires a runtime session'))
+      }
+      try {
+        const { input_artifact, ...rest } = args
+        boundArguments = { ...rest, input: options.resolveArtifact(input_artifact as string) }
+      } catch (error) {
+        return Promise.resolve(fail('INVALID_ARGUMENTS', error instanceof Error ? error.message : String(error)))
+      }
+    }
+
+    const retry = toolNetworkRetrySettings({ ...this.networkRetry, ...tool.networkRetry })
+    // The runner retries individual network requests, never the whole tool operation.
+    const timeoutMs = tool.networkRetry !== undefined
+      ? (this.timeoutMs === -1 || retry.max_retries === -1 ? -1
+        : Math.max(this.timeoutMs, (retry.max_retries + 1) * (retry.request_timeout_ms + retry.max_delay_ms)))
+      : this.timeoutMs
     return new Promise((resolve) => {
       const child = spawn(process.execPath, [tool.runnerEntry], {
         cwd: path.dirname(tool.runnerEntry),
         detached: process.platform !== 'win32',
-        env: { ...process.env, CAPYBARA_PROJECT_DIR: path.resolve(this.workspaceDir) },
+        env: { ...process.env, CAPYBARA_PROJECT_DIR: path.resolve(this.workspaceDir),
+          CAPYBARA_TOOL_NETWORK_RETRY: JSON.stringify(retry) },
         stdio: ['pipe', 'pipe', 'pipe'],
       })
       this.activeChild = child
       let stdout = ''
       let stderr = ''
+      let progressBuffer = ''
       let settled = false
       let forcedError: ToolCallResult | undefined
 
@@ -115,11 +143,11 @@ export class ToolDispatcher {
         terminateProcessTree(child)
       }
       const abort = () => stop(fail('ABORTED', 'tool call was aborted'))
-      const timer = this.timeoutMs === -1
+      const timer = timeoutMs === -1
         ? undefined
         : setTimeout(
-            () => stop(fail('TIMEOUT', `tool call exceeded ${this.timeoutMs} ms`)),
-            this.timeoutMs,
+            () => stop(fail('TIMEOUT', `tool call exceeded ${timeoutMs} ms`)),
+            timeoutMs,
           )
       options.signal?.addEventListener('abort', abort, { once: true })
       this.abortActive = abort
@@ -131,6 +159,14 @@ export class ToolDispatcher {
         }
       })
       child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+        progressBuffer += chunk
+        let newline: number
+        while ((newline = progressBuffer.indexOf('\n')) >= 0) {
+          const progress = parseToolProgress(progressBuffer.slice(0, newline).trim())
+          progressBuffer = progressBuffer.slice(newline + 1)
+          if (progress && !settled) options.onProgress?.(progress)
+        }
+        if (progressBuffer.length > 8192) progressBuffer = ''
         stderr += chunk
         if (Buffer.byteLength(stderr) > this.outputLimitBytes) {
           stderr = stderr.slice(-this.outputLimitBytes)
@@ -150,7 +186,9 @@ export class ToolDispatcher {
           return finish(fail('INVALID_RESPONSE', 'tool response id does not match the request'))
         }
         if (response.ok !== true) {
-          return finish(fail('RUNNER_FAILED', response.error || 'tool runner reported an error'))
+          const error = response.error
+          return finish(fail('RUNNER_FAILED', typeof error === 'string' ? error : error?.message || 'tool runner reported an error',
+            typeof error === 'object' ? error : undefined))
         }
         if (tool.validateOutput && !tool.validateOutput(response.result)) {
           return finish(fail('INVALID_OUTPUT', 'tool output failed schema validation', tool.validateOutput.errors))
@@ -168,7 +206,7 @@ export class ToolDispatcher {
       child.stdin.end(JSON.stringify({
         id: request.id,
         tool: request.name,
-        arguments: request.arguments,
+        arguments: boundArguments,
       }))
     })
   }

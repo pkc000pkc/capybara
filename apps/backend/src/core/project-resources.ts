@@ -5,6 +5,7 @@ import path from 'node:path'
 import { loadLlmConfig } from '#util/llm/config'
 import type { LlmProtocol, LlmProviderName } from '#util/llm/types'
 import { enqueueProjectWrite } from '#core/project-write-queue'
+import { toolNetworkRetrySettings, type ToolNetworkRetrySettings } from '#core/tools/network-retry'
 import { findSystemVariableReferences } from '#core/system-variable-references'
 import {
   resolveSystemPromptVariables,
@@ -95,6 +96,7 @@ export interface ProjectSettings {
   max_messages: number
   max_tool_rounds: number
   tool_timeout_ms: number
+  tool_network_retry: ToolNetworkRetrySettings
   llm: {
     provider: LlmProviderName
     model: string
@@ -364,6 +366,7 @@ export class ProjectResources {
       max_messages: maxMessages,
       max_tool_rounds: value.max_tool_rounds ?? 8,
       tool_timeout_ms: value.tool_timeout_ms ?? 15_000,
+      tool_network_retry: toolNetworkRetrySettings(value.tool_network_retry),
       llm: projectLlm,
       context: {
         context_window_tokens: configuredContext.context_window_tokens
@@ -460,6 +463,7 @@ export class ProjectResources {
       ...(value.max_messages === undefined ? {} : { max_messages: value.max_messages }),
       ...(value.max_tool_rounds === undefined ? {} : { max_tool_rounds: value.max_tool_rounds }),
       ...(value.tool_timeout_ms === undefined ? {} : { tool_timeout_ms: value.tool_timeout_ms }),
+      ...(value.tool_network_retry === undefined ? {} : { tool_network_retry: { ...current.tool_network_retry, ...value.tool_network_retry as object } }),
       llm: nextLlm,
       ...(value.context === undefined ? {} : { context: { ...current.context, ...value.context } }),
       ...(value.tools === undefined ? {} : { tools: value.tools }),
@@ -907,6 +911,7 @@ export class ProjectResources {
       max_messages: Number(maxMessages),
       max_tool_rounds: Number(maxToolRounds),
       tool_timeout_ms: Number(toolTimeoutMs),
+      tool_network_retry: toolNetworkRetrySettings(value.tool_network_retry),
       llm: {
         ...active,
         active_profile: activeProfile,

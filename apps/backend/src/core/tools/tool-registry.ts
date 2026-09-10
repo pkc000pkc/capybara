@@ -50,6 +50,15 @@ const MANIFEST_SCHEMA = {
           },
           sideEffects: { enum: ['none', 'workspace-write', 'external'] },
           replay: { enum: ['safe', 'confirm', 'never'] },
+          networkRetry: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              max_retries: { type: 'integer', minimum: -1 },
+              initial_delay_ms: { type: 'integer', minimum: 1, maximum: 600000 },
+              max_delay_ms: { type: 'integer', minimum: 1, maximum: 600000 },
+              request_timeout_ms: { type: 'integer', minimum: 1, maximum: 600000 },
+            },
+          },
         },
       },
     },
