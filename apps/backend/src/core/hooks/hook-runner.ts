@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { Worker } from 'node:worker_threads'
+import { diagnosticContext, diagnosticLog } from '#util/llm/diagnostic-log'
 
 import { compileHookSource } from '#core/hooks/hook-registry'
 import type {
@@ -199,7 +200,20 @@ export class HookRunner {
         throw new HookRunError('Hook token budget was exhausted before retry.', cumulativeUsage, attempt - 1)
       }
       try {
-        const result = await this.runAttempt(hook, fixture, signal, remainingTokens, limits.onLlmActivity)
+        const result = await diagnosticContext.run({ hookId: hook.id, runId: fixture.runId, hookAttempt: attempt, hookExecutionId: randomUUID() }, async () => {
+          const started = Date.now()
+          diagnosticLog('hook.started')
+          const timer = setInterval(() => diagnosticLog('hook.waiting', { elapsedMs: Date.now() - started }), 60000)
+          timer.unref()
+          try {
+            const result = await this.runAttempt(hook, fixture, signal, remainingTokens, limits.onLlmActivity)
+            diagnosticLog('hook.completed', { elapsedMs: Date.now() - started, matched: result.matched, usage: result.usage })
+            return result
+          } catch (error) {
+            diagnosticLog(signal?.aborted ? 'hook.cancelled' : 'hook.failed', { elapsedMs: Date.now() - started, errorType: error instanceof Error ? error.name : 'unknown' })
+            throw error
+          } finally { clearInterval(timer) }
+        })
         return { ...result, attempts: attempt, usage: addUsage(cumulativeUsage, result.usage) }
       } catch (error) {
         const attemptUsage = error instanceof HookAttemptError ? error.usage : {}
@@ -236,6 +250,20 @@ export class HookRunner {
         },
       })
       let settled = false
+      let effectiveDeadline = Date.now() + hook.schedule.timeoutMs
+      let timer: NodeJS.Timeout | undefined
+      const armTimer = () => {
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(
+          () => finish(new Error(`Hook exceeded ${hook.schedule.timeoutMs} ms of active runtime`)),
+          Math.max(1, effectiveDeadline - Date.now()),
+        )
+      }
+      const excludeRetryTime = (excludedMs: number) => {
+        if (settled || !Number.isFinite(excludedMs) || excludedMs <= 0) return
+        effectiveDeadline += excludedMs
+        armTimer()
+      }
       const finish = (error?: unknown, value?: WorkerDone) => {
         if (settled) return
         settled = true
@@ -253,15 +281,14 @@ export class HookRunner {
         })
       }
       const abort = () => finish(new Error('Hook execution was aborted'))
-      const timer = setTimeout(
-        () => finish(new Error(`Hook exceeded ${hook.schedule.timeoutMs} ms`)),
-        hook.schedule.timeoutMs,
-      )
+      armTimer()
       signal?.addEventListener('abort', abort, { once: true })
       worker.on('message', (message: unknown) => {
         if (!isObject(message)) return
         if (message.type === 'rpc') {
-          void this.handleRpc(message, attemptController.signal, usage, maxTotalTokens, hook.id, onLlmActivity).then(
+          void this.handleRpc(
+            message, attemptController.signal, usage, maxTotalTokens, hook.id, onLlmActivity, excludeRetryTime,
+          ).then(
             (result) => {
               if (!settled) worker.postMessage({ type: 'rpc-result', id: message.id, ok: true, result })
             },
@@ -293,6 +320,7 @@ export class HookRunner {
     maxTotalTokens?: number,
     hookId = '',
     onLlmActivity?: HookRunLimits['onLlmActivity'],
+    onRetryExcluded?: (excludedMs: number) => void,
   ): Promise<JsonValue> {
     if (message.method !== 'llm.responses.create' || !isObject(message.params)) {
       throw new Error(`unsupported Hook RPC method: ${String(message.method)}`)
@@ -327,13 +355,17 @@ export class HookRunner {
     const notify = (phase: HookLlmActivity['phase'], retry?: LlmRetryNotification) => {
       if (finished) return
       if (phase === 'completed' || phase === 'failed') finished = true
+      diagnosticLog('hook.model', { hookId, requestId, phase, elapsedMs: Date.now() - started, attempt: retry?.attempt, statusCode: retry?.statusCode, delayMs: retry?.delayMs })
       try {
         onLlmActivity?.({ hookId, requestId, phase, elapsedMs: Date.now() - started, ...(retry ? { retry } : {}) })
       } catch { /* An observer must not change Hook execution. */ }
     }
     Object.defineProperty(request, 'onRetry', {
       enumerable: false,
-      value: (retry: LlmRetryNotification) => notify(retry.phase === 'waiting' ? 'retrying' : 'waiting', retry),
+      value: (retry: LlmRetryNotification) => {
+        if (retry.phase === 'waiting' && retry.excludedMs) onRetryExcluded?.(retry.excludedMs)
+        notify(retry.phase === 'waiting' ? 'retrying' : 'waiting', retry)
+      },
     })
     const aborted = () => notify('failed')
     requestSignal?.addEventListener('abort', aborted, { once: true })
@@ -341,7 +373,7 @@ export class HookRunner {
     try {
       if (requestSignal?.aborted) throw new Error('Hook model request was aborted')
       notify('waiting')
-      response = await this.llm.chat(request)
+      response = await diagnosticContext.run({ ...diagnosticContext.getStore(), hookId, requestId }, () => this.llm.chat(request))
       notify('completed')
     } catch (error) {
       notify('failed')

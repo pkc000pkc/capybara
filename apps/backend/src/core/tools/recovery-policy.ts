@@ -15,6 +15,11 @@ export function blockedToolRequest(state: unknown, runId: string, name: string, 
   for (const entry of policy.blocked_requests.slice(-256)) {
     if (!entry || entry.tool !== name || typeof entry.reason !== 'string') continue
     if (entry.until !== null && (!Number.isFinite(entry.until) || entry.until <= time)) continue
+    if (typeof entry.origin === 'string' && args && typeof args === 'object') {
+      try {
+        if (new URL(String((args as Record<string, unknown>).url)).origin === entry.origin) return entry.reason.slice(0, 1000)
+      } catch { /* Non-URL tools still use exact matching. */ }
+    }
     if (entry.match && typeof entry.match === 'object' && !Array.isArray(entry.match)
       && Object.keys(entry.match).length && args && typeof args === 'object'
       && Object.entries(entry.match).every(([key, value]) => canonical((args as Record<string, unknown>)[key]) === canonical(value))) return entry.reason.slice(0, 1000)

@@ -257,7 +257,7 @@ export type TrainingLearningMode = "review" | "author" | "auto";
 export type TrainingReviewScope = "all" | "failed";
 export type TrainingVariableSource = "project" | "run";
 export type TrainingRunStatus =
-  | "queued" | "running" | "paused" | "paused_failure" | "waiting_review"
+  | "queued" | "running" | "paused" | "paused_failure" | "blocked" | "waiting_review"
   | "ready_to_freeze" | "ready_for_test" | "testing" | "completed" | "failed" | "cancelled";
 export type TrainingCaseStatus =
   | "queued" | "running" | "evaluated" | "learning" | "replaying" | "waiting_review" | "completed" | "error";
@@ -285,6 +285,9 @@ export type TrainingRun = {
     correctionHook?: TrainingHookBinding;
     experienceExtractorHook: TrainingHookBinding;
     timeoutMs: number;
+    maxCorrectionAttempts: number;
+    maxCorrectionTokens: number;
+    maxCorrectionWallTimeMs: number;
     concurrency: 1;
   };
   progress: {
@@ -513,6 +516,9 @@ export type CreateTrainingInput = {
   correctionHook?: TrainingHookBinding;
   experienceExtractorHook: TrainingHookBinding;
   timeoutMs?: number;
+  maxCorrectionAttempts?: number;
+  maxCorrectionTokens?: number;
+  maxCorrectionWallTimeMs?: number;
 };
 
 export type CreateSnapshotEvaluationInput = {

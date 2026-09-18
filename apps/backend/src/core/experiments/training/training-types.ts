@@ -21,6 +21,7 @@ export type TrainingRunStatus =
   | 'running'
   | 'paused'
   | 'paused_failure'
+  | 'blocked'
   | 'waiting_review'
   | 'ready_to_freeze'
   | 'ready_for_test'
@@ -69,6 +70,7 @@ export interface TrainingConfig {
   snapshotSourceRunId?: string
   correctionHook?: TrainingHookBinding
   maxCorrectionAttempts: number
+  /** Per correction attempt, including its Hook and clean execution. */
   maxCorrectionTokens: number
   maxCorrectionWallTimeMs: number
   maxReplayRevisions: number

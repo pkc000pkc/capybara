@@ -8,6 +8,7 @@ export type ColorTheme = 'light' | 'dark' | 'system'
 export interface UserPreferences {
   language: UserLanguage
   color_theme: ColorTheme
+  proxy?: { enabled: boolean; url: string }
 }
 
 const DEFAULT_PREFERENCES: UserPreferences = {
@@ -49,9 +50,16 @@ export class UserPreferencesStore {
     if (!['light', 'dark', 'system'].includes(String(value.color_theme))) {
       throw new Error('color_theme must be light, dark, or system')
     }
+    const proxy = value.proxy ?? { enabled: false, url: '' }
+    if (!isObject(proxy) || typeof proxy.enabled !== 'boolean' || typeof proxy.url !== 'string') throw new Error('invalid proxy settings')
+    if (proxy.url || proxy.enabled) {
+      const url = new URL(proxy.url as string)
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('proxy must be an HTTP(S) server URL without credentials or path')
+    }
     return {
       language: value.language,
       color_theme: value.color_theme as ColorTheme,
+      proxy: { enabled: proxy.enabled, url: (proxy.url as string).trim() },
     }
   }
 }

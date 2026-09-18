@@ -502,6 +502,7 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
   const [inspectedCaseId, setInspectedCaseId] = useState("");
   const [selectedVariable, setSelectedVariable] = useState("");
   const [stopOnFailure, setStopOnFailure] = useState(true);
+  const [budgets, setBudgets] = useState({ timeoutMs: 900000, maxCorrectionAttempts: 5, maxCorrectionTokens: 2000000, maxCorrectionWallTimeMs: 1200000 });
   const [maxTestCases, setMaxTestCases] = useState(DEFAULT_TEST_LIMIT);
   const [maxTrainingCases, setMaxTrainingCases] = useState(DEFAULT_TRAIN_LIMIT);
   const [testDatasetId, setTestDatasetId] = useState("");
@@ -534,6 +535,7 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
     setLearningMode(nextRun.config.learningMode);
     setReviewScope(nextRun.config.reviewScope);
     setStopOnFailure(nextRun.config.pauseOnFailure);
+    setBudgets({ timeoutMs: nextRun.config.timeoutMs, maxCorrectionAttempts: nextRun.config.maxCorrectionAttempts, maxCorrectionTokens: nextRun.config.maxCorrectionTokens, maxCorrectionWallTimeMs: nextRun.config.maxCorrectionWallTimeMs });
     setVariableSource(nextRun.config.variableSource);
     setVariableSourceRunId(nextRun.config.variableSourceRunId ?? "");
     setCorrectionHook(nextRun.config.correctionHook?.hookId ?? "");
@@ -678,6 +680,7 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
         learningMode,
         reviewScope,
         pauseOnFailure: stopOnFailure,
+        ...budgets,
         variableSource,
         ...(variableSource === "run" ? { variableSourceRunId } : {}),
         ...(correctionHook ? { correctionHook: { hookId: correctionHook, parameters: {} } } : {}),
@@ -794,7 +797,7 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
      ? { label: t("experiments.startTraining"), icon: Play, onClick: start, disabled: !runName.trim() || !trainDatasetId || !testDatasetId || trainLimit < 1 || testLimit < 1 || !extractorHook || (variableSource === "run" && !variableSourceRunId) }
     : ["completed", "cancelled"].includes(run.status)
       ? { label: t("experiments.historyReadOnly"), icon: History, onClick: () => undefined, disabled: true }
-    : run.status === "failed"
+    : ["failed", "blocked"].includes(run.status)
       ? { label: t("experiments.retryFailedCase"), icon: RotateCcw, onClick: () => action(() => experimentApi.training.retry(projectPath, run.id)), disabled: false }
     : ["queued", "running", "testing"].includes(run.status)
       ? { label: t("experiments.pauseRun"), icon: Pause, onClick: () => action(() => experimentApi.training.pause(projectPath, run.id)), disabled: false }
@@ -810,7 +813,7 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
   const phaseEnabled = (phase: PhaseId) => phase === "training" || (phase === "freeze" && Boolean(run && (run.progress.training.completed === run.progress.training.total || frozen))) || (phase === "testing" && frozen);
   const phases = [
     { id: "training" as const, icon: BrainCircuit, title: t("experiments.trainingPhase"), count: `${run?.progress.training.completed ?? 0} / ${run?.progress.training.total ?? trainLimit}`, access: t("experiments.writeEnabled"), tone: "write" as const },
-    { id: "freeze" as const, icon: LockKeyhole, title: t("experiments.freezePhase"), count: frozen ? run?.snapshotId?.slice(0, 8) : run?.status === "ready_to_freeze" ? t("experiments.readyToFreeze") : t("experiments.locked"), access: t("experiments.versionedSnapshot"), tone: "frozen" as const },
+    { id: "freeze" as const, icon: LockKeyhole, title: t("experiments.freezePhase"), count: frozen ? run?.snapshotId?.slice(0, 8) : run?.status === "ready_to_freeze" ? t("experiments.readyToFreeze") : run?.status === "blocked" ? t("experiments.blocked") : t("experiments.locked"), access: t("experiments.versionedSnapshot"), tone: "frozen" as const },
     { id: "testing" as const, icon: ShieldCheck, title: t("experiments.testingPhase"), count: `${run?.progress.testing.completed ?? 0} / ${run?.progress.testing.total ?? testLimit}`, access: t("experiments.readOnly"), tone: "read" as const },
   ];
   const trainScores = trainingCases.filter((item) => item.score !== undefined);
@@ -845,6 +848,19 @@ export default function ExperimentTrainingWorkspace({ projectPath, onAnalyzeRun 
     </div>} metadata={`${projectName} · ${run?.name ?? t("experiments.newTraining")}`} title={t("experiments.trainingValidation")} variant="workspace" />
     <div aria-label={t("experiments.learningPipeline")} className="grid grid-cols-[1fr_24px_1fr_24px_1fr] border-b border-[#b9c7ca] bg-white" role="tablist">{phases.map((phase, index) => { const Icon = phase.icon; const enabled = phaseEnabled(phase.id); return <div className="contents" key={phase.id}><button aria-controls="training-phase-detail" aria-selected={activePhase === phase.id} className={`relative grid min-w-0 grid-cols-[28px_minmax(0,1fr)] items-center gap-2 px-3 text-left outline-none after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0c766e] ${activePhase === phase.id ? "bg-[#f3f8f7] after:bg-[#0c766e]" : enabled ? "hover:bg-[#f6f9f8]" : "cursor-not-allowed opacity-50"}`} disabled={!enabled} id={`experiment-training-phase-${phase.id}`} onClick={() => inspectPhase(phase.id)} role="tab" type="button"><span className={`grid h-7 w-7 place-items-center border ${activePhase === phase.id ? "border-[#8fc8bd] bg-[#e8f5f1] text-[#0c766e]" : "border-[#cbd8d9] bg-[#edf3f2] text-[#60777a]"}`}><Icon size={14} /></span><span className="min-w-0"><span className="flex items-center gap-2"><strong className="truncate text-[10px] text-[#29484c]">{phase.title}</strong><AccessBadge tone={phase.tone}>{phase.access}</AccessBadge></span><span className="mt-1 block truncate font-mono text-[8px] text-[#718488]">{phase.count}</span></span></button>{index < phases.length - 1 && <span className="grid place-items-center border-x border-[#e0e8e8] bg-[#edf3f2] text-[#7c9194]"><ArrowRight size={12} /></span>}</div>; })}</div>
      <div className="minimal-scrollbar min-h-0 min-w-0 overflow-auto p-3">
+       <fieldset className="mx-auto mb-3 grid max-w-[1180px] grid-cols-1 gap-3 border border-[#cbd8d9] bg-white p-3 text-[11px] sm:grid-cols-2 lg:grid-cols-4" disabled={busy || Boolean(run)}>
+         <legend className="px-1">执行与纠错预算{run ? "（本次运行快照）" : ""}</legend>
+         {([
+           ["timeoutMs", "单次执行时限（分钟）", 60000, 180],
+           ["maxCorrectionAttempts", "答案纠错最多次数", 1, 5],
+           ["maxCorrectionTokens", "每次纠错 Tokens（含本次 Hook 和重试）", 1, 2000000],
+           ["maxCorrectionWallTimeMs", "纠错总时限（分钟，所有次数合计）", 60000, 900],
+         ] as const).map(([key, label, unit, max]) => <label className="grid content-start gap-1" key={key}>
+           <span className="min-h-8">{label}</span>
+           <input className="h-8 min-w-0 border border-[#cbd8d9] bg-transparent px-2 disabled:text-[#60777a]" max={max} min={1} onChange={(event) => setBudgets((current) => ({ ...current, [key]: Number(event.target.value) * unit }))} step={1} type="number" value={budgets[key] / unit} />
+         </label>)}
+         <p className="col-span-full text-[#60777a]">纠错预算不包含首次执行；网络重试不等于答案纠错。已处理题数不代表答对题数。Token 输入量在请求前估算，实际用量以供应方回报为准。</p>
+       </fieldset>
        <div className="mx-auto grid min-h-[560px] max-w-[1180px] grid-cols-1 gap-3 lg:h-[max(720px,min(900px,calc(100vh-180px)))] lg:grid-cols-[minmax(270px,0.72fr)_minmax(500px,1.28fr)]">
          <div className="grid min-h-0 min-w-0 grid-rows-[minmax(380px,1fr)_minmax(300px,0.8fr)] gap-3">
           {activePhase === "training" && !run

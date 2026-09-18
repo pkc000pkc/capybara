@@ -1,4 +1,5 @@
 "use client";
+import NetworkProxySettings from "./network-proxy-settings";
 
 import {
   Activity,
@@ -86,6 +87,12 @@ type ProjectSettings = {
     api_key_configured: boolean;
     active_profile: string;
     profiles: ProjectLlmProfile[];
+    failover: {
+      enabled: boolean;
+      retries_per_profile: number;
+      initial_delay_ms: number;
+      max_delay_ms: number;
+    };
   };
   harness_policy: {
     experience_top_k: number;
@@ -138,6 +145,12 @@ function normalizeProjectSettings(value: ProjectSettings): ProjectSettings {
         api_key_configured: Boolean(profile.api_key_configured),
       }))
     : [legacyProfile];
+  const failover = {
+    enabled: rawLlm.failover?.enabled ?? profiles.length > 1,
+    retries_per_profile: rawLlm.failover?.retries_per_profile ?? 0,
+    initial_delay_ms: rawLlm.failover?.initial_delay_ms ?? 1000,
+    max_delay_ms: rawLlm.failover?.max_delay_ms ?? 30000,
+  };
   const activeId = rawLlm.active_profile && profiles.some((profile) => profile.id === rawLlm.active_profile)
     ? rawLlm.active_profile
     : profiles[0].id;
@@ -152,6 +165,7 @@ function normalizeProjectSettings(value: ProjectSettings): ProjectSettings {
       api_key_configured: Boolean(rawLlm.api_key_configured ?? active.api_key_configured),
       active_profile: activeId,
       profiles,
+      failover,
     },
   };
 }
@@ -161,6 +175,17 @@ const validMaxToolRounds = (value: number) =>
 
 const validMaxRetries = (value: number) =>
   Number.isInteger(value) && (value === -1 || value >= 0);
+
+const validFailoverSettings = (value: ProjectSettings["llm"]["failover"]) =>
+  Number.isInteger(value.retries_per_profile)
+  && value.retries_per_profile >= 0
+  && value.retries_per_profile <= 10
+  && Number.isInteger(value.initial_delay_ms)
+  && value.initial_delay_ms >= 1
+  && value.initial_delay_ms <= 180000
+  && Number.isInteger(value.max_delay_ms)
+  && value.max_delay_ms >= value.initial_delay_ms
+  && value.max_delay_ms <= 180000;
 
 const validContextSettings = (context: ProjectSettings["context"]) =>
   Number.isInteger(context.context_window_tokens)
@@ -607,6 +632,7 @@ function ProjectSettingsPanel({
   const [showApiKey, setShowApiKey] = useState(false);
   const maxToolRoundsValid = validMaxToolRounds(settings.max_tool_rounds);
   const maxRetriesValid = validMaxRetries(settings.llm.max_retries);
+  const failoverSettingsValid = validFailoverSettings(settings.llm.failover);
   const toolNetworkRetryValid = validToolNetworkRetry(settings.tool_network_retry);
   const contextSettingsValid = validContextSettings(settings.context);
   const activeProfile = settings.llm.profiles.find((profile) => profile.id === settings.llm.active_profile)
@@ -691,7 +717,7 @@ function ProjectSettingsPanel({
   return (
     <section className="grid h-full min-h-0 grid-rows-[34px_1fr] bg-white">
       <PanelHeader
-        actions={<ResourceSaveButton disabled={!dirty || !maxToolRoundsValid || !maxRetriesValid || !contextSettingsValid || !toolNetworkRetryValid} onClick={onSave} />}
+        actions={<ResourceSaveButton disabled={!dirty || !maxToolRoundsValid || !maxRetriesValid || !failoverSettingsValid || !contextSettingsValid || !toolNetworkRetryValid} onClick={onSave} />}
         icon={SlidersHorizontal}
         title={t("resources.projectSettings")}
       />
@@ -953,6 +979,80 @@ function ProjectSettingsPanel({
                   {t(maxRetriesValid ? "resources.llmMaxRetriesHelp" : "resources.llmMaxRetriesInvalid")}
                 </span>
               </label>
+              <div className="col-span-2 grid grid-cols-3 gap-3 border-t border-[#d7e1e1] pt-3">
+                <label className="col-span-3 flex items-center gap-2 text-[11px] font-semibold text-[#35555a]">
+                  <input
+                    checked={settings.llm.failover.enabled}
+                    disabled={settings.llm.profiles.length < 2}
+                    onChange={(event) => onChange({
+                      ...settings,
+                      llm: {
+                        ...settings.llm,
+                        failover: { ...settings.llm.failover, enabled: event.target.checked },
+                      },
+                    })}
+                    type="checkbox"
+                  />
+                  {t("resources.llmFailoverEnabled")}
+                </label>
+                <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
+                  {t("resources.llmFailoverRetries")}
+                  <input
+                    aria-invalid={!failoverSettingsValid}
+                    className={fieldClass}
+                    min={0}
+                    max={10}
+                    onChange={(event) => onChange({
+                      ...settings,
+                      llm: {
+                        ...settings.llm,
+                        failover: { ...settings.llm.failover, retries_per_profile: Number(event.target.value) },
+                      },
+                    })}
+                    type="number"
+                    value={settings.llm.failover.retries_per_profile}
+                  />
+                </label>
+                <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
+                  {t("resources.llmFailoverInitialDelay")}
+                  <input
+                    aria-invalid={!failoverSettingsValid}
+                    className={fieldClass}
+                    min={1}
+                    max={180000}
+                    onChange={(event) => onChange({
+                      ...settings,
+                      llm: {
+                        ...settings.llm,
+                        failover: { ...settings.llm.failover, initial_delay_ms: Number(event.target.value) },
+                      },
+                    })}
+                    type="number"
+                    value={settings.llm.failover.initial_delay_ms}
+                  />
+                </label>
+                <label className="grid gap-1.5 text-[10px] font-semibold text-[#536d72]">
+                  {t("resources.llmFailoverMaxDelay")}
+                  <input
+                    aria-invalid={!failoverSettingsValid}
+                    className={fieldClass}
+                    min={1}
+                    max={180000}
+                    onChange={(event) => onChange({
+                      ...settings,
+                      llm: {
+                        ...settings.llm,
+                        failover: { ...settings.llm.failover, max_delay_ms: Number(event.target.value) },
+                      },
+                    })}
+                    type="number"
+                    value={settings.llm.failover.max_delay_ms}
+                  />
+                </label>
+                <p className="col-span-3 text-[10px] leading-4 text-[#718488]">
+                  {t("resources.llmFailoverHelp")}
+                </p>
+              </div>
               {testState && (
                 <div
                   className={
@@ -1051,7 +1151,7 @@ function SystemSettingsPanel({ preferences }: { preferences?: ReactNode }) {
     <section className="grid h-full min-h-0 grid-rows-[34px_1fr] bg-white">
       <PanelHeader icon={Settings2} title={t("resources.systemSettings")} />
       <div className="minimal-scrollbar min-h-0 overflow-y-auto p-4">
-        <div className="max-w-2xl">{preferences}</div>
+        <div className="max-w-2xl">{preferences}<NetworkProxySettings /></div>
       </div>
     </section>
   );
@@ -1107,6 +1207,12 @@ export default function ResourcesWorkspace({
         protocol: "responses",
         max_retries: 3,
       }],
+      failover: {
+        enabled: false,
+        retries_per_profile: 0,
+        initial_delay_ms: 1000,
+        max_delay_ms: 30000,
+      },
     },
     harness_policy: {
       experience_top_k: 3,
@@ -1274,6 +1380,7 @@ export default function ResourcesWorkspace({
       || saving
       || !validMaxToolRounds(settings.max_tool_rounds)
       || !validMaxRetries(settings.llm.max_retries)
+      || !validFailoverSettings(settings.llm.failover)
       || !validToolNetworkRetry(settings.tool_network_retry)
       || !validContextSettings(settings.context)
     ) return;
@@ -1290,6 +1397,7 @@ export default function ResourcesWorkspace({
           protocol: settings.llm.protocol,
           max_retries: settings.llm.max_retries,
           active_profile: settings.llm.active_profile,
+          failover: settings.llm.failover,
           profiles: settings.llm.profiles.map((profile) => ({
             id: profile.id,
             name: profile.name,

@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import http, { type IncomingHttpHeaders } from 'node:http'
 import https from 'node:https'
+import { modelProxyAgent } from './proxy.js'
+import { networkDiagnostic } from './diagnostic-log.js'
 
 import type {
   LlmChatRequest,
@@ -215,15 +217,20 @@ function postJson(
 ): Promise<HttpResult> {
   return new Promise((resolve, reject) => {
     signal?.throwIfAborted()
+    const diagnostic = networkDiagnostic(body, signal)
     const url = new URL(target)
     const transport = url.protocol === 'https:' ? https : http
     const request = transport.request(
       url,
-      { method: 'POST', headers, timeout: timeoutMs },
+      { method: 'POST', headers, timeout: timeoutMs, agent: modelProxyAgent },
       (response) => {
         response.setEncoding('utf8')
         const statusCode = response.statusCode ?? 0
         const responseHeaders = safeResponseHeaders(response.headers)
+        diagnostic.headers(statusCode, responseHeaders['x-request-id'] ?? responseHeaders['request-id'])
+        response.on('data', (chunk: string) => diagnostic.data(chunk))
+        response.on('end', () => diagnostic.close('http.completed', { statusCode }))
+        response.on('error', () => diagnostic.close('http.response_error', { statusCode }))
         let text = ''
         response.on('data', (chunk: string) => {
           text += chunk
@@ -241,6 +248,8 @@ function postJson(
     )
     request.on('timeout', () => request.destroy(new Error('LLM request timed out')))
     request.on('error', reject)
+    request.on('error', (error: NodeJS.ErrnoException) => diagnostic.close('http.failed', { code: error.code ?? error.name }))
+    request.once('close', () => diagnostic.close('http.closed'))
     const abort = () => request.destroy(abortError(signal))
     signal?.addEventListener('abort', abort, { once: true })
     request.once('close', () => signal?.removeEventListener('abort', abort))
@@ -282,8 +291,11 @@ function canRetry(failedAttempt: number, maxRetries: number): boolean {
 }
 
 export function retryDelayMs(failedAttempt: number, randomValue = Math.random()): number {
-  const exponent = Math.min(Math.max(failedAttempt - 1, 0), 5)
-  const baseDelayMs = Math.min(1_000 * 2 ** exponent, 30_000)
+  // Infinite provider retries use a bounded probe interval. The request's
+  // wall-clock budget is accounted for by the caller; deterministic context
+  // errors never enter this path.
+  const exponent = Math.min(Math.max(failedAttempt - 1, 0), 8)
+  const baseDelayMs = Math.min(1_000 * 2 ** exponent, 180_000)
   const boundedRandom = Math.max(0, Math.min(1, randomValue))
   return Math.round(baseDelayMs * (0.5 + boundedRandom * 0.5))
 }
@@ -305,6 +317,7 @@ async function waitForRetry(
   failedAttempt: number,
   maxRetries: number,
   reason: string,
+  failedRequestMs: number,
   signal?: AbortSignal,
   onRetry?: LlmRetryHandler,
   statusCode?: number,
@@ -314,6 +327,7 @@ async function waitForRetry(
     attempt: failedAttempt + 1,
     maxAttempts: maxRetries === -1 ? -1 : maxRetries + 1,
     reason,
+    excludedMs: Math.max(0, failedRequestMs) + delayMs,
     ...(statusCode === undefined ? {} : { statusCode }),
   }
   onRetry?.({ ...notification, phase: 'waiting', delayMs })
@@ -335,6 +349,7 @@ async function postJsonWithRetry(
   const serialized = serializeRequest(body, counts)
   const startedAt = Date.now()
   for (let attempt = 0; ; attempt += 1) {
+    const attemptStartedAt = Date.now()
     const failedAttempt = attempt + 1
     let result: HttpResult
     try {
@@ -348,13 +363,16 @@ async function postJsonWithRetry(
         failedAttempt,
         maxRetries,
         error instanceof Error ? error.message : String(error),
+        Date.now() - attemptStartedAt,
         signal,
         onRetry,
       )
       continue
     }
     const successfulHttp = result.statusCode >= 200 && result.statusCode < 300
-    const semanticRetryReason = successfulHttp ? retryableResponse?.(result) : undefined
+    const semanticRetryReason = successfulHttp
+      ? (result.text.trim() ? retryableResponse?.(result) : 'empty_response_body')
+      : undefined
     if (successfulHttp && !semanticRetryReason) {
       return {
         ...result,
@@ -380,6 +398,7 @@ async function postJsonWithRetry(
       failedAttempt,
       maxRetries,
       retryReason,
+      Date.now() - attemptStartedAt,
       signal,
       onRetry,
       semanticRetryReason ? undefined : result.statusCode,
@@ -440,6 +459,7 @@ function postSse(
     const url = new URL(target)
     const transport = url.protocol === 'https:' ? https : http
     let settled = false
+    const diagnostic = networkDiagnostic(body, signal)
     const finish = (result: HttpResult) => {
       if (settled) return
       settled = true
@@ -452,12 +472,16 @@ function postSse(
     }
     const request = transport.request(
       url,
-      { method: 'POST', headers, timeout: timeoutMs },
+      { method: 'POST', headers, timeout: timeoutMs, agent: modelProxyAgent },
       (response) => {
         response.setEncoding('utf8')
         const statusCode = response.statusCode ?? 0
         const statusMessage = response.statusMessage ?? ''
         const responseHeaders = safeResponseHeaders(response.headers)
+        diagnostic.headers(statusCode, responseHeaders['x-request-id'] ?? responseHeaders['request-id'])
+        response.on('data', (chunk: string) => diagnostic.data(chunk))
+        response.on('end', () => diagnostic.close('http.completed', { statusCode }))
+        response.on('error', () => diagnostic.close('http.response_error', { statusCode }))
         let text = ''
         if (statusCode < 200 || statusCode >= 300) {
           response.on('data', (chunk: string) => { text += chunk })
@@ -465,7 +489,7 @@ function postSse(
           response.on('error', (error) => fail(new HttpAttemptError(error, statusCode, responseHeaders)))
           return
         }
-        const decoder = new SseDecoder(onEvent)
+        const decoder = new SseDecoder((event, data) => { diagnostic.sse(); onEvent(event, data) })
         response.on('data', (chunk: string) => {
           try {
             decoder.push(chunk)
@@ -489,6 +513,8 @@ function postSse(
     )
     request.on('timeout', () => request.destroy(new Error('LLM request timed out')))
     request.on('error', fail)
+    request.on('error', (error: NodeJS.ErrnoException) => diagnostic.close('http.failed', { code: error.code ?? error.name }))
+    request.once('close', () => diagnostic.close('http.closed'))
     const abort = () => request.destroy(abortError(signal))
     signal?.addEventListener('abort', abort, { once: true })
     request.once('close', () => signal?.removeEventListener('abort', abort))
@@ -499,6 +525,8 @@ function postSse(
 interface SseRetryController {
   onAttemptStart(): void
   onEvent(event: string, data: string): void
+  hasReceivedPayload(): boolean
+  hasCompletedPayload(): boolean
   hasExposedOutput(): boolean
 }
 
@@ -516,6 +544,7 @@ async function postSseWithRetry(
   const serialized = serializeRequest(body, counts)
   const startedAt = Date.now()
   for (let attempt = 0; ; attempt += 1) {
+    const attemptStartedAt = Date.now()
     const failedAttempt = attempt + 1
     controller.onAttemptStart()
     let result: HttpResult
@@ -540,6 +569,7 @@ async function postSseWithRetry(
         failedAttempt,
         maxRetries,
         error instanceof Error ? error.message : String(error),
+        Date.now() - attemptStartedAt,
         signal,
         onRetry,
         error instanceof HttpAttemptError && (error.statusCode ?? 0) >= 400
@@ -549,6 +579,16 @@ async function postSseWithRetry(
       continue
     }
     if (result.statusCode >= 200 && result.statusCode < 300) {
+      if (!controller.hasReceivedPayload() || !controller.hasCompletedPayload()) {
+        const error = new RetryableLlmStreamError('LLM stream ended before a completion event')
+        if (controller.hasExposedOutput() || !canRetry(failedAttempt, maxRetries)) {
+          throw finalRequestError(error, serialized, failedAttempt, maxRetries, startedAt)
+        }
+        await waitForRetry(
+          failedAttempt, maxRetries, error.message, Date.now() - attemptStartedAt, signal, onRetry,
+        )
+        continue
+      }
       return {
         ...result,
         diagnostics: requestDiagnostics(
@@ -568,6 +608,7 @@ async function postSseWithRetry(
       failedAttempt,
       maxRetries,
       `HTTP ${result.statusCode}${result.statusMessage ? ` ${result.statusMessage}` : ''}`,
+      Date.now() - attemptStartedAt,
       signal,
       onRetry,
       result.statusCode,
@@ -972,7 +1013,14 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       this.config.maxRetries,
       request.signal,
       request.onRetry,
-      undefined,
+      (result) => {
+        try {
+          JSON.parse(result.text)
+          return undefined
+        } catch {
+          return 'invalid_json_response'
+        }
+      },
       { messageCount: request.messages.length, toolCount: request.tools?.length ?? 0 },
     )
 
@@ -1009,14 +1057,14 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       usage?: LlmUsage
       raw?: unknown
       receivedPayload: boolean
-      exposedOutput: boolean
+      completed: boolean
       calls: Map<number, { id: string; name: string; arguments: string }>
     }
     const newAttemptState = (): AttemptState => ({
       responseModel: model,
       text: '',
       receivedPayload: false,
-      exposedOutput: false,
+      completed: false,
       calls: new Map(),
     })
     let state = newAttemptState()
@@ -1049,6 +1097,11 @@ export class OpenAiCompatibleProvider implements LlmProvider {
           state = newAttemptState()
         },
         onEvent(_event, data) {
+          if (data === '[DONE]') {
+            state.receivedPayload = true
+            state.completed = true
+            return
+          }
           const payload = parseStreamData(data) as ChatCompletionChunk | undefined
           if (!payload) return
           state.receivedPayload = true
@@ -1060,8 +1113,6 @@ export class OpenAiCompatibleProvider implements LlmProvider {
           const delta = choice?.delta?.content
           if (typeof delta === 'string' && delta) {
             state.text += delta
-            state.exposedOutput = true
-            onTextDelta(delta)
           }
           for (const part of choice?.delta?.tool_calls ?? []) {
             const index = part.index ?? 0
@@ -1073,7 +1124,13 @@ export class OpenAiCompatibleProvider implements LlmProvider {
           }
         },
         hasExposedOutput() {
-          return state.exposedOutput
+          return false
+        },
+        hasReceivedPayload() {
+          return state.receivedPayload
+        },
+        hasCompletedPayload() {
+          return state.completed || state.finishReason !== undefined
         },
       },
       request.signal,
@@ -1083,6 +1140,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     if (!state.receivedPayload) {
       throw new LlmRequestError('LLM stream completed without SSE events', response.diagnostics)
     }
+    if (state.text) onTextDelta(state.text)
     const toolCalls = [...state.calls.entries()]
       .sort(([left], [right]) => left - right)
       .map(([, call]) => ({
@@ -1132,7 +1190,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
             ? `LLM response failed (${failed.code}): ${failed.message}`
             : undefined
         } catch {
-          return undefined
+          return 'invalid_json_response'
         }
       },
       { messageCount: request.messages.length, toolCount: request.tools?.length ?? 0 },
@@ -1177,14 +1235,14 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       completed?: ResponsesApiResponse
       raw?: unknown
       receivedPayload: boolean
-      exposedOutput: boolean
+      streamDone: boolean
       output: Map<number, NonNullable<ResponsesApiResponse['output']>[number]>
     }
     const newAttemptState = (): AttemptState => ({
       responseModel: model,
       text: '',
       receivedPayload: false,
-      exposedOutput: false,
+      streamDone: false,
       output: new Map(),
     })
     let state = newAttemptState()
@@ -1206,6 +1264,11 @@ export class OpenAiCompatibleProvider implements LlmProvider {
           state = newAttemptState()
         },
         onEvent(eventName, data) {
+          if (data === '[DONE]') {
+            state.receivedPayload = true
+            state.streamDone = true
+            return
+          }
           const value = parseStreamData(data)
           if (!value) return
           const event = value as ResponsesStreamEvent
@@ -1216,8 +1279,6 @@ export class OpenAiCompatibleProvider implements LlmProvider {
             state.responseModel = event.response.model ?? state.responseModel
           } else if (type === 'response.output_text.delta' && typeof event.delta === 'string') {
             state.text += event.delta
-            state.exposedOutput = true
-            onTextDelta(event.delta)
           } else if (
             (type === 'response.output_item.added' || type === 'response.output_item.done') &&
             event.item
@@ -1245,7 +1306,14 @@ export class OpenAiCompatibleProvider implements LlmProvider {
           }
         },
         hasExposedOutput() {
-          return state.exposedOutput
+          return false
+        },
+        hasReceivedPayload() {
+          return state.receivedPayload
+        },
+        hasCompletedPayload() {
+          return state.completed !== undefined
+            || (state.streamDone && (state.text.length > 0 || state.output.size > 0))
         },
       },
       request.signal,
@@ -1257,12 +1325,9 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     }
     if (state.completed) {
       const completedText = textFromResponsesApi(state.completed)
-      if (completedText.startsWith(state.text)) {
-        const remaining = completedText.slice(state.text.length)
-        if (remaining) onTextDelta(remaining)
-        state.text = completedText
-      }
+      if (completedText) state.text = completedText
     }
+    if (state.text) onTextDelta(state.text)
     const payload: ResponsesApiResponse = state.completed ?? {
       model: state.responseModel,
       status: state.finishReason,

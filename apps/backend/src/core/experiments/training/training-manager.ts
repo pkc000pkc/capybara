@@ -49,7 +49,7 @@ import type { JsonObject } from '#protocol/runtime-protocol'
 const DEFAULT_TIMEOUT_MS = 15 * 60_000
 const MAX_TIMEOUT_MS = 3 * 60 * 60_000
 const DEFAULT_MAX_CORRECTION_ATTEMPTS = 5
-const DEFAULT_MAX_CORRECTION_TOKENS = 40_000
+const DEFAULT_MAX_CORRECTION_TOKENS = 2_000_000
 const DEFAULT_MAX_CORRECTION_WALL_TIME_MS = 20 * 60_000
 const DEFAULT_MAX_REPLAY_REVISIONS = 2
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'testing'])
@@ -214,7 +214,7 @@ export class TrainingManager {
       input.maxCorrectionTokens, DEFAULT_MAX_CORRECTION_TOKENS, 2_000_000, 'maxCorrectionTokens',
     )
     const maxCorrectionWallTimeMs = boundedInteger(
-      input.maxCorrectionWallTimeMs, DEFAULT_MAX_CORRECTION_WALL_TIME_MS, 60 * 60_000, 'maxCorrectionWallTimeMs',
+      input.maxCorrectionWallTimeMs, DEFAULT_MAX_CORRECTION_WALL_TIME_MS, 5 * MAX_TIMEOUT_MS, 'maxCorrectionWallTimeMs',
     )
     const maxReplayRevisions = boundedInteger(
       input.maxReplayRevisions, DEFAULT_MAX_REPLAY_REVISIONS, 10, 'maxReplayRevisions',
@@ -589,7 +589,7 @@ export class TrainingManager {
 
   retry(id: string): TrainingRun {
     const run = this.store.getRun(id)
-    if (run.status !== 'failed') throw new Error('training run has no terminal failure to retry')
+    if (!['failed', 'blocked'].includes(run.status)) throw new Error('training run has no terminal failure to retry')
     const cases = this.store.listCases(id)
     const failedCase = cases.find((item) => item.status === 'error')
       ?? cases.find((item) => item.status !== 'completed')
@@ -628,7 +628,12 @@ export class TrainingManager {
     if (!['ready_to_freeze', 'ready_for_test', 'completed'].includes(run.status)) {
       throw new Error('training must finish before promoting variables')
     }
-    const result = await this.writer.promote(this.store.baselineVariables(id), this.store.runVariables(id))
+    // Session baselines are replay inputs, never long-term project promotions.
+    const sessionKeys = new Set(new PluginRegistry(this.projectDir).effectiveSystemVariablesState().resource.variables
+      .filter(variable => variable.scope === 'session').map(variable => variable.key))
+    const baseline = Object.fromEntries(Object.entries(this.store.baselineVariables(id))
+      .filter(([key]) => !sessionKeys.has(key)))
+    const result = await this.writer.promote(baseline, this.store.runVariables(id))
     this.store.recordEvent(id, 'variables.promoted', {
       contentHash: result.contentHash,
       variables: Object.keys(result.variables).sort(),
@@ -713,9 +718,20 @@ export class TrainingManager {
         const phase = run.status === 'testing' ? 'testing' : 'training'
         const next = this.store.listCases(id, phase).find((item) => !['completed', 'unresolved', 'error'].includes(item.status))
         if (!next) {
-          this.store.setRunStatus(id, phase === 'training' ? 'ready_to_freeze' : 'completed', {
+          const phaseCases = this.store.listCases(id, phase)
+          // A corrected case keeps its original failed score for auditability,
+          // but is terminally completed once the correction/replay pipeline
+          // succeeds. Readiness is therefore based on terminal case status,
+          // while unresolved/error cases remain blocked.
+          const trainingReady = phase === 'training'
+            && phaseCases.length > 0
+            && phaseCases.every((item) => item.status === 'completed')
+          const terminalStatus = phase === 'training'
+            ? (trainingReady ? 'ready_to_freeze' : 'blocked')
+            : 'completed'
+          this.store.setRunStatus(id, terminalStatus, {
             currentCaseId: null,
-            pauseReason: null,
+            pauseReason: terminalStatus === 'blocked' ? 'Training has unresolved, failed, or incomplete cases.' : null,
           })
           return
         }
@@ -778,9 +794,10 @@ export class TrainingManager {
     persist = true,
     timeoutMs = run.config.timeoutMs,
     deadlineAt?: number,
+    maxTotalTokens?: number,
   ): Promise<ExperimentCaseDetail> {
     const overridableVariables = new Set(
-      new ProjectResources(this.projectDir).readSystemVariables().variables
+      new PluginRegistry(this.projectDir).effectiveSystemVariablesState().resource.variables
         .filter((variable) => !variable.readonly)
         .map((variable) => variable.key),
     )
@@ -789,6 +806,8 @@ export class TrainingManager {
     let aggregateUsage = { ...EMPTY_USAGE }
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const remainingMs = deadlineAt === undefined ? timeoutMs : deadlineAt - Date.now()
+      const remainingTokens = maxTotalTokens === undefined ? undefined : maxTotalTokens - aggregateUsage.totalTokens
+      if (remainingTokens !== undefined && remainingTokens < 1) throw new Error('TOKEN_BUDGET_EXHAUSTED')
       if (remainingMs < 1_000) throw new CorrectionBudgetError('Correction wall-time budget was exhausted.')
       const child = await this.experiments.create({
         datasetId: item.datasetId,
@@ -800,6 +819,7 @@ export class TrainingManager {
         sampleIds: [item.sampleId],
       }, {
         allowDirtyProject: true,
+        ...(remainingTokens !== undefined ? { maxTotalTokens: remainingTokens } : {}),
         ...(overrides && Object.keys(overrides).length ? { variableOverrides: overrides } : {}),
       })
       if (persist) this.store.startCase(item.id, child.id)
@@ -888,14 +908,28 @@ export class TrainingManager {
     while (true) {
       const context = this.hookContext(run, extractionItem, 'training', undefined, attempts)
       const variableValues = this.store.runVariables(run.id)
-      const extraction = await hookRunner.run(
-        'after_evaluation', run.config.experienceExtractorHook, context, variableValues,
-        undefined,
-        {
-          referencePolicy: 'hidden',
-          onLlmActivity: (activity) => this.store.recordEvent(run.id, 'hook.llm', { sourceCaseId: item.id, ...activity }),
-        },
-      )
+      let extraction
+      try {
+        extraction = await hookRunner.run(
+          'after_evaluation', run.config.experienceExtractorHook, context, variableValues,
+          undefined,
+          {
+            referencePolicy: 'hidden',
+            onLlmActivity: (activity) => this.store.recordEvent(run.id, 'hook.llm', { sourceCaseId: item.id, ...activity }),
+          },
+        )
+      } catch (error) {
+        this.store.recordEvent(run.id, 'experience.extraction_failed', {
+          sourceCaseId: item.id,
+          hookId: run.config.experienceExtractorHook.hookId,
+          message: error instanceof Error ? error.message : String(error),
+          usage: error instanceof LearningHookExecutionError ? error.usage : { ...EMPTY_USAGE },
+        })
+        // Evaluation already succeeded (including any correction). Learning is
+        // best-effort and must not change the case or batch outcome.
+        this.store.setCaseStatus(item.id, 'completed')
+        return
+      }
       const generated = extraction.experiences.map((candidate) =>
         this.candidate(run, item, run.config.experienceExtractorHook.hookId, candidate))
       if (generated.length === 0) {
@@ -977,11 +1011,14 @@ export class TrainingManager {
     let failedItem = seed
     let semanticAttempts = attempts.filter((attempt) =>
       !['hook_error', 'execution_error', 'evaluation_error'].includes(attempt.terminalReason ?? '')).length
-    while (semanticAttempts < run.config.maxCorrectionAttempts) {
+    // Every correction invocation consumes one bounded attempt, including
+    // malformed Hook output and execution failures. Provider/network retries
+    // remain inside executeCase and must not create an unbounded correction loop.
+    while (attempts.length < run.config.maxCorrectionAttempts) {
       const elapsed = Date.now() - startedAt
       const usedTokens = attempts.reduce((total, attempt) =>
         total + (attempt.usage.totalTokens ?? 0) + (attempt.hookUsage.totalTokens ?? 0), 0)
-      if (elapsed >= run.config.maxCorrectionWallTimeMs || usedTokens >= run.config.maxCorrectionTokens) {
+      if (elapsed >= run.config.maxCorrectionWallTimeMs) {
         this.store.recordEvent(run.id, 'correction.budget_exhausted', {
           sourceCaseId: source.id,
           reason: elapsed >= run.config.maxCorrectionWallTimeMs ? 'max_wall_time' : 'max_tokens',
@@ -993,7 +1030,8 @@ export class TrainingManager {
       }
       const ordinal = attempts.length + 1
       const attemptStartedAt = new Date().toISOString()
-      const remainingTokens = run.config.maxCorrectionTokens - usedTokens
+      // Each correction receives a fresh allowance, shared by its Hook and execution.
+      const remainingTokens = run.config.maxCorrectionTokens
       let execution
       try {
         execution = await hookRunner.run(
@@ -1032,7 +1070,8 @@ export class TrainingManager {
         }
         this.store.createCorrectionAttempt(attempt)
         attempts.push(attempt)
-        return { attempts }
+        if (attempts.length >= run.config.maxCorrectionAttempts) return { attempts }
+        continue
       }
 
       if (!execution.correction) {
@@ -1059,7 +1098,8 @@ export class TrainingManager {
         }
         this.store.createCorrectionAttempt(attempt)
         attempts.push(attempt)
-        return { attempts }
+        if (attempts.length >= run.config.maxCorrectionAttempts) return { attempts }
+        continue
       }
 
       const proposal = execution.correction
@@ -1085,10 +1125,11 @@ export class TrainingManager {
         }
         this.store.createCorrectionAttempt(attempt)
         attempts.push(attempt)
-        return { attempts }
+        if (attempts.length >= run.config.maxCorrectionAttempts) return { attempts }
+        continue
       }
 
-      const totalAfterHook = usedTokens + execution.usage.totalTokens
+      const totalAfterHook = execution.usage.totalTokens
       const elapsedAfterHook = Date.now() - startedAt
       const budgetReason: TrainingCorrectionAttempt['terminalReason'] = totalAfterHook >= run.config.maxCorrectionTokens
         ? 'max_tokens'
@@ -1115,6 +1156,7 @@ export class TrainingManager {
         }
         this.store.createCorrectionAttempt(attempt)
         attempts.push(attempt)
+        if (budgetReason === 'max_tokens') { semanticAttempts += 1; continue }
         return { attempts }
       }
 
@@ -1128,6 +1170,7 @@ export class TrainingManager {
           false,
           Math.min(run.config.timeoutMs, run.config.maxCorrectionWallTimeMs - elapsedAfterHook),
           startedAt + run.config.maxCorrectionWallTimeMs,
+          run.config.maxCorrectionTokens - totalAfterHook,
         )
       } catch (error) {
         const attempt: TrainingCorrectionAttempt = {
@@ -1144,12 +1187,14 @@ export class TrainingManager {
           passed: false,
           rationale: error instanceof Error ? error.message : String(error),
           failure: failure(error, 'CORRECTION_EXECUTION_FAILED'),
-          terminalReason: error instanceof CorrectionBudgetError ? error.reason : 'execution_error',
+          terminalReason: error instanceof CorrectionBudgetError ? error.reason
+            : String(error).includes('TOKEN_BUDGET_EXHAUSTED') ? 'max_tokens' : 'execution_error',
           startedAt: attemptStartedAt,
           completedAt: new Date().toISOString(),
         }
         this.store.createCorrectionAttempt(attempt)
         attempts.push(attempt)
+        if (attempt.terminalReason === 'max_tokens') { semanticAttempts += 1; continue }
         return { attempts }
       }
 
@@ -1158,8 +1203,11 @@ export class TrainingManager {
       const totalTokens = totalAfterHook + detail.usage.totalTokens
       const wallTimeReached = Date.now() - startedAt >= run.config.maxCorrectionWallTimeMs
       const tokenLimitReached = totalTokens >= run.config.maxCorrectionTokens
-      const terminalReason: TrainingCorrectionAttempt['terminalReason'] = infrastructureFailure
-        ? detail.failure?.phase === 'runtime' ? 'execution_error' : 'evaluation_error'
+        || detail.failure?.message.includes('TOKEN_BUDGET_EXHAUSTED') === true
+      const terminalReason: TrainingCorrectionAttempt['terminalReason'] = tokenLimitReached
+        ? 'max_tokens'
+        : infrastructureFailure
+        ? detail.failure?.phase === 'evaluation' ? 'evaluation_error' : 'execution_error'
         : detail.passed === true
           ? 'succeeded'
           : semanticOrdinal >= run.config.maxCorrectionAttempts
@@ -1194,6 +1242,11 @@ export class TrainingManager {
       }
       this.store.createCorrectionAttempt(attempt)
       attempts.push(attempt)
+      if (tokenLimitReached) {
+        semanticAttempts = semanticOrdinal
+        // An exhausted attempt must not consume the next attempt's allowance.
+        continue
+      }
       if (infrastructureFailure) return { attempts }
       semanticAttempts = semanticOrdinal
       const replayedItem = this.caseFromDetail(source, detail, source.evaluation?.reference)
@@ -1347,7 +1400,7 @@ export class TrainingManager {
 
   private assertCorrectionOverrides(overrides: Record<string, string>): void {
     const variables = new Map(
-      new ProjectResources(this.projectDir).readSystemVariables().variables
+      new PluginRegistry(this.projectDir).effectiveSystemVariablesState().resource.variables
         .map((variable) => [variable.key, variable]),
     )
     for (const key of Object.keys(overrides)) {
@@ -1397,7 +1450,11 @@ export class TrainingManager {
           this.store.setExperienceStatus(candidate.id, 'rejected', this.replayMetadata(candidate))
         }
       }
-      this.store.setCaseStatus(sourceCaseId, conflicted ? 'unresolved' : 'completed')
+      // A correct source answer remains completed even when optional
+      // experience extraction/replay fails. `unresolved` is reserved for a
+      // task whose answer or correction could not be resolved.
+      const sourceCase = this.store.getCase(sourceCaseId)
+      this.store.setCaseStatus(sourceCaseId, conflicted && sourceCase.passed !== true ? 'unresolved' : 'completed')
       if (run.status === 'waiting_review') this.store.setRunStatus(runId, 'running', { pauseReason: null })
       if (schedule) this.schedule(runId)
       return

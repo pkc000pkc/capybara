@@ -54,6 +54,8 @@ export interface RuntimeModelRetry {
   /** -1 indicates an unlimited number of attempts. */
   maxAttempts: number
   delayMs: number
+  /** Failed request time plus scheduled backoff, excluded from task runtime budgets. */
+  excludedMs?: number
   reason: string
   statusCode?: number
   updatedAt: string

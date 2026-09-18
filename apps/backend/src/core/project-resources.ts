@@ -106,6 +106,7 @@ export interface ProjectSettings {
     api_key?: string
     active_profile: string
     profiles: ProjectLlmProfile[]
+    failover: ProjectLlmFailoverSettings
   }
   context: {
     context_window_tokens: number
@@ -137,6 +138,13 @@ export interface ProjectLlmProfile {
   protocol: LlmProtocol
   max_retries: number
   api_key?: string
+}
+
+export interface ProjectLlmFailoverSettings {
+  enabled: boolean
+  retries_per_profile: number
+  initial_delay_ms: number
+  max_delay_ms: number
 }
 
 export type ProjectResourceChange =
@@ -347,17 +355,28 @@ export class ProjectResources {
     const activeApiKey = activeProfile && isObject(activeProfile)
       ? activeProfile.api_key ?? secrets.legacy
       : secrets.legacy
+    const configuredFailover = isObject(configuredLlm.failover) ? configuredLlm.failover : {}
+    const failover = {
+      enabled: typeof configuredFailover.enabled === 'boolean'
+        ? configuredFailover.enabled
+        : profileValues.length > 1,
+      retries_per_profile: configuredFailover.retries_per_profile ?? 0,
+      initial_delay_ms: configuredFailover.initial_delay_ms ?? 1_000,
+      max_delay_ms: configuredFailover.max_delay_ms ?? 30_000,
+    }
     const projectLlm = activeProfile && isObject(activeProfile)
       ? {
           ...activeProfile,
           active_profile: requestedActiveProfile,
           profiles: profileValues,
+          failover,
           ...(activeApiKey ? { api_key: activeApiKey } : {}),
         }
       : {
           ...legacyProfile,
           active_profile: requestedActiveProfile,
           profiles: profileValues,
+          failover,
           ...(secrets.legacy ? { api_key: secrets.legacy } : {}),
         }
     return this.validateSettings({
@@ -455,6 +474,10 @@ export class ProjectResources {
         ...active,
         active_profile: active.id,
         profiles,
+        failover: {
+          ...current.llm.failover,
+          ...(isObject(incomingLlm.failover) ? incomingLlm.failover : {}),
+        },
       }
     }
     const next = {
@@ -496,6 +519,7 @@ export class ProjectResources {
             base_url: settings.llm.base_url,
             protocol: settings.llm.protocol,
             max_retries: settings.llm.max_retries,
+            failover: settings.llm.failover,
           },
     })
     const profileSecrets = Object.fromEntries(
@@ -845,6 +869,20 @@ export class ProjectResources {
     const activeProfile = typeof llm.active_profile === 'string' ? llm.active_profile.trim() : (profiles[0] as ProjectLlmProfile).id
     if (!profileIds.has(activeProfile)) throw new Error(`llm.active_profile does not match a profile: ${activeProfile}`)
     const active = profiles.find((profile) => profile.id === activeProfile) as ProjectLlmProfile
+    const failover = llm.failover
+    if (!isObject(failover)) throw new Error('llm.failover must be an object')
+    if (typeof failover.enabled !== 'boolean') throw new Error('llm.failover.enabled must be boolean')
+    if (!Number.isInteger(failover.retries_per_profile) || Number(failover.retries_per_profile) < 0 || Number(failover.retries_per_profile) > 10) {
+      throw new Error('llm.failover.retries_per_profile must be an integer between 0 and 10')
+    }
+    for (const key of ['initial_delay_ms', 'max_delay_ms'] as const) {
+      if (!Number.isInteger(failover[key]) || Number(failover[key]) < 1 || Number(failover[key]) > 180_000) {
+        throw new Error(`llm.failover.${key} must be an integer between 1 and 180000`)
+      }
+    }
+    if (Number(failover.initial_delay_ms) > Number(failover.max_delay_ms)) {
+      throw new Error('llm.failover.initial_delay_ms must not exceed max_delay_ms')
+    }
     const context = value.context
     if (!isObject(context)) throw new Error('context must be an object')
     const contextWindowTokens = context.context_window_tokens
@@ -916,6 +954,12 @@ export class ProjectResources {
         ...active,
         active_profile: activeProfile,
         profiles,
+        failover: {
+          enabled: failover.enabled,
+          retries_per_profile: Number(failover.retries_per_profile),
+          initial_delay_ms: Number(failover.initial_delay_ms),
+          max_delay_ms: Number(failover.max_delay_ms),
+        },
       },
       context: {
         context_window_tokens: Number(contextWindowTokens),

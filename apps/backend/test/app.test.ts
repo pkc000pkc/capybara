@@ -444,17 +444,28 @@ test('user preferences are stored outside projects', async () => {
   const app = await buildApp({ userConfigDir })
   try {
     const initial = await app.inject({ method: 'GET', url: '/api/preferences' })
-    assert.deepEqual(initial.json(), { language: 'zh-CN', color_theme: 'system' })
+    assert.deepEqual(initial.json(), {
+      language: 'zh-CN',
+      color_theme: 'system',
+    })
 
     const saved = await app.inject({
       method: 'PUT',
       url: '/api/preferences',
       payload: { language: 'en', color_theme: 'dark' },
     })
-    assert.deepEqual(saved.json(), { language: 'en', color_theme: 'dark' })
+    assert.deepEqual(saved.json(), {
+      language: 'en',
+      color_theme: 'dark',
+      proxy: { enabled: false, url: '' },
+    })
     assert.deepEqual(
       JSON.parse(fs.readFileSync(path.join(userConfigDir, 'settings.json'), 'utf8')),
-      { language: 'en', color_theme: 'dark' },
+      {
+        language: 'en',
+        color_theme: 'dark',
+        proxy: { enabled: false, url: '' },
+      },
     )
 
     const partial = await app.inject({
@@ -462,7 +473,11 @@ test('user preferences are stored outside projects', async () => {
       url: '/api/preferences',
       payload: { color_theme: 'light' },
     })
-    assert.deepEqual(partial.json(), { language: 'en', color_theme: 'light' })
+    assert.deepEqual(partial.json(), {
+      language: 'en',
+      color_theme: 'light',
+      proxy: { enabled: false, url: '' },
+    })
   } finally {
     await app.close()
     fs.rmSync(userConfigDir, { recursive: true, force: true })
@@ -835,6 +850,12 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
       base_url: 'http://127.0.0.1:1234/v1',
       protocol: 'chat-completions',
       max_retries: 3,
+      failover: {
+        enabled: false,
+        retries_per_profile: 0,
+        initial_delay_ms: 1_000,
+        max_delay_ms: 30_000,
+      },
     })
     const storedSecrets = JSON.parse(
       fs.readFileSync(path.join(projectDir, '.capybara', 'secrets.json'), 'utf8'),
@@ -2384,12 +2405,13 @@ test('model failures preserve phase, message, and request artifact links', async
 })
 
 test('invalid model output is classified separately from transport failures', async () => {
-  const llm = fakeLlm(async () => ({
+  let calls = 0
+  const llm = fakeLlm(async () => { calls += 1; return ({
     provider: 'custom',
     model: 'test-model',
     text: 'not valid loop JSON',
     raw: {},
-  }))
+  }) })
   await withRuntime(async (client) => {
     client.send('chat.message.send', {
       clientMessageId: 'invalid-output-message',
@@ -2403,7 +2425,51 @@ test('invalid model output is classified separately from transport failures', as
     assert.equal(failed.payload.failure?.phase, 'model_output_validation')
     assert.equal(failed.payload.failure?.code, 'MODEL_OUTPUT_INVALID')
     assert.equal(failed.payload.failure?.retryable, true)
+    assert.equal(calls, 4)
     assert.equal(typeof failed.payload.failure?.responseArtifactId, 'string')
+  }, { llm })
+})
+
+test('invalid model output is repaired in the existing conversation', async () => {
+  let calls = 0
+  const llm = fakeLlm(async request => {
+    calls += 1
+    if (calls === 2) {
+      assert.ok(request.messages.some(message => message.content.includes('not valid loop JSON')))
+      assert.ok(request.messages.some(message => message.content.includes('do not restart the task')))
+    }
+    return { provider: 'custom', model: 'test-model', text: calls === 1 ? 'not valid loop JSON' : JSON.stringify({ status: 'completed', content: 'Repaired answer' }), raw: {} }
+  })
+  await withRuntime(async client => {
+    client.send('chat.message.send', { clientMessageId: 'repair-output', content: [{ type: 'text', text: 'Answer' }], autoStart: true })
+    await client.waitFor('run.state.changed', event => event.payload.status === 'completed')
+    assert.equal(calls, 2)
+  }, { llm })
+})
+
+test('unlimited model retries also keep repairing invalid output', async () => {
+  let calls = 0
+  const llm = {
+    ...fakeLlm(async () => {
+      calls += 1
+      return {
+        provider: 'custom' as const,
+        model: 'test-model',
+        text: calls < 6 ? 'invalid output' : JSON.stringify({ status: 'completed', content: 'Recovered' }),
+        raw: {},
+      }
+    }),
+    getConfig: () => ({
+      provider: 'custom' as const, protocol: 'responses' as const, model: 'test-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1_000, maxRetries: -1,
+    }),
+  }
+  await withRuntime(async client => {
+    client.send('chat.message.send', {
+      clientMessageId: 'unlimited-output-repair', content: [{ type: 'text', text: 'Answer' }], autoStart: true,
+    })
+    await client.waitFor('run.state.changed', event => event.payload.status === 'completed')
+    assert.equal(calls, 6)
   }, { llm })
 })
 

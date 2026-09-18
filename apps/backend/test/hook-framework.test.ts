@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 
 import { HookRegistry } from '#core/hooks/hook-registry'
 import { HookRunError, HookRunner, type HookLlmActivity } from '#core/hooks/hook-runner'
@@ -461,6 +462,30 @@ test('Hook model deadline allows deterministic recovery to survive a provider ti
     const patch = result.result?.patches?.[0]
     assert.ok(patch && 'value' in patch)
     assert.equal(patch.value, 'deterministic recovery')
+  } finally { fs.rmSync(projectDir, { recursive: true, force: true }) }
+})
+
+test('Hook active-runtime timeout excludes provider retry time', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-retry-time-'))
+  const source = SOURCE.replace('timeoutMs: 2000', 'timeoutMs: 200')
+  const hook = new HookRegistry(projectDir).validateContent('summary-hook', source)
+  const llm: RuntimeLlm = {
+    chat: async request => {
+      request.onRetry?.({
+        phase: 'waiting', attempt: 2, maxAttempts: -1, delayMs: 300,
+        excludedMs: 500, reason: 'upstream timeout',
+      })
+      await delay(300)
+      return { provider: 'custom', model: 'hook-model', text: 'recovered', raw: {} }
+    },
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'hook-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: -1,
+    }),
+  }
+  try {
+    const result = await new HookRunner(llm).run(hook, fixture())
+    assert.equal(result.matched, true)
   } finally { fs.rmSync(projectDir, { recursive: true, force: true }) }
 })
 

@@ -34,12 +34,21 @@ export interface LlmUsage {
 
 export interface LlmRetryNotification {
   phase: 'waiting' | 'attempting'
+  kind?: 'request_retry' | 'profile_switch'
   attempt: number
   /** -1 indicates an unlimited number of attempts. */
   maxAttempts: number
   delayMs: number
+  /** Failed request time plus scheduled backoff, excluded from task runtime budgets. */
+  excludedMs?: number
   reason: string
   statusCode?: number
+  profileId?: string
+  provider?: LlmProviderName
+  model?: string
+  nextProfileId?: string
+  nextProvider?: LlmProviderName
+  nextModel?: string
 }
 
 export interface LlmRequestDiagnostics {

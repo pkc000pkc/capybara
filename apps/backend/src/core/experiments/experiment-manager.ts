@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { diagnosticLog } from '#util/llm/diagnostic-log'
 import fs from 'node:fs'
 import path from 'node:path'
 import nunjucks from 'nunjucks'
 
 import { DatasetStore, type DatasetRecord } from '#core/datasets/dataset-store'
+import { budgetedLlm } from '#core/experiments/llm-budget'
 import { ExperimentAdapterRunner } from '#core/experiments/experiment-adapter'
 import {
   EMPTY_EXPERIMENT_METRICS,
@@ -28,11 +30,12 @@ import type {
   ExperimentUsage,
 } from '#core/experiments/types'
 import { ProjectGitService } from '#core/project-git'
+import { createProjectLlmService } from '#core/project-llm'
 import { ProjectResources } from '#core/project-resources'
 import { RuntimeLoop, type RuntimeLlm, type RuntimeLoopOptions } from '#core/runtime-loop'
 import type { ChannelEvent, ClientCommand, RunState } from '#protocol/runtime-protocol'
 import type { JsonObject, JsonValue } from '#protocol/runtime-protocol'
-import { createLlmService, type LlmChatResponse, type LlmUsage } from '#util/llm'
+import type { LlmChatResponse, LlmUsage } from '#util/llm'
 
 export interface CreateExperimentInput {
   datasetId?: unknown
@@ -50,11 +53,13 @@ export interface ExperimentManagerOptions {
 }
 
 export interface ExperimentExecutionOptions {
+  maxTotalTokens?: number
   allowDirtyProject?: boolean
   variableOverrides?: Record<string, string>
 }
 
 type ActiveExperiment = {
+  maxTotalTokens?: number
   controller: AbortController
   loops: Set<RuntimeLoop>
   llm: RuntimeLlm
@@ -316,6 +321,7 @@ export class ExperimentManager {
       loops: new Set<RuntimeLoop>(),
       llm,
       ...(execution.variableOverrides ? { variableOverrides: { ...execution.variableOverrides } } : {}),
+      ...(execution.maxTotalTokens ? { maxTotalTokens: execution.maxTotalTokens } : {}),
     }
     this.active.set(id, active)
     active.done = Promise.resolve().then(() => this.executeRun(run, cases, active))
@@ -504,20 +510,25 @@ export class ExperimentManager {
     this.store.startCase(item.id, startedAt)
     const workspaceDir = this.prepareWorkspace(run.id, item.id)
     if (active.variableOverrides && Object.keys(active.variableOverrides).length > 0) {
-      await new ProjectResources(workspaceDir).updateExperimentSystemVariables(
-        Object.entries(active.variableOverrides).map(([key, value]) => ({ key, value })),
+      const resources = new ProjectResources(workspaceDir)
+      const projectKeys = new Set(resources.readSystemVariables().variables.map(variable => variable.key))
+      await resources.updateExperimentSystemVariables(
+        Object.entries(active.variableOverrides).filter(([key]) => projectKeys.has(key)).map(([key, value]) => ({ key, value })),
       )
     }
     const loop = new RuntimeLoop({
       ...this.runtimeLoopOptions,
       projectDir: workspaceDir,
       workspaceDir,
-      llm: active.llm,
+      initialVariableOverrides: active.variableOverrides,
+      llm: active.maxTotalTokens ? budgetedLlm(active.llm, active.maxTotalTokens) : active.llm,
     })
     active.loops.add(loop)
     let adapter: ExperimentAdapterRunner | undefined
     let adapterPrepare: JsonValue | undefined
     let adapterCleaned = false
+    let excludedRetryMs = 0
+    const activeLatencyMs = () => Math.max(0, Date.now() - started - excludedRetryMs)
     const adapterPayload = (additional: JsonObject = {}) => jsonObject({
       run: {
         id: run.id,
@@ -550,6 +561,7 @@ export class ExperimentManager {
     let abortTimer: NodeJS.Timeout | undefined
     const timeoutController = new AbortController()
     const cancel = () => {
+      diagnosticLog('experiment.cancel_requested', { experimentRunId: run.id, caseId: item.id, source: 'experiment_cancel' })
       timeoutController.abort(active.controller.signal.reason)
       const snapshot = loop.getSnapshot(0)
       if (snapshot.run.runId && !TERMINAL_RUN_STATUSES.has(snapshot.run.status)) {
@@ -592,14 +604,11 @@ export class ExperimentManager {
         fs.writeFileSync(caseFile, `${JSON.stringify(caseContext, null, 2)}\n`, 'utf8')
       }
       const terminal = new Promise<RunState>((resolve, reject) => {
-        const unsubscribe = loop.onEvent((event) => {
-          if (event.type === 'run.state.changed' && TERMINAL_RUN_STATUSES.has(event.payload.status)) {
-            unsubscribe()
-            resolve(event.payload)
-          }
-        })
-        abortTimer = setTimeout(() => {
-          const timeoutError = new Error(`experiment case exceeded ${run.config.timeoutMs} ms`)
+        let effectiveDeadline = Date.now() + run.config.timeoutMs
+        const creditedRetries = new Set<string>()
+        const onTimeout = () => {
+          diagnosticLog('experiment.cancel_requested', { experimentRunId: run.id, caseId: item.id, source: 'case_timeout', timeoutMs: run.config.timeoutMs, runtimeRunId: loop.getSnapshot(0).run.runId })
+          const timeoutError = new Error(`experiment case exceeded ${run.config.timeoutMs} ms of active runtime`)
           timeoutController.abort(timeoutError)
           const snapshot = loop.getSnapshot(0)
           if (snapshot.run.runId && !TERMINAL_RUN_STATUSES.has(snapshot.run.status)) {
@@ -611,7 +620,33 @@ export class ExperimentManager {
           }
           unsubscribe()
           reject(timeoutError)
-        }, run.config.timeoutMs)
+        }
+        const armTimeout = () => {
+          if (abortTimer) clearTimeout(abortTimer)
+          abortTimer = setTimeout(onTimeout, Math.max(1, effectiveDeadline - Date.now()))
+        }
+        const unsubscribe = loop.onEvent((event) => {
+          if (event.type !== 'run.state.changed') return
+          const retry = event.payload.modelRetry
+          if (retry?.phase === 'waiting' && retry.excludedMs && retry.excludedMs > 0) {
+            const key = `${retry.stepId}:${retry.attempt}`
+            if (!creditedRetries.has(key)) {
+              creditedRetries.add(key)
+              excludedRetryMs += retry.excludedMs
+              effectiveDeadline += retry.excludedMs
+              diagnosticLog('experiment.retry_time_excluded', {
+                experimentRunId: run.id, caseId: item.id, runtimeRunId: event.payload.runId,
+                stepId: retry.stepId, attempt: retry.attempt, excludedMs: retry.excludedMs,
+              })
+              armTimeout()
+            }
+          }
+          if (TERMINAL_RUN_STATUSES.has(event.payload.status)) {
+            unsubscribe()
+            resolve(event.payload)
+          }
+        })
+        armTimeout()
       })
       this.command(loop, 'chat.message.send', {
         clientMessageId: `experiment-${item.id}`,
@@ -673,7 +708,7 @@ export class ExperimentManager {
           usage: runtimeUsage,
           agentUsage: runtimeUsage,
           scoringUsage: usage(),
-          latencyMs: Date.now() - started,
+          latencyMs: activeLatencyMs(),
           ...(runtimeRunId ? { runtimeRunId } : {}),
           failure: runtimeFailure,
           trace,
@@ -704,7 +739,7 @@ export class ExperimentManager {
           usage: runtimeUsage,
           agentUsage: runtimeUsage,
           scoringUsage: usage(),
-          latencyMs: Date.now() - started,
+          latencyMs: activeLatencyMs(),
           ...(runtimeRunId ? { runtimeRunId } : {}),
           evaluation: {
             source: 'project',
@@ -732,7 +767,7 @@ export class ExperimentManager {
         usage: addUsage(runtimeUsage, scoringUsage),
         agentUsage: runtimeUsage,
         scoringUsage,
-        latencyMs: Date.now() - started,
+        latencyMs: activeLatencyMs(),
         ...(runtimeRunId ? { runtimeRunId } : {}),
         evaluation: { source: 'llm', metrics: {} },
         trace,
@@ -767,7 +802,7 @@ export class ExperimentManager {
         usage: usage(state.runUsage),
         agentUsage: usage(state.runUsage),
         scoringUsage: usage(),
-        latencyMs: Date.now() - started,
+        latencyMs: activeLatencyMs(),
         ...(runtimeRunId ? { runtimeRunId } : {}),
         failure: caseFailure,
         trace: {
@@ -957,14 +992,7 @@ export class ExperimentManager {
 
   private projectLlm(): RuntimeLlm {
     const settings = new ProjectResources(this.projectDir).readSettings()
-    return createLlmService({
-      provider: settings.llm.provider,
-      model: settings.llm.model,
-      baseUrl: settings.llm.base_url,
-      protocol: settings.llm.protocol,
-      apiKey: settings.llm.api_key,
-      maxRetries: settings.llm.max_retries,
-    })
+    return createProjectLlmService(settings.llm)
   }
 
   private prepareWorkspace(runId: string, caseId: string): string {

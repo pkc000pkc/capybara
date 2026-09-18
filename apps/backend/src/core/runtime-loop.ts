@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { diagnosticContext, diagnosticLog } from '#util/llm/diagnostic-log'
 import fs from 'node:fs'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -12,6 +13,7 @@ import type { HookFixture, HookResult, HookStatusSnapshot } from '#core/hooks/ty
 import { Loop } from '#core/loop'
 import { PluginRegistry } from '#core/plugins/plugin-registry'
 import { installSystemProjectResources } from '#core/project-initializer'
+import { createProjectLlmService } from '#core/project-llm'
 import { enqueueProjectWrite } from '#core/project-write-queue'
 import { appendResearchEvents, readResearchLedgerEvents } from '#core/research-ledger'
 import { ProjectResourceRegistry } from '#core/resources/resource-registry'
@@ -135,7 +137,6 @@ import {
   type SkillResourceState,
 } from '#protocol/runtime-protocol'
 import {
-  createLlmService,
   LlmRequestError,
   type LlmChatRequest,
   type LlmChatResponse,
@@ -165,6 +166,8 @@ export interface RuntimeLoopOptions {
   stepDelayMs?: number
   llm?: RuntimeLlm
   initialState?: RuntimeLoopState
+  /** Isolated experiment inputs, resolved against the effective plugin registry. */
+  initialVariableOverrides?: Record<string, string>
   skillMarketplace?: RuntimeSkillMarketplace
 }
 
@@ -400,6 +403,13 @@ export class RuntimeLoop extends Loop {
     const config = this.projectResources.readSettings()
     const pluginRegistry = new PluginRegistry(this.projectDir)
     const systemVariablesState = pluginRegistry.effectiveSystemVariablesState()
+    for (const [key, value] of Object.entries(options.initialVariableOverrides ?? {})) {
+      const variable = systemVariablesState.resource.variables.find(item => item.key === key)
+      if (!variable) throw new Error(`system variable was not found: ${key}`)
+      if (variable.readonly) throw new Error(`system variable is read-only: ${key}`)
+      if (typeof variable.value !== 'string') throw new Error(`experiment override requires a string variable: ${key}`)
+      variable.value = value
+    }
     this.systemVariables = systemVariablesState.resource
     this.maxMessages = config.max_messages
     this.maxToolRounds = config.max_tool_rounds
@@ -428,14 +438,7 @@ export class RuntimeLoop extends Loop {
     })
     this.skillScriptRunner = new SkillScriptRunner(this.workspaceDir, config.tool_timeout_ms)
     this.projectLlmEnabled = options.llm === undefined
-    this.llm = options.llm ?? createLlmService({
-      provider: config.llm.provider,
-      model: config.llm.model,
-      baseUrl: config.llm.base_url,
-      protocol: config.llm.protocol,
-      apiKey: config.llm.api_key,
-      maxRetries: config.llm.max_retries,
-    })
+    this.llm = options.llm ?? createProjectLlmService(config.llm)
     if (this.projectLlmEnabled) {
       this.projectLlmConfigFingerprint = this.llmConfigFingerprint(config)
     }
@@ -1294,7 +1297,7 @@ export class RuntimeLoop extends Loop {
   private hookLlmObserver(hookName: string, generation: number, correlationId: string) {
     return (activity: HookLlmActivity) => {
       if (this.generation !== generation) return
-      this.updateModelRetry(activity.hookId, activity.retry, correlationId)
+      this.updateModelRetry(`${activity.hookId}:${activity.requestId}`, activity.retry, correlationId)
       this.updateRuntimeStatus({ activity: {
         phase: activity.phase === 'retrying' ? 'model_retry'
           : activity.phase === 'waiting' ? 'model_waiting' : 'hook_running',
@@ -2166,11 +2169,25 @@ export class RuntimeLoop extends Loop {
       }
       this.workflows = { ...this.workflows, activePlanId: planId, items: [...this.workflows.items, failed] }
       this.publishWorkflows(correlationId)
-      throw new RuntimeStageError(
-        'workflow_validation',
-        'WORKFLOW_DEFINITION_INVALID',
-        error instanceof Error ? error.message : String(error),
-      )
+      const result = { ok: false, error: {
+        code: 'WORKFLOW_DEFINITION_INVALID', category: 'validation', recoverable: true,
+        message: error instanceof Error ? error.message : String(error),
+        nextAction: 'Correct execute_workflow arguments and call again. Required top-level fields: version (1), goal, steps. No workflow steps were executed. Do not repeat unchanged arguments.',
+      } }
+      const artifact = this.createArtifact('workflow-result', 'Workflow argument validation failed', result, correlationId)
+      this.updateWorkflowPlan(planId, { resultArtifactId: artifact.id }, correlationId)
+      step.detail = { ...step.detail, ok: false, validationFailed: true, resultArtifactId: artifact.id, resultPreview: artifact.preview }
+      this.llmMessages.push({ role: 'tool', name: request.name, toolCallId: request.id, content: JSON.stringify(result) })
+      this.pendingWorkflowCalls.delete(step.id)
+      this.publishRenderedMessages(correlationId)
+      this.emit('tool.call.failed', { callId: request.id, toolName: request.name, code: result.error.code,
+        message: result.error.message, startedAt: failed.createdAt, completedAt: failed.completedAt ?? now(), durationMs: 0 }, correlationId)
+      this.upsertObservation({ id: `observation-${this.run.runId}-${request.id}`, runId: this.run.runId as string,
+        stepId: step.id, callId: request.id, toolName: request.name, status: 'failed',
+        arguments: toJsonValue(request.arguments), resultArtifactId: artifact.id, resultPreview: artifact.preview,
+        error: toJsonValue(result.error), startedAt: failed.createdAt, completedAt: failed.completedAt ?? now(), durationMs: 0 }, correlationId)
+      diagnosticLog('workflow.validation_failed', { runId: this.run.runId, callId: request.id, code: result.error.code, recovery: 'model_argument_repair' })
+      return
     }
     const data: WorkflowExecutionData = {
       steps: Object.fromEntries(definition.steps.map((item) => [item.id, { status: 'pending' }])),
@@ -2579,13 +2596,30 @@ export class RuntimeLoop extends Loop {
         : {}),
       signal: controller.signal,
     }
+    let lastRetry: LlmRetryNotification | undefined
     Object.defineProperty(request, 'onRetry', {
       enumerable: false,
       value: (retry: LlmRetryNotification) => {
+        try {
+        lastRetry = retry
+        process.stderr.write(`CAPYBARA_MODEL_RETRY ${JSON.stringify({
+          timestamp: now(), runId: this.run.runId, stepId: step.id,
+          kind: retry.kind ?? 'request_retry',
+          phase: retry.phase, attempt: retry.attempt, maxAttempts: retry.maxAttempts,
+          delayMs: retry.delayMs, excludedMs: retry.excludedMs ?? null,
+          statusCode: retry.statusCode ?? null,
+          profileId: retry.profileId ?? null,
+          provider: retry.provider ?? null,
+          model: retry.model ?? null,
+          nextProfileId: retry.nextProfileId ?? null,
+          nextProvider: retry.nextProvider ?? null,
+          nextModel: retry.nextModel ?? null,
+        })}\n`)
         if (this.generation === generation) {
           this.updateModelRetry(step.id, retry, correlationId)
           this.createArtifact('hook-log', `Model request retry · ${step.summary}`, { stepId: step.id, ...retry }, correlationId)
         }
+        } catch { /* Observers cannot interrupt a retry. */ }
       },
     })
     const nativeStream = llm.stream !== undefined
@@ -2630,6 +2664,7 @@ export class RuntimeLoop extends Loop {
         `model input requires ${estimatedInputTokens} tokens but the configured limit is ${maxTokens}; only builtin.cache is compressible`,
       )
     }
+    this.updateRuntimeStatus({ model: 'busy', activity: { phase: 'model_waiting', label: step.summary, startedAt: now() } }, correlationId)
     const requestStarted = Date.now()
     let firstDeltaAt: number | undefined
     let streamChunks = 0
@@ -2654,15 +2689,44 @@ export class RuntimeLoop extends Loop {
       }
     })
     let response: LlmChatResponse
+    const logLifecycle = (event: string) => {
+      try {
+      const diagnostic = {
+        event, timestamp: now(), runId: this.run.runId, stepId: step.id,
+        requestArtifactId: requestArtifact.id, model: request.model ?? llmConfig.model,
+        protocol: llmConfig.protocol, elapsedMs: Date.now() - requestStarted,
+        firstTextDeltaMs: firstDeltaAt === undefined ? null : firstDeltaAt - requestStarted,
+        textChunks: streamChunks, messageCount: request.messages.length,
+        toolCount: request.tools?.length ?? 0, estimatedInputTokens,
+        contextHash: createHash('sha256').update(JSON.stringify({ messages: request.messages, tools: request.tools })).digest('hex'),
+        maxRetries: llmConfig.maxRetries, socketTimeoutMs: llmConfig.timeoutMs,
+        retryPhase: lastRetry?.phase ?? null, retryAttempt: lastRetry?.attempt ?? null,
+        retryStatusCode: lastRetry?.statusCode ?? null, retryDelayMs: lastRetry?.delayMs ?? null,
+        aborted: controller.signal.aborted,
+      }
+      this.createArtifact('hook-log', `Model lifecycle · ${event}`, diagnostic, correlationId)
+      // Also retain diagnostics when the process exits before its trace is saved.
+      process.stderr.write(`CAPYBARA_MODEL_LIFECYCLE ${JSON.stringify(diagnostic)}\n`)
+      } catch { /* Diagnostics must not interrupt execution. */ }
+    }
+    logLifecycle('started')
+    const diagnosticTimer = setInterval(() => logLifecycle('waiting'), 60_000)
+    diagnosticTimer.unref()
+    const recordAbort = () => logLifecycle('cancel_requested')
+    controller.signal.addEventListener('abort', recordAbort, { once: true })
     try {
       try {
-        response = nativeStream
+        response = await diagnosticContext.run({ runId: this.run.runId, stepId: step.id, requestArtifactId: requestArtifact.id }, async () => nativeStream
           ? await llm.stream!(request, (delta) => outputStream.push(delta))
-          : await llm.chat(request)
+          : await llm.chat(request))
+        logLifecycle('completed')
       } catch (error) {
+        logLifecycle(controller.signal.aborted ? 'cancelled' : 'failed')
         throw this.modelInvocationError(error)
       }
     } finally {
+      clearInterval(diagnosticTimer)
+      controller.signal.removeEventListener('abort', recordAbort)
       if (this.activeAbortController === controller) this.activeAbortController = undefined
       if (this.generation === generation) {
         this.updateModelRetry(step.id, undefined, correlationId)
@@ -2735,22 +2799,35 @@ export class RuntimeLoop extends Loop {
       this.updateRuntimeStatus({ model: 'ready', queueDepth: calls.length }, correlationId)
       return
     }
-    if (!response.text) {
-      throw new RuntimeStageError(
-        'model_output_validation',
-        'MODEL_OUTPUT_EMPTY',
-        'LLM returned neither text nor tool calls',
-        true,
-      )
-    }
     let output: ModelOutput
     try {
+      if (!response.text) throw new Error('LLM returned neither text nor tool calls')
       output = parseModelOutput(response.text)
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      // Keep completed tool work and repair in the same conversation. Count from
+      // the timeline so checkpoint restoration also retains the repair budget.
+      const repairs = this.timeline.filter(item => item.detail?.outputRepair === true).length
+      const repairLimit = llmConfig.maxRetries === -1 ? -1 : Math.max(3, llmConfig.maxRetries)
+      if ((repairLimit === -1 || repairs < repairLimit)
+        && (this.maxToolRounds === -1 || this.continuationRound < this.maxToolRounds)) {
+        step.detail = { ...step.detail, outputRepair: true, outputRepairAttempt: repairs + 1 }
+        diagnosticLog('model.output_repair', { attempt: repairs + 1, maxAttempts: repairLimit, responseArtifactId: responseArtifact.id })
+        const repairPrompt = 'Your last response failed the runtime output format validation. Preserve all previous tool results; do not restart the task or repeat completed tool actions. Return a JSON object only, without Markdown fences: {"status":"running" or "completed","content":"non-empty text"}. Reformat your response using the existing evidence.'
+        if (!this.llmMessages.some(message => message.role === 'user' && message.content === repairPrompt)) {
+          if (response.text) this.llmMessages.push({ role: 'assistant', content: response.text })
+          this.llmMessages.push({ role: 'user', content: repairPrompt })
+        }
+        this.continuationRound += 1
+        this.publishRenderedMessages(correlationId)
+        this.insertContinuation(step.index, correlationId)
+        this.updateRuntimeStatus({ model: 'ready' }, correlationId)
+        return
+      }
       throw new RuntimeStageError(
         'model_output_validation',
-        'MODEL_OUTPUT_INVALID',
-        error instanceof Error ? error.message : String(error),
+        response.text ? 'MODEL_OUTPUT_INVALID' : 'MODEL_OUTPUT_EMPTY',
+        `${message}; local output repair budget exhausted`,
         true,
       )
     }
@@ -3294,15 +3371,23 @@ export class RuntimeLoop extends Loop {
 
   private modelInvocationError(error: unknown): RuntimeStageError {
     const message = error instanceof Error ? error.message : String(error)
+    if (message.includes('TOKEN_BUDGET_EXHAUSTED')) {
+      return new RuntimeStageError('runtime', 'TOKEN_BUDGET_EXHAUSTED', message, false)
+    }
     const protocolFailure = /invalid JSON|SSE events|tool messages require|stream.*event/i.test(message)
     const diagnostics = error instanceof LlmRequestError
       ? toJsonValue(error.diagnostics)
       : undefined
+    // Provider outages are transparent retry conditions. Context/payload
+    // failures are deterministic and must consume the run budget instead.
+    const contextLimit = /context.{0,20}(length|limit|window)|maximum context|prompt is too long|too many tokens/i.test(message)
+      || (error instanceof LlmRequestError && [400, 413, 422].includes(error.diagnostics.statusCode ?? 0)
+        && /token|context|prompt|input/i.test(message))
     return new RuntimeStageError(
-      protocolFailure ? 'model_protocol' : 'model_transport',
-      protocolFailure ? 'MODEL_PROTOCOL_ERROR' : 'MODEL_TRANSPORT_ERROR',
+      contextLimit ? 'model_protocol' : protocolFailure ? 'model_protocol' : 'model_transport',
+      contextLimit ? 'MODEL_CONTEXT_LIMIT' : protocolFailure ? 'MODEL_PROTOCOL_ERROR' : 'MODEL_TRANSPORT_ERROR',
       message,
-      !protocolFailure,
+      !protocolFailure && !contextLimit,
       diagnostics,
     )
   }
@@ -4747,14 +4832,7 @@ export class RuntimeLoop extends Loop {
   private llmConfigFingerprint(
     settings: ReturnType<ProjectResources['readSettings']>,
   ): string {
-    return JSON.stringify([
-      settings.llm.provider,
-      settings.llm.model,
-      settings.llm.base_url,
-      settings.llm.protocol,
-      settings.llm.max_retries,
-      settings.llm.api_key ?? '',
-    ])
+    return JSON.stringify(settings.llm)
   }
 
   private refreshProjectLlm(
@@ -4763,14 +4841,7 @@ export class RuntimeLoop extends Loop {
     if (!this.projectLlmEnabled) return
     const fingerprint = this.llmConfigFingerprint(settings)
     if (fingerprint === this.projectLlmConfigFingerprint) return
-    this.llm = createLlmService({
-      provider: settings.llm.provider,
-      model: settings.llm.model,
-      baseUrl: settings.llm.base_url,
-      protocol: settings.llm.protocol,
-      apiKey: settings.llm.api_key,
-      maxRetries: settings.llm.max_retries,
-    })
+    this.llm = createProjectLlmService(settings.llm)
     this.projectLlmConfigFingerprint = fingerprint
   }
 

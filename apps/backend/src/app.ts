@@ -36,6 +36,7 @@ import {
 import { SessionStore } from '#core/session-store'
 import { SkillMarketplaceService } from '#core/skills/skill-marketplace'
 import { UserPreferencesStore } from '#core/user-preferences'
+import { configureProxyPreferences } from '#util/llm/proxy'
 import { WebSocketChannel } from '#transport/websocket-channel'
 import { loadLlmConfig } from '#util/llm/config'
 import { createLlmService } from '#util/llm'
@@ -58,6 +59,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const activeSessions = new Map<string, AgentSession>()
   const releasedProjects = new Set<string>()
   const userPreferences = new UserPreferencesStore(options.userConfigDir)
+  configureProxyPreferences(() => userPreferences.read())
 
   const projectDirectory = (input: unknown) => {
     const projectDir = path.resolve(typeof input === 'string' && input.trim()

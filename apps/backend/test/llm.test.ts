@@ -2,7 +2,12 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { test } from 'node:test'
 
-import { createLlmService, LlmRequestError, type LlmRetryNotification } from '#util/llm'
+import {
+  createFailoverLlmService,
+  createLlmService,
+  LlmRequestError,
+  type LlmRetryNotification,
+} from '#util/llm'
 import { retryDelayMs, retryableLlmStatus } from '#util/llm/openai-compatible'
 
 test('LLM service accepts explicit OpenAI-compatible configuration', () => {
@@ -27,6 +32,85 @@ test('LLM service accepts explicit OpenAI-compatible configuration', () => {
 test('LLM service rejects an empty message list before making a request', async () => {
   const service = createLlmService()
   await assert.rejects(() => service.chat({ messages: [] }), /at least one message/)
+})
+
+test('LLM failover rotates candidates and keeps the successful candidate sticky', async () => {
+  let unavailableRequests = 0
+  let healthyRequests = 0
+  const retries: LlmRetryNotification[] = []
+  await withApi((_body, _path, response) => {
+    unavailableRequests += 1
+    response.statusCode = 503
+    return { error: { message: 'first provider unavailable' } }
+  }, async (unavailableBaseUrl) => {
+    await withApi(() => {
+      healthyRequests += 1
+      return {
+        model: 'healthy-model',
+        choices: [{ finish_reason: 'stop', message: { content: 'recovered' } }],
+      }
+    }, async (healthyBaseUrl) => {
+      const service = createFailoverLlmService([
+        {
+          id: 'unavailable',
+          config: { provider: 'custom', protocol: 'chat-completions', baseUrl: unavailableBaseUrl, model: 'unavailable-model' },
+        },
+        {
+          id: 'healthy',
+          config: { provider: 'custom', protocol: 'chat-completions', baseUrl: healthyBaseUrl, model: 'healthy-model' },
+        },
+      ], { retriesPerCandidate: 0, initialDelayMs: 1, maxDelayMs: 2 })
+
+      const first = await service.chat({
+        messages: [{ role: 'user', content: 'recover' }],
+        onRetry: retry => retries.push(retry),
+      })
+      const second = await service.chat({ messages: [{ role: 'user', content: 'stay healthy' }] })
+
+      assert.equal(first.text, 'recovered')
+      assert.equal(second.text, 'recovered')
+      assert.equal(unavailableRequests, 1)
+      assert.equal(healthyRequests, 2)
+      assert.equal(service.getConfig().model, 'healthy-model')
+      const switchNotification = retries.find(retry => retry.kind === 'profile_switch' && retry.phase === 'waiting')
+      assert.equal(switchNotification?.profileId, 'unavailable')
+      assert.equal(switchNotification?.nextProfileId, 'healthy')
+      assert.equal(switchNotification?.maxAttempts, -1)
+    })
+  })
+})
+
+test('LLM failover does not rotate deterministic context-limit failures', async () => {
+  let fallbackRequests = 0
+  await withApi((_body, _path, response) => {
+    response.statusCode = 400
+    return { error: { message: 'maximum context length exceeded' } }
+  }, async (limitedBaseUrl) => {
+    await withApi(() => {
+      fallbackRequests += 1
+      return {
+        model: 'fallback-model',
+        choices: [{ finish_reason: 'stop', message: { content: 'unexpected' } }],
+      }
+    }, async (fallbackBaseUrl) => {
+      const service = createFailoverLlmService([
+        {
+          id: 'limited',
+          config: { provider: 'custom', protocol: 'chat-completions', baseUrl: limitedBaseUrl, model: 'limited-model' },
+        },
+        {
+          id: 'fallback',
+          config: { provider: 'custom', protocol: 'chat-completions', baseUrl: fallbackBaseUrl, model: 'fallback-model' },
+        },
+      ], { retriesPerCandidate: 0, initialDelayMs: 1, maxDelayMs: 2 })
+
+      await assert.rejects(
+        () => service.chat({ messages: [{ role: 'user', content: 'too large' }] }),
+        /maximum context length/i,
+      )
+      assert.equal(fallbackRequests, 0)
+    })
+  })
 })
 
 async function withApi(
@@ -68,9 +152,9 @@ test('LLM retry policy covers transient client failures and caps equal-jitter ba
   assert.equal(retryDelayMs(1, 1), 1_000)
   assert.equal(retryDelayMs(4, 0), 4_000)
   assert.equal(retryDelayMs(4, 1), 8_000)
-  assert.equal(retryDelayMs(9, 0), 15_000)
-  assert.equal(retryDelayMs(9, 1), 30_000)
-  assert.equal(retryDelayMs(10_000, 1), 30_000)
+  assert.equal(retryDelayMs(9, 0), 90_000)
+  assert.equal(retryDelayMs(9, 1), 180_000)
+  assert.equal(retryDelayMs(10_000, 1), 180_000)
 })
 
 test('Chat Completions retries HTTP 403 without a retry limit until the request succeeds', async () => {
@@ -146,6 +230,57 @@ test('an abort signal stops unlimited retries during backoff', async () => {
   assert.equal(requestCount, 1)
 })
 
+test('Responses retries a successful HTTP response with an empty JSON body', async () => {
+  let requestCount = 0
+  const retries: LlmRetryNotification[] = []
+  await withApi((_body, path) => {
+    assert.equal(path, '/v1/responses')
+    requestCount += 1
+    if (requestCount === 1) return undefined
+    return {
+      model: 'test-model',
+      status: 'completed',
+      output_text: 'recovered',
+    }
+  }, async (baseUrl) => {
+    const service = createLlmService({
+      provider: 'custom', protocol: 'responses', baseUrl, model: 'test-model', maxRetries: 1,
+    })
+    const result = await service.chat({
+      messages: [{ role: 'user', content: 'retry an empty body' }],
+      onRetry: retry => retries.push(retry),
+    })
+    assert.equal(result.text, 'recovered')
+  })
+  assert.equal(requestCount, 2)
+  const waiting = retries.find(retry => retry.phase === 'waiting')
+  assert.ok(waiting)
+  assert.ok((waiting.excludedMs ?? 0) >= waiting.delayMs)
+})
+
+test('non-stream requests retry HTTP 200 responses containing invalid JSON', async () => {
+  for (const protocol of ['responses', 'chat-completions'] as const) {
+    let requestCount = 0
+    await withApi((_body, path, response) => {
+      requestCount += 1
+      if (requestCount === 1) {
+        response.end('<html>temporary gateway response</html>')
+        return undefined
+      }
+      return protocol === 'responses'
+        ? { model: 'test-model', status: 'completed', output_text: 'recovered' }
+        : { model: 'test-model', choices: [{ finish_reason: 'stop', message: { content: 'recovered' } }] }
+    }, async (baseUrl) => {
+      const service = createLlmService({
+        provider: 'custom', protocol, baseUrl, model: 'test-model', maxRetries: 1,
+      })
+      const result = await service.chat({ messages: [{ role: 'user', content: 'retry invalid JSON' }] })
+      assert.equal(result.text, 'recovered')
+    })
+    assert.equal(requestCount, 2, `${protocol} should retry the malformed response`)
+  }
+})
+
 test('final HTTP failure exposes safe request diagnostics without secrets or payload content', async () => {
   await withApi((_body, path, response) => {
     assert.equal(path, '/v1/chat/completions')
@@ -215,6 +350,61 @@ async function withSseApi(
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   }
 }
+
+test('Responses stream retries HTTP 200 with zero response bytes', async () => {
+  let requestCount = 0
+  await withSseApi((_body, path, response) => {
+    assert.equal(path, '/v1/responses')
+    requestCount += 1
+    if (requestCount === 1) {
+      response.end()
+      return
+    }
+    response.write('event: response.completed\n')
+    response.write(`data: ${JSON.stringify({
+      type: 'response.completed',
+      response: { model: 'test-model', status: 'completed', output_text: 'recovered' },
+    })}\n\n`)
+    response.end()
+  }, async (baseUrl) => {
+    const service = createLlmService({
+      provider: 'custom', protocol: 'responses', baseUrl, model: 'test-model', maxRetries: 1,
+    })
+    const deltas: string[] = []
+    const result = await service.stream(
+      { messages: [{ role: 'user', content: 'retry an empty stream' }] },
+      (delta) => deltas.push(delta),
+    )
+    assert.equal(result.text, 'recovered')
+    assert.deepEqual(deltas, ['recovered'])
+  })
+  assert.equal(requestCount, 2)
+})
+
+test('Responses stream retries when it ends after response.created without a terminal payload', async () => {
+  let requestCount = 0
+  await withSseApi((_body, path, response) => {
+    assert.equal(path, '/v1/responses')
+    requestCount += 1
+    if (requestCount === 1) {
+      response.end('event: response.created\ndata: {"type":"response.created","response":{"model":"test-model","status":"in_progress"}}\n\n')
+      return
+    }
+    response.end('event: response.completed\ndata: {"type":"response.completed","response":{"model":"test-model","status":"completed","output_text":"recovered"}}\n\n')
+  }, async (baseUrl) => {
+    const service = createLlmService({
+      provider: 'custom', protocol: 'responses', baseUrl, model: 'test-model', maxRetries: 1,
+    })
+    const deltas: string[] = []
+    const result = await service.stream(
+      { messages: [{ role: 'user', content: 'retry a truncated stream' }] },
+      (delta) => deltas.push(delta),
+    )
+    assert.equal(result.text, 'recovered')
+    assert.deepEqual(deltas, ['recovered'])
+  })
+  assert.equal(requestCount, 2)
+})
 
 test('Responses protocol maps native function calls and outputs across turns', async () => {
   const requests: any[] = []
@@ -553,10 +743,7 @@ test('Responses protocol streams text and function arguments from SSE', async ()
     const second = await service.stream({
       messages: [{ role: 'user', content: 'reply' }],
     }, (delta) => deltas.push(delta))
-    assert.deepEqual(deltas, [
-      '{"status":"completed","content":"hel',
-      'lo"}',
-    ])
+    assert.deepEqual(deltas, ['{"status":"completed","content":"hello"}'])
     assert.equal(second.text, '{"status":"completed","content":"hello"}')
     assert.equal(second.usage?.cacheReadTokens, 1)
   })
@@ -610,11 +797,12 @@ test('Responses protocol retries an overloaded failed event before output starts
   })
   assert.equal(requestCount, 2)
   assert.equal(retries.length, 2)
-  assert.deepEqual(retries.map(({ delayMs: _delayMs, ...retry }) => retry), [
+  assert.deepEqual(retries.map(({ delayMs: _delayMs, excludedMs: _excludedMs, ...retry }) => retry), [
     { phase: 'waiting', attempt: 2, maxAttempts: 2, reason: 'LLM response failed (server_error): Try again later.' },
     { phase: 'attempting', attempt: 2, maxAttempts: 2, reason: 'LLM response failed (server_error): Try again later.' },
   ])
   assert.ok((retries[0]?.delayMs ?? 0) >= 500 && (retries[0]?.delayMs ?? 0) <= 1_000)
+  assert.ok((retries[0]?.excludedMs ?? 0) >= (retries[0]?.delayMs ?? 0))
   assert.equal(retries[1]?.delayMs, 0)
 })
 
@@ -646,7 +834,7 @@ test('Responses stream retries upstream errors after internal output and discard
   assert.equal(requestCount, 2)
 })
 
-test('Responses stream does not transparently retry after text is exposed', async () => {
+test('Responses stream transparently retries partial text that is buffered before completion', async () => {
   let requestCount = 0
   const deltas: string[] = []
   await withSseApi((_body, path, response) => {
@@ -663,8 +851,8 @@ test('Responses stream does not transparently retry after text is exposed', asyn
       (error: unknown) => error instanceof LlmRequestError && /upstream_error/.test(error.message),
     )
   })
-  assert.equal(requestCount, 1)
-  assert.deepEqual(deltas, ['visible'])
+  assert.equal(requestCount, 4)
+  assert.deepEqual(deltas, [])
 })
 
 test('Chat Completions protocol streams content and tool calls from SSE', async () => {
@@ -685,7 +873,7 @@ test('Chat Completions protocol streams content and tool calls from SSE', async 
     const result = await service.stream({ messages: [{ role: 'user', content: 'test' }] }, (delta) => {
       deltas.push(delta)
     })
-    assert.deepEqual(deltas, ['hello ', 'world'])
+    assert.deepEqual(deltas, ['hello world'])
     assert.deepEqual(result.toolCalls, [{
       id: 'call_chat', name: 'read_file', arguments: { file_name: 'config.json' },
     }])

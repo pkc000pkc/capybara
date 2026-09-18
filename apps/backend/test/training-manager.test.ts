@@ -13,7 +13,7 @@ import { TrainingManager } from '#core/experiments/training/training-manager'
 import { applyUnifiedDiff } from '#core/experiments/training/unified-diff'
 import { initializeProjectDirectory } from '#core/project-initializer'
 import { ProjectResources } from '#core/project-resources'
-import type { RuntimeLlm } from '#core/runtime-loop'
+import { RuntimeLoop, type RuntimeLlm } from '#core/runtime-loop'
 
 test('training rejects datasets marked as closed-book evaluation data', async (context) => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-evaluation-only-dataset-'))
@@ -42,6 +42,40 @@ test('training rejects datasets marked as closed-book evaluation data', async (c
     trainDatasetId: train.id,
     testDatasetId: testDataset.id,
   }), /evaluation-only and cannot be used for training/)
+})
+
+test('correction overrides resolve plugin variables and retain scope and lock guards', async (context) => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-plugin-correction-'))
+  initializeProjectDirectory(projectDir)
+  const resources = new ProjectResources(projectDir)
+  resources.saveSettings({ ...resources.readSettings(), plugins: [
+    { id: 'correction', path: 'plugins/correction', enabled: true },
+  ] })
+  const dir = path.join(projectDir, 'plugins', 'correction')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'capybara.plugin.json'), JSON.stringify({
+    schemaVersion: 1, id: 'correction', name: 'Correction', version: '1.0.0',
+    description: 'Correction fixture', resources: { variables: 'variables.json' },
+  }))
+  fs.writeFileSync(path.join(dir, 'variables.json'), JSON.stringify({ version: 1, variables: [
+    { key: 'repair_context', type: 'text', value: '', scope: 'session', readonly: false, required: false },
+    { key: 'locked_context', type: 'text', value: '', scope: 'session', readonly: true, required: false },
+    { key: 'shared_context', type: 'text', value: '', scope: 'project', readonly: false, required: false },
+  ] }))
+  const manager = new TrainingManager(projectDir, undefined as unknown as ExperimentManager)
+  context.after(async () => { await manager.close(); fs.rmSync(projectDir, { recursive: true, force: true }) })
+  const validate = (overrides: Record<string, string>) => (manager as unknown as {
+    assertCorrectionOverrides(value: Record<string, string>): void
+  }).assertCorrectionOverrides(overrides)
+  assert.doesNotThrow(() => validate({ repair_context: 'Change method' }))
+  assert.throws(() => validate({ locked_context: 'x' }), /read-only/)
+  assert.throws(() => validate({ shared_context: 'x' }), /session-scoped/)
+  assert.throws(() => validate({ missing_context: 'x' }), /not found/)
+  const loop = new RuntimeLoop({ projectDir, llm: llm(), initialVariableOverrides: { repair_context: 'Use an alternate evidence source' } })
+  try {
+    assert.match(JSON.stringify(loop.getSnapshot(0).variables), /Use an alternate evidence source/)
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'variables.json'), 'utf8')).variables[0].value, '')
+  } finally { loop.close() }
 })
 
 const EXPERIENCE_HOOK = `import { defineHook } from "@capybara-agent/sdk";
@@ -575,8 +609,8 @@ test('official state references hydrate before training Hooks without changing s
       experienceExtractorHook: { hookId: 'empty-extractor', parameters: {} },
       timeoutMs: 10_000,
     })
-    const ready = await waitFor(training, run.id, ['ready_to_freeze', 'failed'])
-    assert.equal(ready.status, 'ready_to_freeze', ready.failure?.message ?? 'training did not finish')
+    const ready = await waitFor(training, run.id, ['ready_to_freeze', 'blocked', 'failed'])
+    assert.equal(ready.status, 'blocked', ready.failure?.message ?? 'training did not finish')
     const before = training.cases(run.id).find((item) => item.phase === 'training')
     assert.equal(before?.score, 0)
     assert.equal(before?.reference.status, 'available')
@@ -668,8 +702,8 @@ test('training accepts a failure signal without a reference and marks a case unr
       experienceExtractorHook: { hookId: 'empty-extractor', parameters: {} },
       timeoutMs: 10_000,
     })
-    const completed = await waitFor(training, created.id, ['ready_to_freeze', 'failed'])
-    assert.equal(completed.status, 'ready_to_freeze', completed.failure?.message ?? 'training did not finish')
+    const completed = await waitFor(training, created.id, ['ready_to_freeze', 'blocked', 'failed'])
+    assert.equal(completed.status, 'blocked', completed.failure?.message ?? 'training did not finish')
     assert.equal(training.cases(created.id).find((item) => item.phase === 'training')?.status, 'unresolved')
     assert.equal(training.experiences(created.id).length, 0)
   } finally {
@@ -979,8 +1013,8 @@ test('automatic training exhausts correction limits without human review or long
       maxReplayRevisions: 1,
       timeoutMs: 10_000,
     })
-    const completed = await waitFor(training, created.id, ['ready_to_freeze', 'failed', 'waiting_review', 'paused_failure'])
-    assert.equal(completed.status, 'ready_to_freeze', completed.failure?.message ?? completed.pauseReason ?? 'training did not finish')
+    const completed = await waitFor(training, created.id, ['ready_to_freeze', 'blocked', 'failed', 'waiting_review', 'paused_failure'])
+    assert.equal(completed.status, 'blocked', completed.failure?.message ?? completed.pauseReason ?? 'training did not finish')
     const source = training.cases(created.id).find((item) => item.phase === 'training')
     assert.equal(source?.status, 'unresolved')
     const attempts = training.correctionAttempts(created.id, source?.id)
@@ -1040,8 +1074,8 @@ test('automatic training resolves admission Hook conflicts without waiting for h
       experienceExtractorHook: { hookId: 'correction-extractor', parameters: {} },
       timeoutMs: 10_000,
     })
-    const completed = await waitFor(training, created.id, ['ready_to_freeze', 'failed', 'waiting_review'])
-    assert.equal(completed.status, 'ready_to_freeze', completed.failure?.message ?? completed.pauseReason ?? 'training did not finish')
+    const completed = await waitFor(training, created.id, ['ready_to_freeze', 'blocked', 'failed', 'waiting_review'])
+    assert.equal(completed.status, 'blocked', completed.failure?.message ?? completed.pauseReason ?? 'training did not finish')
     assert.equal(training.cases(created.id).find((item) => item.phase === 'training')?.status, 'unresolved')
     assert.deepEqual(training.experiences(created.id).map((item) => item.status), ['rejected'])
   } finally {
@@ -1094,8 +1128,8 @@ test('correction token budget stops before a clean execution after the Hook exha
       experienceExtractorHook: { hookId: 'correction-extractor', parameters: {} },
       maxCorrectionAttempts: 4, maxCorrectionTokens: 10, timeoutMs: 10_000,
     })
-    const completed = await waitFor(training, created.id, ['ready_to_freeze', 'failed', 'waiting_review'])
-    assert.equal(completed.status, 'ready_to_freeze', completed.failure?.message ?? completed.pauseReason ?? 'training did not finish')
+    const completed = await waitFor(training, created.id, ['ready_to_freeze', 'blocked', 'failed', 'waiting_review'])
+    assert.equal(completed.status, 'blocked', completed.failure?.message ?? completed.pauseReason ?? 'training did not finish')
     const attempts = training.correctionAttempts(created.id)
     assert.equal(attempts.length, 1)
     assert.equal(attempts[0]?.terminalReason, 'max_tokens')

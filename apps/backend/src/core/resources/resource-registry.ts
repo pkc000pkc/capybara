@@ -13,6 +13,7 @@ import type { RegisteredHarness } from '#core/harnesses/types'
 import { HookRegistry } from '#core/hooks/hook-registry'
 import { HookRunner } from '#core/hooks/hook-runner'
 import type { HookFixture, RegisteredHook } from '#core/hooks/types'
+import { createProjectLlmService } from '#core/project-llm'
 import { ProjectResources } from '#core/project-resources'
 import { PluginRegistry } from '#core/plugins/plugin-registry'
 import type {
@@ -35,7 +36,6 @@ import type { RegisteredSkill } from '#core/skills/types'
 import { ToolDispatcher } from '#core/tools/tool-dispatcher'
 import { ToolRegistry } from '#core/tools/tool-registry'
 import type { RegisteredTool, ToolCallResult } from '#core/tools/types'
-import { createLlmService } from '#util/llm'
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -228,14 +228,7 @@ export class ProjectResourceRegistry {
     if (!hook.loadable) throw new Error(hook.diagnostics[0]?.message ?? 'Hook is invalid')
     const settings = this.resources.readSettings()
     const fixture = this.hookFixture(fixtureValue)
-    const llm = createLlmService({
-      provider: settings.llm.provider,
-      model: settings.llm.model,
-      baseUrl: settings.llm.base_url,
-      protocol: settings.llm.protocol,
-      apiKey: settings.llm.api_key,
-      maxRetries: settings.llm.max_retries,
-    })
+    const llm = createProjectLlmService(settings.llm)
     return new HookRunner(llm).run(hook, fixture)
   }
 

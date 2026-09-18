@@ -26,7 +26,7 @@ const EMPTY_USAGE: ExperimentUsage = {
 
 const TRAINING_CONFIG_DEFAULTS = {
   maxCorrectionAttempts: 5,
-  maxCorrectionTokens: 40_000,
+  maxCorrectionTokens: 2_000_000,
   maxCorrectionWallTimeMs: 20 * 60_000,
   maxReplayRevisions: 2,
 } as const
@@ -381,7 +381,7 @@ export class TrainingStore {
     const now = new Date().toISOString()
     const current = this.getRun(id)
     const startedAt = current.startedAt ?? (['running', 'testing'].includes(status) ? now : null)
-    const completedAt = ['completed', 'failed', 'cancelled'].includes(status) ? now : null
+    const completedAt = ['blocked', 'completed', 'failed', 'cancelled'].includes(status) ? now : null
     this.database.prepare(`
       UPDATE training_runs
       SET status = ?, current_case_id = ?, pause_reason = ?, failure_json = ?,
@@ -780,9 +780,9 @@ export class TrainingStore {
     const counts = this.database.prepare(`
       SELECT
         SUM(CASE WHEN phase = 'training' THEN 1 ELSE 0 END) AS train_total,
-        SUM(CASE WHEN phase = 'training' AND status IN ('completed', 'unresolved', 'error') THEN 1 ELSE 0 END) AS train_completed,
+        SUM(CASE WHEN phase = 'training' AND status = 'completed' THEN 1 ELSE 0 END) AS train_completed,
         SUM(CASE WHEN phase = 'testing' THEN 1 ELSE 0 END) AS test_total,
-        SUM(CASE WHEN phase = 'testing' AND status IN ('completed', 'error') THEN 1 ELSE 0 END) AS test_completed
+        SUM(CASE WHEN phase = 'testing' AND status = 'completed' THEN 1 ELSE 0 END) AS test_completed
       FROM training_cases WHERE run_id = ?
     `).get(row.id) as { train_total: number; train_completed: number; test_total: number; test_completed: number }
     const experiences = this.database.prepare(`
