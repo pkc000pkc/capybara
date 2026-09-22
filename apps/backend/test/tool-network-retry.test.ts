@@ -51,3 +51,19 @@ else process.stdout.write(JSON.stringify({ok:true,result:{policy:JSON.parse(proc
     assert.equal(result.error?.code,'ABORTED')
   } finally { fs.rmSync(dir,{recursive:true,force:true}) }
 })
+
+test('network retry policy does not expand the whole-tool timeout', async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'capybara-network-timeout-'))
+  try {
+    fs.writeFileSync(path.join(dir,'manifest.json'),JSON.stringify({version:1,package:'test',runner:{type:'stdio',entry:'runner.mjs'},tools:[{
+      name:'network_wait',description:'fixture',permissions:[],networkRetry:{max_retries:10,request_timeout_ms:30000,max_delay_ms:30000},
+      inputSchema:{type:'object',additionalProperties:false},
+    }]}))
+    fs.writeFileSync(path.join(dir,'runner.mjs'),`setInterval(()=>{},1000)`)
+    const registry=new ToolRegistry(dir);registry.load(['manifest.json'])
+    const started=Date.now()
+    const result=await new ToolDispatcher(registry,dir,{timeoutMs:100}).dispatch({id:'timeout',name:'network_wait',arguments:{}})
+    assert.equal(result.error?.code,'TIMEOUT')
+    assert.ok(Date.now()-started<2000)
+  } finally { fs.rmSync(dir,{recursive:true,force:true}) }
+})

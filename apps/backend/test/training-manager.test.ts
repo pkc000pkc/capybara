@@ -8,6 +8,7 @@ import { test } from 'node:test'
 
 import { DatasetStore } from '#core/datasets/dataset-store'
 import { ExperimentManager } from '#core/experiments/experiment-manager'
+import { EMPTY_EXPERIMENT_METRICS, ExperimentStore } from '#core/experiments/experiment-store'
 import { compareTrainingRuns, createTrainingVariableDiff } from '#core/experiments/training/training-analysis'
 import { TrainingManager } from '#core/experiments/training/training-manager'
 import { applyUnifiedDiff } from '#core/experiments/training/unified-diff'
@@ -42,6 +43,43 @@ test('training rejects datasets marked as closed-book evaluation data', async (c
     trainDatasetId: train.id,
     testDatasetId: testDataset.id,
   }), /evaluation-only and cannot be used for training/)
+})
+
+test('interrupted experiments retain completed cases and requeue only the active case', (context) => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-experiment-resume-'))
+  const store = new ExperimentStore(projectDir)
+  context.after(() => {
+    store.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  })
+  const createdAt = '2026-09-20T00:00:00.000Z'
+  store.createRun({
+    id: 'resume-run', name: 'resume fixture', createdAt, totalCases: 2,
+    dataset: { id: 'dataset', name: 'dataset', version: 1, contentHash: 'content', cohortHash: 'cohort', scoringPromptHash: 'prompt', samples: 2 },
+    scoringPrompt: '',
+    project: { commitSha: 'commit', shortSha: 'commit', treeSha: 'tree', branch: 'main' },
+    model: { provider: 'test', protocol: 'responses', model: 'test', baseUrl: 'http://127.0.0.1' },
+    evaluator: { type: 'llm' },
+    config: { concurrency: 1, repetitions: 1, timeoutMs: 1_000, keepWorkspaces: false, sampleIds: ['one', 'two'] },
+  }, [
+    { id: 'case-one', runId: 'resume-run', sampleId: 'one', repetition: 1, ordinal: 0, question: 'one', thinking: '', expectedAnswer: 'one', expectedTools: [], metadata: {}, createdAt },
+    { id: 'case-two', runId: 'resume-run', sampleId: 'two', repetition: 1, ordinal: 1, question: 'two', thinking: '', expectedAnswer: 'two', expectedTools: [], metadata: {}, createdAt },
+  ])
+  store.startRun('resume-run', createdAt)
+  store.startCase('case-one', createdAt)
+  store.completeCase('case-one', {
+    status: 'passed', actualAnswer: 'one', score: 1, passed: true, toolStatus: 'none', actualTools: [], toolCalls: [],
+    usage: EMPTY_EXPERIMENT_METRICS, agentUsage: EMPTY_EXPERIMENT_METRICS, scoringUsage: EMPTY_EXPERIMENT_METRICS,
+    latencyMs: 1, completedAt: createdAt,
+  })
+  store.startCase('case-two', createdAt)
+
+  const resumed = store.resumeRun('resume-run')
+
+  assert.equal(resumed.status, 'queued')
+  assert.equal(resumed.progress.completed, 1)
+  assert.deepEqual(store.listCases('resume-run', { limit: 2 }).items.map((item) => item.status), ['passed', 'queued'])
+  assert.deepEqual(store.runnableCases('resume-run').map((item) => item.id), ['case-two'])
 })
 
 test('correction overrides resolve plugin variables and retain scope and lock guards', async (context) => {
@@ -229,7 +267,7 @@ const REVISING_ADMISSION_HOOK = `import { defineHook } from "@capybara-agent/sdk
 
 export default defineHook({
   name: "revising-admission",
-  description: "Revises a replayed candidate once, then admits only a passing replay.",
+  description: "Revises a replayed candidate once, then promotes only a passing replay.",
   enabled: true,
   checkpoint: "after_replay",
   trigger({ training }) { return Boolean(training?.candidate); },
@@ -255,12 +293,53 @@ export default defineHook({
             baseHash: patch.baseHash,
             unifiedDiff: patch.unifiedDiff.replace("+learned replay rule", "+learned replay rule revised"),
           }],
+          lifecycle: {
+            stage: "project_experience",
+            level: 2,
+            contextBudgetTokens: 16384,
+            requiredCleanReplays: 2,
+            entryIds: training.candidate.entryIds,
+          },
+        },
+        transition: {
+          promotionId: training.candidate.id + ":l2:" + (training.candidate.revision + 1),
+          expectedStage: training.candidate.stage,
+          expectedRevision: training.candidate.revision,
+          expectedContentHash: training.candidate.contentHash,
+          targetStage: "project_experience",
+          targetLevel: 2,
+          contextBudgetTokens: 16384,
         },
       } };
     }
     return { admission: {
-      verdict: training.evaluation.passed ? "accept" : "retry_correction",
-      reasons: [training.evaluation.passed ? "Revised candidate passed replay." : "Replay still failed."],
+      verdict: training.evaluation.passed ? "promote" : "retry_correction",
+      reasons: [training.evaluation.passed ? "Revised candidate passed replay and is ready for promotion." : "Replay still failed."],
+      ...(training.evaluation.passed ? { revisedCandidate: {
+        summary: "Promoted corrected learning",
+        rationale: "The revised candidate passed its final clean replay.",
+        patches: [{
+          variableName: patch.variableName,
+          baseHash: patch.baseHash,
+          unifiedDiff: patch.unifiedDiff.replace("+learned replay rule revised", "+learned replay rule revised stable"),
+        }],
+        lifecycle: {
+          stage: "plugin_stable",
+          level: 3,
+          contextBudgetTokens: 8192,
+          requiredCleanReplays: 2,
+          entryIds: training.candidate.entryIds,
+        },
+      } } : {}),
+      ...(training.evaluation.passed ? { transition: {
+        promotionId: training.candidate.id + ":l3:" + (training.candidate.revision + 1),
+        expectedStage: training.candidate.stage,
+        expectedRevision: training.candidate.revision,
+        expectedContentHash: training.candidate.contentHash,
+        targetStage: "plugin_stable",
+        targetLevel: 3,
+        contextBudgetTokens: 8192,
+      } } : {}),
     } };
   },
 });
@@ -427,7 +506,9 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     assert.equal(trained.progress.training.completed, 2)
     assert.equal(training.experiences(created.id).length, 1)
     assert.equal(training.experiences(created.id)[0]?.status, 'applied')
-    assert.equal(resources.readSystemVariables().variables.find((item) => item.key === 'agent_identity')?.value, initialAgentIdentity)
+    assert.equal(training.experiences(created.id)[0]?.requiredCleanReplays, 1,
+      'legacy extractors without lifecycle metadata retain one-replay publication')
+    assert.match(String(resources.readSystemVariables().variables.find((item) => item.key === 'agent_identity')?.value ?? ''), /learned replay rule/)
     assert.match(training.store.runVariables(created.id).agent_identity ?? '', /learned replay rule/)
     const trainedCases = training.cases(created.id)
     const trainingCase = trainedCases.find((item) => item.phase === 'training')
@@ -460,6 +541,10 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     assert.equal(repeatedEvaluation.snapshotId, snapshot.id)
     assert.equal(repeatedEvaluation.config.testDatasetId, heldOut.id)
     assert.equal(repeatedEvaluation.config.snapshotSourceRunId, created.id)
+    const learningEventsBeforeTest = training.analysis(created.id).events.filter((event) =>
+      event.type.startsWith('correction.')
+      || event.type.startsWith('admission.')
+      || event.type.startsWith('experience.')).length
     training.startTest(created.id)
     const completed = await waitFor(training, created.id, ['completed', 'failed'])
     assert.equal(completed.status, 'completed', completed.failure?.message ?? 'held-out test did not complete')
@@ -469,8 +554,13 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     assert.equal(heldOutAfterTest?.reference.kind, 'text')
     assert.equal(heldOutAfterTest?.expectedAnswer, '')
     assert.equal(training.experiences(created.id).length, 1, 'testing must not run training Hooks')
+    assert.equal(training.analysis(created.id).events.filter((event) =>
+      event.type.startsWith('correction.')
+      || event.type.startsWith('admission.')
+      || event.type.startsWith('experience.')).length, learningEventsBeforeTest,
+    'testing must not run correction, admission, extraction, or promotion Hooks')
     assert.match(training.variables(created.id).items.find((item) => item.name === 'agent_identity')?.snapshotValue ?? '', /learned replay rule/)
-    assert.equal(resources.readSystemVariables().variables.find((item) => item.key === 'agent_identity')?.value, initialAgentIdentity)
+    assert.match(String(resources.readSystemVariables().variables.find((item) => item.key === 'agent_identity')?.value ?? ''), /learned replay rule/)
     const snapshotEvaluation = training.createSnapshotEvaluation(created.id, {
       name: 'Challenge from frozen snapshot',
       testDatasetId: challenge.id,
@@ -489,6 +579,11 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     assert.ok(evaluatedSnapshot.startedAt)
     assert.equal(evaluatedSnapshot.snapshotId, snapshot.id)
     assert.deepEqual(evaluatedSnapshot.progress.testing, { total: 1, completed: 1 })
+    assert.equal(training.analysis(snapshotEvaluation.id).events.some((event) =>
+      event.type.startsWith('correction.')
+      || event.type.startsWith('admission.')
+      || event.type.startsWith('experience.')), false,
+    'evaluation-only runs must not produce learning lifecycle events')
     training.startTest(repeatedEvaluation.id)
     const repeatedSnapshot = await waitFor(training, repeatedEvaluation.id, ['completed', 'failed'])
     assert.equal(repeatedSnapshot.status, 'completed', repeatedSnapshot.failure?.message ?? 'repeated snapshot evaluation did not complete')
@@ -497,6 +592,21 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     const promoted = await training.promote(created.id)
     assert.match(promoted.variables.agent_identity ?? '', /learned replay rule/)
     assert.match(String(resources.readSystemVariables().variables.find((item) => item.key === 'agent_identity')?.value ?? ''), /learned replay rule/)
+    const projectInherited = training.create({
+      name: 'Project-published baseline',
+      trainDatasetId: train.id,
+      testDatasetId: heldOut.id,
+      trainLimit: 1,
+      testLimit: 1,
+      learningMode: 'auto',
+      reviewScope: 'failed',
+      pauseOnFailure: false,
+      experienceExtractorHook: { hookId: 'experience-extractor', parameters: {} },
+      timeoutMs: 10_000,
+    })
+    assert.equal(projectInherited.config.variableSource, 'project')
+    assert.match(training.store.baselineVariables(projectInherited.id).agent_identity ?? '', /learned replay rule/)
+    training.cancel(projectInherited.id)
     const currentResources = resources.readSystemVariables()
     resources.saveSystemVariables({
       ...currentResources,
@@ -952,10 +1062,62 @@ test(`automatic training corrects in clean environments and applies replay-admit
     assert.equal(candidates.length, 1)
     assert.equal(candidates[0]?.status, 'applied')
     assert.equal(candidates[0]?.replayPassed, true)
+    assert.equal(candidates[0]?.stage, 'plugin_stable')
+    assert.equal(candidates[0]?.level, 3)
+    assert.equal(candidates[0]?.contextBudgetTokens, 8192)
+    assert.equal(candidates[0]?.replayCount, 2)
+    assert.equal(candidates[0]?.revision, 3)
+    assert.equal(candidates[0]?.parentRevision, 2)
+    assert.match(candidates[0]?.promotionId ?? '', /:l3:3$/u)
     assert.match(candidates[0]?.rationale ?? '', new RegExp(`after ${successAttempt} corrections`))
-    assert.match(training.store.runVariables(created.id).agent_identity ?? '', /learned replay rule revised/)
+    const transitionEventsBeforeDuplicate = training.analysis(created.id).events
+      .filter((event) => event.type === 'experience.transitioned').length
+    const duplicate = training.store.transitionExperience(
+      candidates[0]!.id,
+      candidates[0]!.patches,
+      candidates[0]!,
+      { stage: 'project_experience', revision: 2, contentHash: 'superseded-by-idempotency-key' },
+      true,
+    )
+    assert.equal(duplicate.revision, 3)
+    assert.equal(training.analysis(created.id).events
+      .filter((event) => event.type === 'experience.transitioned').length, transitionEventsBeforeDuplicate,
+    'repeating the same promotion must not emit another transition')
+    assert.throws(() => training.store.transitionExperience(
+      candidates[0]!.id,
+      candidates[0]!.patches,
+      { ...candidates[0]!, promotionId: `${candidates[0]!.id}:stale-command` },
+      { stage: 'candidate', revision: 1, contentHash: 'stale-content' },
+      true,
+    ), /experience changed since promotion was proposed/)
+    assert.match(training.store.runVariables(created.id).agent_identity ?? '', /learned replay rule revised stable/)
+    assert.match(String(new ProjectResources(projectDir).readSystemVariables().variables
+      .find((item) => item.key === 'agent_identity')?.value ?? ''), /learned replay rule revised stable/)
     const admissionEvents = training.analysis(created.id).events.filter((event) => event.type === 'admission.decided')
-    assert.deepEqual(admissionEvents.map((event) => (event.payload as { verdict: string }).verdict), ['revise', 'accept'])
+    assert.deepEqual(admissionEvents.map((event) => (event.payload as { verdict: string }).verdict), ['revise', 'promote'])
+    const transitionEvents = training.analysis(created.id).events.filter((event) => event.type === 'experience.transitioned')
+    assert.deepEqual(transitionEvents.map((event) => (event.payload as { to: { stage: string } }).to.stage),
+      ['project_experience', 'plugin_stable'])
+    assert.equal(training.analysis(created.id).events.some((event) => event.type === 'experience.published'), true)
+    const nextRun = training.create({
+      trainDatasetId: train.id,
+      testDatasetId: heldOut.id,
+      trainLimit: 1,
+      testLimit: 1,
+      learningMode: 'auto',
+      reviewScope: 'failed',
+      pauseOnFailure: false,
+      correctionHook: { hookId: 'iterative-correction', parameters: {} },
+      experienceExtractorHook: { hookId: 'correction-extractor', parameters: {} },
+      maxCorrectionAttempts: 5,
+      maxCorrectionTokens: 10_000,
+      maxCorrectionWallTimeMs: 60_000,
+      maxReplayRevisions: 2,
+      timeoutMs: 10_000,
+    })
+    assert.equal(nextRun.config.variableSource, 'project')
+    assert.match(training.store.baselineVariables(nextRun.id).agent_identity ?? '', /learned replay rule revised stable/)
+    training.cancel(nextRun.id)
     assert.equal(training.analysis(created.id).correctionAttempts.length, successAttempt)
   } finally {
     await training.close()
@@ -1075,9 +1237,14 @@ test('automatic training resolves admission Hook conflicts without waiting for h
       timeoutMs: 10_000,
     })
     const completed = await waitFor(training, created.id, ['ready_to_freeze', 'blocked', 'failed', 'waiting_review'])
-    assert.equal(completed.status, 'blocked', completed.failure?.message ?? completed.pauseReason ?? 'training did not finish')
-    assert.equal(training.cases(created.id).find((item) => item.phase === 'training')?.status, 'unresolved')
+    assert.equal(completed.status, 'ready_to_freeze', completed.failure?.message ?? completed.pauseReason ?? 'training did not finish')
+    assert.equal(training.cases(created.id).find((item) => item.phase === 'training')?.status, 'completed')
     assert.deepEqual(training.experiences(created.id).map((item) => item.status), ['rejected'])
+    assert.deepEqual(training.experiences(created.id).map((item) => ({ stage: item.stage, level: item.level })), [
+      { stage: 'candidate', level: 1 },
+    ])
+    assert.doesNotMatch(training.store.runVariables(created.id).agent_identity ?? '', /learned replay rule/,
+      'a Level 1 candidate must never be published after an admission failure')
   } finally {
     await training.close()
     await experiments.close()

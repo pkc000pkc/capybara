@@ -111,24 +111,48 @@ export interface HookCorrectionProposal {
   variableOverrides: Record<string, string>
 }
 
-export type HookAdmissionVerdict = 'accept' | 'reject' | 'revise' | 'retry_correction'
+export type HookAdmissionVerdict = 'accept' | 'reject' | 'revise' | 'promote' | 'retry_correction'
 
 export interface HookAdmissionDecision {
   verdict: HookAdmissionVerdict
   reasons: string[]
   revisedCandidate?: HookExperienceCandidate
+  transition?: HookExperienceTransition
+}
+
+export type HookExperienceStage = 'candidate' | 'project_experience' | 'plugin_stable'
+
+export interface HookExperienceLifecycle {
+  stage: HookExperienceStage
+  level: 1 | 2 | 3
+  contextBudgetTokens: number
+  requiredCleanReplays: number
+  entryIds: string[]
+}
+
+export interface HookExperienceTransition {
+  promotionId: string
+  expectedStage: HookExperienceStage
+  expectedRevision: number
+  expectedContentHash: string
+  targetStage: HookExperienceStage
+  targetLevel: 1 | 2 | 3
+  contextBudgetTokens: number
 }
 
 export interface HookVariableDiff {
   variableName: string
   baseHash?: string
   unifiedDiff: string
+  beforeValue?: string
+  afterValue?: string
 }
 
 export interface HookExperienceCandidate {
   summary: string
   rationale: string
   patches: HookVariableDiff[]
+  lifecycle?: HookExperienceLifecycle
 }
 
 export interface HookTrainingCase {
@@ -189,7 +213,21 @@ export interface HookTrainingContext {
     actualTools: string[]
     toolCalls: HookTrainingCase['toolCalls']
   }>
-  candidate?: HookExperienceCandidate & { id: string }
+  candidate?: HookExperienceCandidate & {
+    id: string
+    stage: HookExperienceStage
+    level: 1 | 2 | 3
+    contextBudgetTokens: number
+    replayGeneration: number
+    replayCount: number
+    requiredCleanReplays: number
+    revision: number
+    contentHash: string
+    sourceCandidateId: string
+    entryIds: string[]
+    parentRevision?: number
+    promotionId?: string
+  }
 }
 
 export interface ProjectHookDefinition {

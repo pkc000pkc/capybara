@@ -461,6 +461,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
   })
+  app.post('/api/experiments/:id/resume', async (request, reply) => {
+    try {
+      const run = await getExperimentManager(requestProject(request).path)
+        .resume((request.params as { id: string }).id)
+      return reply.code(202).send(run)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
   app.get('/api/experiments/storage', async (request, reply) => {
     try {
       const manager = getExperimentManager(requestProject(request).path)

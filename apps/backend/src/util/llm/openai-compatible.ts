@@ -286,6 +286,8 @@ export function retryableLlmStatus(statusCode: number): boolean {
     && !PERMANENT_CLIENT_ERROR_STATUSES.has(statusCode)
 }
 
+const INFINITE_RETRY_WALL_TIME_MS = 15 * 60_000
+
 function canRetry(failedAttempt: number, maxRetries: number): boolean {
   return maxRetries === -1 || failedAttempt <= maxRetries
 }
@@ -349,6 +351,7 @@ async function postJsonWithRetry(
   const serialized = serializeRequest(body, counts)
   const startedAt = Date.now()
   for (let attempt = 0; ; attempt += 1) {
+    if (maxRetries === -1 && Date.now() - startedAt >= INFINITE_RETRY_WALL_TIME_MS) throw new Error("LLM retry wall-clock budget exhausted")
     const attemptStartedAt = Date.now()
     const failedAttempt = attempt + 1
     let result: HttpResult
@@ -544,6 +547,7 @@ async function postSseWithRetry(
   const serialized = serializeRequest(body, counts)
   const startedAt = Date.now()
   for (let attempt = 0; ; attempt += 1) {
+    if (maxRetries === -1 && Date.now() - startedAt >= INFINITE_RETRY_WALL_TIME_MS) throw new Error("LLM retry wall-clock budget exhausted")
     const attemptStartedAt = Date.now()
     const failedAttempt = attempt + 1
     controller.onAttemptStart()

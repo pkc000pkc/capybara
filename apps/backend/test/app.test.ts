@@ -852,7 +852,7 @@ test('HTTP project resources are persisted and watched by the runtime', async ()
       max_retries: 3,
       failover: {
         enabled: false,
-        retries_per_profile: 0,
+        retries_per_profile: 5,
         initial_delay_ms: 1_000,
         max_delay_ms: 30_000,
       },
@@ -2401,6 +2401,33 @@ test('model failures preserve phase, message, and request artifact links', async
       messageCount: 2,
       toolCount: 12,
     })
+  }, { llm })
+})
+
+test('upstream request rejections are retryable and are not classified as context limits', async () => {
+  const llm = fakeLlm(async () => {
+    throw new LlmRequestError('400 short_input_rejected: upstream rejected heartbeat probing', {
+      attempt: 1,
+      maxAttempts: 1,
+      elapsedMs: 25,
+      statusCode: 400,
+      responseHeaders: {},
+      payloadHash: 'b'.repeat(64),
+      payloadBytes: 100,
+      messageCount: 1,
+      toolCount: 0,
+    })
+  })
+  await withRuntime(async (client) => {
+    client.send('chat.message.send', {
+      clientMessageId: 'short-input-rejected',
+      content: [{ type: 'text', text: 'Trigger request rejection' }],
+      autoStart: true,
+    })
+    const failed = await client.waitFor('run.state.changed', event => event.payload.status === 'failed')
+    assert.equal(failed.payload.failure?.phase, 'model_transport')
+    assert.equal(failed.payload.failure?.code, 'MODEL_REQUEST_REJECTED')
+    assert.equal(failed.payload.failure?.retryable, true)
   }, { llm })
 })
 

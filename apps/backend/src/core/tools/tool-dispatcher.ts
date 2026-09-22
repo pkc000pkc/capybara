@@ -109,11 +109,10 @@ export class ToolDispatcher {
     }
 
     const retry = toolNetworkRetrySettings({ ...this.networkRetry, ...tool.networkRetry })
-    // The runner retries individual network requests, never the whole tool operation.
-    const timeoutMs = tool.networkRetry !== undefined
-      ? (this.timeoutMs === -1 || retry.max_retries === -1 ? -1
-        : Math.max(this.timeoutMs, (retry.max_retries + 1) * (retry.request_timeout_ms + retry.max_delay_ms)))
-      : this.timeoutMs
+    // Request retries are subordinate to the configured whole-tool wall-clock
+    // budget. Expanding this timeout made a single browser navigation last up
+    // to the complete theoretical retry schedule (660 seconds by default).
+    const timeoutMs = this.timeoutMs
     return new Promise((resolve) => {
       const child = spawn(process.execPath, [tool.runnerEntry], {
         cwd: path.dirname(tool.runnerEntry),

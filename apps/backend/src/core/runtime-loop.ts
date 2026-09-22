@@ -137,7 +137,10 @@ import {
   type SkillResourceState,
 } from '#protocol/runtime-protocol'
 import {
+  isLlmContextLimitError,
+  isLlmRequestRejection,
   LlmRequestError,
+  LlmResponseValidationError,
   type LlmChatRequest,
   type LlmChatResponse,
   type LlmConfig,
@@ -2614,12 +2617,26 @@ export class RuntimeLoop extends Loop {
           nextProfileId: retry.nextProfileId ?? null,
           nextProvider: retry.nextProvider ?? null,
           nextModel: retry.nextModel ?? null,
+          reason: retry.reason,
         })}\n`)
         if (this.generation === generation) {
           this.updateModelRetry(step.id, retry, correlationId)
           this.createArtifact('hook-log', `Model request retry · ${step.summary}`, { stepId: step.id, ...retry }, correlationId)
         }
         } catch { /* Observers cannot interrupt a retry. */ }
+      },
+    })
+    Object.defineProperty(request, 'validateResponse', {
+      enumerable: false,
+      value: (candidate: LlmChatResponse) => {
+        if ((candidate.toolCalls?.length ?? 0) > 0) return undefined
+        if (!candidate.text.trim()) return 'response contains no text or tool calls'
+        try {
+          parseModelOutput(candidate.text)
+          return undefined
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error)
+        }
       },
     })
     const nativeStream = llm.stream !== undefined
@@ -2702,6 +2719,9 @@ export class RuntimeLoop extends Loop {
         maxRetries: llmConfig.maxRetries, socketTimeoutMs: llmConfig.timeoutMs,
         retryPhase: lastRetry?.phase ?? null, retryAttempt: lastRetry?.attempt ?? null,
         retryStatusCode: lastRetry?.statusCode ?? null, retryDelayMs: lastRetry?.delayMs ?? null,
+        retryKind: lastRetry?.kind ?? null, retryReason: lastRetry?.reason ?? null,
+        retryProfileId: lastRetry?.profileId ?? null,
+        retryNextProfileId: lastRetry?.nextProfileId ?? null,
         aborted: controller.signal.aborted,
       }
       this.createArtifact('hook-log', `Model lifecycle · ${event}`, diagnostic, correlationId)
@@ -2805,19 +2825,24 @@ export class RuntimeLoop extends Loop {
       output = parseModelOutput(response.text)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      // Keep completed tool work and repair in the same conversation. Count from
-      // the timeline so checkpoint restoration also retains the repair budget.
-      const repairs = this.timeline.filter(item => item.detail?.outputRepair === true).length
+      // Keep completed tool work and repair in the same conversation. Count only
+      // the immediately preceding repair chain so one bad step cannot exhaust
+      // every later model step in this task.
+      let repairs = 0
+      for (let index = step.index - 1; index >= 0; index -= 1) {
+        const previous = this.timeline[index]
+        if (previous?.type !== 'model') continue
+        if (previous.detail?.outputRepair !== true) break
+        repairs += 1
+      }
       const repairLimit = llmConfig.maxRetries === -1 ? -1 : Math.max(3, llmConfig.maxRetries)
       if ((repairLimit === -1 || repairs < repairLimit)
         && (this.maxToolRounds === -1 || this.continuationRound < this.maxToolRounds)) {
         step.detail = { ...step.detail, outputRepair: true, outputRepairAttempt: repairs + 1 }
         diagnosticLog('model.output_repair', { attempt: repairs + 1, maxAttempts: repairLimit, responseArtifactId: responseArtifact.id })
         const repairPrompt = 'Your last response failed the runtime output format validation. Preserve all previous tool results; do not restart the task or repeat completed tool actions. Return a JSON object only, without Markdown fences: {"status":"running" or "completed","content":"non-empty text"}. Reformat your response using the existing evidence.'
-        if (!this.llmMessages.some(message => message.role === 'user' && message.content === repairPrompt)) {
-          if (response.text) this.llmMessages.push({ role: 'assistant', content: response.text })
-          this.llmMessages.push({ role: 'user', content: repairPrompt })
-        }
+        if (response.text) this.llmMessages.push({ role: 'assistant', content: response.text })
+        this.llmMessages.push({ role: 'user', content: repairPrompt })
         this.continuationRound += 1
         this.publishRenderedMessages(correlationId)
         this.insertContinuation(step.index, correlationId)
@@ -3374,20 +3399,28 @@ export class RuntimeLoop extends Loop {
     if (message.includes('TOKEN_BUDGET_EXHAUSTED')) {
       return new RuntimeStageError('runtime', 'TOKEN_BUDGET_EXHAUSTED', message, false)
     }
-    const protocolFailure = /invalid JSON|SSE events|tool messages require|stream.*event/i.test(message)
+    const responseValidation = error instanceof LlmResponseValidationError
+    const protocolFailure = responseValidation || /invalid JSON|SSE events|tool messages require|stream.*event/i.test(message)
     const diagnostics = error instanceof LlmRequestError
       ? toJsonValue(error.diagnostics)
       : undefined
     // Provider outages are transparent retry conditions. Context/payload
     // failures are deterministic and must consume the run budget instead.
-    const contextLimit = /context.{0,20}(length|limit|window)|maximum context|prompt is too long|too many tokens/i.test(message)
-      || (error instanceof LlmRequestError && [400, 413, 422].includes(error.diagnostics.statusCode ?? 0)
-        && /token|context|prompt|input/i.test(message))
+    const contextLimit = isLlmContextLimitError(error)
+    const requestRejected = isLlmRequestRejection(error)
     return new RuntimeStageError(
-      contextLimit ? 'model_protocol' : protocolFailure ? 'model_protocol' : 'model_transport',
-      contextLimit ? 'MODEL_CONTEXT_LIMIT' : protocolFailure ? 'MODEL_PROTOCOL_ERROR' : 'MODEL_TRANSPORT_ERROR',
+      contextLimit || protocolFailure ? 'model_protocol' : 'model_transport',
+      contextLimit
+        ? 'MODEL_CONTEXT_LIMIT'
+        : requestRejected
+          ? 'MODEL_REQUEST_REJECTED'
+          : responseValidation
+            ? 'MODEL_OUTPUT_INVALID'
+            : protocolFailure
+              ? 'MODEL_PROTOCOL_ERROR'
+              : 'MODEL_TRANSPORT_ERROR',
       message,
-      !protocolFailure && !contextLimit,
+      !contextLimit,
       diagnostics,
     )
   }

@@ -67,6 +67,13 @@ export interface LlmRequestDiagnostics {
 
 export type LlmRetryHandler = (notification: LlmRetryNotification) => void
 
+/**
+ * Return a reason when a syntactically successful provider response is not
+ * usable by the caller. This callback is local-only and is never serialized
+ * into an OpenAI-compatible request body.
+ */
+export type LlmResponseValidator = (response: LlmChatResponse) => string | undefined
+
 export interface LlmClientMetadata {
   sessionId?: string
   threadId?: string
@@ -83,6 +90,7 @@ export interface LlmChatRequest {
   clientMetadata?: LlmClientMetadata
   signal?: AbortSignal
   onRetry?: LlmRetryHandler
+  validateResponse?: LlmResponseValidator
 }
 
 export interface LlmChatResponse {

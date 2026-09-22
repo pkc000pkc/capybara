@@ -251,6 +251,22 @@ function caseDetail(row: CaseRow): ExperimentCaseDetail {
   }
 }
 
+function createCase(row: CaseRow): CreateExperimentCase {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    sampleId: row.sample_id,
+    repetition: row.repetition,
+    ordinal: row.ordinal,
+    question: row.question,
+    thinking: row.thinking,
+    expectedAnswer: row.expected_answer,
+    expectedTools: parseJson<string[]>(row.expected_tools_json, []),
+    metadata: parseJson<ExperimentCaseDetail['metadata']>(row.metadata_json, {}),
+    createdAt: row.created_at,
+  }
+}
+
 export class ExperimentStore {
   readonly databaseFile: string
   private readonly database: DatabaseSync
@@ -357,23 +373,6 @@ export class ExperimentStore {
     if (!caseColumns.has('evaluation_json')) {
       this.database.exec('ALTER TABLE experiment_cases ADD COLUMN evaluation_json TEXT')
     }
-    const recoveredAt = new Date().toISOString()
-    const failure = JSON.stringify({
-      code: 'PROCESS_RESTARTED',
-      message: 'The experiment process stopped before the run reached a terminal state.',
-      phase: 'runtime',
-      retryable: true,
-    })
-    this.database.prepare(`
-      UPDATE experiment_runs
-      SET status = 'failed', failure_json = ?, completed_at = ?, updated_at = ?
-      WHERE status IN ('queued', 'running')
-    `).run(failure, recoveredAt, recoveredAt)
-    this.database.prepare(`
-      UPDATE experiment_cases
-      SET status = 'error', failure_json = ?, completed_at = ?
-      WHERE status IN ('queued', 'running')
-    `).run(failure, recoveredAt)
   }
 
   createRun(run: CreateExperimentRun, cases: CreateExperimentCase[]): ExperimentRunDetail {
@@ -499,6 +498,47 @@ export class ExperimentStore {
     return caseDetail(row)
   }
 
+  resumeRun(id: string): ExperimentRunDetail {
+    const run = this.getRun(id)
+    if (!['queued', 'running'].includes(run.status)) {
+      throw new Error('only an interrupted queued or running experiment can be resumed')
+    }
+    const resumedAt = new Date().toISOString()
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      // A running case has no atomically committed result, so retry its frozen input.
+      this.database.prepare(`
+        UPDATE experiment_cases SET
+          status = 'queued', actual_answer = '', score = NULL, passed = NULL, rationale = NULL,
+          tool_status = 'none', actual_tools_json = '[]', tool_calls_json = '[]',
+          usage_json = ?, agent_usage_json = ?, scoring_usage_json = ?, latency_ms = 0,
+          runtime_run_id = NULL, failure_json = NULL, trace_json = NULL, evaluation_json = NULL,
+          started_at = NULL, completed_at = NULL
+        WHERE run_id = ? AND status = 'running'
+      `).run(JSON.stringify(EMPTY_USAGE), JSON.stringify(EMPTY_USAGE), JSON.stringify(EMPTY_USAGE), id)
+      this.database.prepare(`
+        UPDATE experiment_runs SET
+          status = 'queued', failure_json = NULL, completed_at = NULL, updated_at = ?,
+          completed_cases = (SELECT COUNT(*) FROM experiment_cases
+            WHERE run_id = ? AND status IN ('passed', 'failed', 'unscored', 'error', 'cancelled'))
+        WHERE id = ?
+      `).run(resumedAt, id, id)
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+    return this.getRun(id)
+  }
+
+  runnableCases(runId: string): CreateExperimentCase[] {
+    this.getRun(runId)
+    const rows = this.database.prepare(`
+      SELECT * FROM experiment_cases WHERE run_id = ? AND status = 'queued' ORDER BY ordinal
+    `).all(runId) as CaseRow[]
+    return rows.map(createCase)
+  }
+
   updateCaseEvaluation(
     runId: string,
     caseId: string,
@@ -512,7 +552,7 @@ export class ExperimentStore {
 
   startRun(id: string, startedAt: string): void {
     const result = this.database.prepare(`
-      UPDATE experiment_runs SET status = 'running', started_at = ?, updated_at = ?
+      UPDATE experiment_runs SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ?
       WHERE id = ? AND status = 'queued'
     `).run(startedAt, startedAt, id)
     if (result.changes === 0) throw new Error(`queued experiment was not found: ${id}`)

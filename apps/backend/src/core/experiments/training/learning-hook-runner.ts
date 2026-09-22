@@ -148,7 +148,45 @@ function candidates(value: unknown): HookExperienceCandidate[] {
         unifiedDiff: value.unifiedDiff,
       }
     })
-    return { summary: item.summary.trim(), rationale: item.rationale.trim(), patches }
+    let lifecycle: HookExperienceCandidate['lifecycle']
+    if (item.lifecycle !== undefined) {
+      if (!item.lifecycle || typeof item.lifecycle !== 'object' || Array.isArray(item.lifecycle)) {
+        throw new Error(`Hook experiences[${index}].lifecycle must be an object`)
+      }
+      const value = item.lifecycle as Record<string, unknown>
+      if (!['candidate', 'project_experience', 'plugin_stable'].includes(String(value.stage))) {
+        throw new Error(`Hook experiences[${index}].lifecycle.stage is invalid`)
+      }
+      const level = Number(value.level)
+      const contextBudgetTokens = Number(value.contextBudgetTokens)
+      const requiredCleanReplays = Number(value.requiredCleanReplays)
+      if (![1, 2, 3].includes(level)) throw new Error(`Hook experiences[${index}].lifecycle.level is invalid`)
+      if (!Number.isInteger(contextBudgetTokens) || contextBudgetTokens < 1) {
+        throw new Error(`Hook experiences[${index}].lifecycle.contextBudgetTokens must be positive`)
+      }
+      if (!Number.isInteger(requiredCleanReplays) || requiredCleanReplays < 1) {
+        throw new Error(`Hook experiences[${index}].lifecycle.requiredCleanReplays must be positive`)
+      }
+      if (!Array.isArray(value.entryIds) || !value.entryIds.every((id) => typeof id === 'string' && id.trim())) {
+        throw new Error(`Hook experiences[${index}].lifecycle.entryIds must be a string array`)
+      }
+      const expected = {
+        candidate: { level: 1, contextBudgetTokens: 32_768 },
+        project_experience: { level: 2, contextBudgetTokens: 16_384 },
+        plugin_stable: { level: 3, contextBudgetTokens: 8_192 },
+      }[String(value.stage)]
+      if (!expected || level !== expected.level || contextBudgetTokens !== expected.contextBudgetTokens) {
+        throw new Error(`Hook experiences[${index}].lifecycle stage, level, and context budget do not match`)
+      }
+      lifecycle = {
+        stage: value.stage as NonNullable<HookExperienceCandidate['lifecycle']>['stage'],
+        level: level as 1 | 2 | 3,
+        contextBudgetTokens,
+        requiredCleanReplays,
+        entryIds: [...new Set(value.entryIds.map((id) => String(id).trim()))],
+      }
+    }
+    return { summary: item.summary.trim(), rationale: item.rationale.trim(), patches, ...(lifecycle ? { lifecycle } : {}) }
   })
 }
 
@@ -173,19 +211,67 @@ function admission(value: unknown): HookAdmissionDecision | undefined {
   if (value === undefined) return undefined
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Hook admission must be an object')
   const item = value as Record<string, unknown>
-  if (!['accept', 'reject', 'revise', 'retry_correction'].includes(String(item.verdict))) {
-    throw new Error('Hook admission.verdict must be accept, reject, revise, or retry_correction')
+  if (!['accept', 'reject', 'revise', 'promote', 'retry_correction'].includes(String(item.verdict))) {
+    throw new Error('Hook admission.verdict must be accept, reject, revise, promote, or retry_correction')
   }
   if (!Array.isArray(item.reasons) || !item.reasons.every((reason) => typeof reason === 'string' && reason.trim())) {
     throw new Error('Hook admission.reasons must be a non-empty string array')
   }
   if (item.reasons.length === 0) throw new Error('Hook admission.reasons must not be empty')
   const revised = item.revisedCandidate === undefined ? undefined : candidates([item.revisedCandidate])[0]
-  if (item.verdict === 'revise' && !revised) throw new Error('Hook admission revise verdict requires revisedCandidate')
+  if (['revise', 'promote'].includes(String(item.verdict)) && !revised) {
+    throw new Error(`Hook admission ${String(item.verdict)} verdict requires revisedCandidate`)
+  }
+  let transition: HookAdmissionDecision['transition']
+  if (item.transition !== undefined) {
+    if (!item.transition || typeof item.transition !== 'object' || Array.isArray(item.transition)) {
+      throw new Error('Hook admission.transition must be an object')
+    }
+    const value = item.transition as Record<string, unknown>
+    const stages = ['candidate', 'project_experience', 'plugin_stable']
+    if (typeof value.promotionId !== 'string' || !value.promotionId.trim()) {
+      throw new Error('Hook admission.transition.promotionId is required')
+    }
+    if (!stages.includes(String(value.expectedStage)) || !stages.includes(String(value.targetStage))) {
+      throw new Error('Hook admission.transition stage is invalid')
+    }
+    if (!Number.isInteger(Number(value.expectedRevision)) || Number(value.expectedRevision) < 1) {
+      throw new Error('Hook admission.transition.expectedRevision must be positive')
+    }
+    if (typeof value.expectedContentHash !== 'string' || !/^[a-f0-9]{64}$/iu.test(value.expectedContentHash)) {
+      throw new Error('Hook admission.transition.expectedContentHash must be a SHA-256 hash')
+    }
+    const targetLevel = Number(value.targetLevel)
+    const contextBudgetTokens = Number(value.contextBudgetTokens)
+    if (![1, 2, 3].includes(targetLevel) || !Number.isInteger(contextBudgetTokens) || contextBudgetTokens < 1) {
+      throw new Error('Hook admission.transition target level or context budget is invalid')
+    }
+    const expected = {
+      candidate: { level: 1, contextBudgetTokens: 32_768 },
+      project_experience: { level: 2, contextBudgetTokens: 16_384 },
+      plugin_stable: { level: 3, contextBudgetTokens: 8_192 },
+    }[String(value.targetStage)]
+    if (!expected || targetLevel !== expected.level || contextBudgetTokens !== expected.contextBudgetTokens) {
+      throw new Error('Hook admission.transition stage, level, and context budget do not match')
+    }
+    transition = {
+      promotionId: value.promotionId.trim(),
+      expectedStage: value.expectedStage as NonNullable<HookAdmissionDecision['transition']>['expectedStage'],
+      expectedRevision: Number(value.expectedRevision),
+      expectedContentHash: value.expectedContentHash,
+      targetStage: value.targetStage as NonNullable<HookAdmissionDecision['transition']>['targetStage'],
+      targetLevel: targetLevel as 1 | 2 | 3,
+      contextBudgetTokens,
+    }
+  }
+  if (item.verdict === 'promote' && !transition) {
+    throw new Error('Hook admission promote verdict requires transition')
+  }
   return {
     verdict: item.verdict as HookAdmissionDecision['verdict'],
     reasons: item.reasons.map((reason) => String(reason).trim()),
     ...(revised ? { revisedCandidate: revised } : {}),
+    ...(transition ? { transition } : {}),
   }
 }
 

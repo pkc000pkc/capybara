@@ -328,6 +328,21 @@ export class ExperimentManager {
     return run
   }
 
+  async resume(id: string): Promise<ExperimentRunDetail> {
+    if (this.active.has(id)) return this.store.getRun(id)
+    const run = this.store.resumeRun(id)
+    const cases = this.store.runnableCases(id)
+    if (cases.length === 0) throw new Error('experiment has no interrupted or queued cases to resume')
+    const active: ActiveExperiment = {
+      controller: new AbortController(),
+      loops: new Set<RuntimeLoop>(),
+      llm: this.providedLlm ?? this.projectLlm(),
+    }
+    this.active.set(id, active)
+    active.done = Promise.resolve().then(() => this.executeRun(run, cases, active))
+    return this.store.getRun(id)
+  }
+
   list(options: { datasetId?: string; status?: ExperimentStatus; limit?: number } = {}): ExperimentRunSummary[] {
     return this.store.listRuns(options)
   }

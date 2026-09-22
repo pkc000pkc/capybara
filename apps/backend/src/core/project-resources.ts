@@ -360,7 +360,10 @@ export class ProjectResources {
       enabled: typeof configuredFailover.enabled === 'boolean'
         ? configuredFailover.enabled
         : profileValues.length > 1,
-      retries_per_profile: configuredFailover.retries_per_profile ?? 0,
+      // Keep a provider/model in rotation for the initial request plus five
+      // retries before moving to the next profile. An explicit value still
+      // overrides this default for projects that need a different policy.
+      retries_per_profile: configuredFailover.retries_per_profile ?? 5,
       initial_delay_ms: configuredFailover.initial_delay_ms ?? 1_000,
       max_delay_ms: configuredFailover.max_delay_ms ?? 30_000,
     }

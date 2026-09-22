@@ -51,6 +51,23 @@ export type ExperienceStatus =
   | 'applied'
   | 'conflict'
 
+export type ExperienceStage = 'candidate' | 'project_experience' | 'plugin_stable'
+
+export interface ExperienceLifecycle {
+  stage: ExperienceStage
+  level: 1 | 2 | 3
+  contextBudgetTokens: number
+  replayGeneration: number
+  replayCount: number
+  requiredCleanReplays: number
+  revision: number
+  contentHash: string
+  sourceCandidateId: string
+  entryIds: string[]
+  parentRevision?: number
+  promotionId?: string
+}
+
 export interface TrainingHookBinding {
   hookId: string
   parameters: Record<string, string>
@@ -172,7 +189,7 @@ export interface VariableDiff {
   afterValue?: string
 }
 
-export interface ExperienceCandidate {
+export interface ExperienceCandidate extends ExperienceLifecycle {
   id: string
   runId: string
   sourceCaseId: string

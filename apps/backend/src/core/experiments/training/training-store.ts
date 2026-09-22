@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import type { ExperimentCaseDetail, ExperimentFailure, ExperimentToolCall, ExperimentUsage } from '#core/experiments/types'
 import type {
   ExperienceCandidate,
+  ExperienceLifecycle,
   ExperienceStatus,
   TestSnapshot,
   TrainingCase,
@@ -90,6 +92,18 @@ type ExperienceRow = {
   replay_passed: number | null
   replay_score: number | null
   replay_rationale: string | null
+  stage: ExperienceCandidate['stage']
+  level: number
+  context_budget_tokens: number
+  replay_generation: number
+  replay_count: number
+  required_clean_replays: number
+  revision: number
+  content_hash: string
+  source_candidate_id: string
+  entry_ids_json: string
+  parent_revision: number | null
+  promotion_id: string | null
   created_at: string
   updated_at: string
 }
@@ -190,6 +204,18 @@ export class TrainingStore {
         replay_passed INTEGER,
         replay_score REAL,
         replay_rationale TEXT,
+        stage TEXT NOT NULL DEFAULT 'candidate',
+        level INTEGER NOT NULL DEFAULT 1,
+        context_budget_tokens INTEGER NOT NULL DEFAULT 32768,
+        replay_generation INTEGER NOT NULL DEFAULT 0,
+        replay_count INTEGER NOT NULL DEFAULT 0,
+        required_clean_replays INTEGER NOT NULL DEFAULT 1,
+        revision INTEGER NOT NULL DEFAULT 1,
+        content_hash TEXT NOT NULL DEFAULT '',
+        source_candidate_id TEXT NOT NULL DEFAULT '',
+        entry_ids_json TEXT NOT NULL DEFAULT '[]',
+        parent_revision INTEGER,
+        promotion_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -278,6 +304,42 @@ export class TrainingStore {
     if (!caseColumns.has('evaluation_json')) {
       this.database.exec('ALTER TABLE training_cases ADD COLUMN evaluation_json TEXT')
     }
+    const experienceColumns = new Set((this.database.prepare('PRAGMA table_info(experience_candidates)').all() as Array<{ name: string }>).map((column) => column.name))
+    const experienceMigrations = [
+      ['stage', "ALTER TABLE experience_candidates ADD COLUMN stage TEXT NOT NULL DEFAULT 'candidate'"],
+      ['level', 'ALTER TABLE experience_candidates ADD COLUMN level INTEGER NOT NULL DEFAULT 1'],
+      ['context_budget_tokens', 'ALTER TABLE experience_candidates ADD COLUMN context_budget_tokens INTEGER NOT NULL DEFAULT 32768'],
+      ['replay_generation', 'ALTER TABLE experience_candidates ADD COLUMN replay_generation INTEGER NOT NULL DEFAULT 0'],
+      ['replay_count', 'ALTER TABLE experience_candidates ADD COLUMN replay_count INTEGER NOT NULL DEFAULT 0'],
+      ['required_clean_replays', 'ALTER TABLE experience_candidates ADD COLUMN required_clean_replays INTEGER NOT NULL DEFAULT 1'],
+      ['revision', 'ALTER TABLE experience_candidates ADD COLUMN revision INTEGER NOT NULL DEFAULT 1'],
+      ['content_hash', "ALTER TABLE experience_candidates ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''"],
+      ['source_candidate_id', "ALTER TABLE experience_candidates ADD COLUMN source_candidate_id TEXT NOT NULL DEFAULT ''"],
+      ['entry_ids_json', "ALTER TABLE experience_candidates ADD COLUMN entry_ids_json TEXT NOT NULL DEFAULT '[]'"],
+      ['parent_revision', 'ALTER TABLE experience_candidates ADD COLUMN parent_revision INTEGER'],
+      ['promotion_id', 'ALTER TABLE experience_candidates ADD COLUMN promotion_id TEXT'],
+    ] as const
+    for (const [column, statement] of experienceMigrations) {
+      if (!experienceColumns.has(column)) this.database.exec(statement)
+    }
+    const legacyCandidates = this.database.prepare(`
+      SELECT id FROM experience_candidates WHERE content_hash = ''
+    `).all() as Array<{ id: string }>
+    for (const candidate of legacyCandidates) {
+      const patches = this.database.prepare(`
+        SELECT variable_name, COALESCE(after_value, '') AS after_value
+        FROM experience_patches WHERE candidate_id = ? ORDER BY variable_name
+      `).all(candidate.id)
+      const contentHash = createHash('sha256').update(JSON.stringify(patches)).digest('hex')
+      this.database.prepare(`
+        UPDATE experience_candidates SET content_hash = ?, source_candidate_id = id
+        WHERE id = ?
+      `).run(contentHash, candidate.id)
+    }
+    this.database.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS experiences_promotion_id
+      ON experience_candidates(promotion_id) WHERE promotion_id IS NOT NULL
+    `)
     this.recoverInterrupted()
   }
 
@@ -545,8 +607,11 @@ export class TrainingStore {
       const insert = this.database.prepare(`
         INSERT INTO experience_candidates (
           id, run_id, source_case_id, source_outcome, hook_id, summary, rationale,
-          status, replay_case_id, replay_passed, replay_score, replay_rationale, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          status, replay_case_id, replay_passed, replay_score, replay_rationale,
+          stage, level, context_budget_tokens, replay_generation, replay_count,
+          required_clean_replays, revision, content_hash, source_candidate_id,
+          entry_ids_json, parent_revision, promotion_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       const insertPatch = this.database.prepare(`
         INSERT INTO experience_patches (
@@ -558,7 +623,11 @@ export class TrainingStore {
           item.id, item.runId, item.sourceCaseId, item.sourceOutcome, item.hookId,
           item.summary, item.rationale, item.status, item.replayCaseId ?? null,
           item.replayPassed === undefined ? null : Number(item.replayPassed),
-          item.replayScore ?? null, item.replayRationale ?? null, item.createdAt, item.updatedAt,
+          item.replayScore ?? null, item.replayRationale ?? null,
+          item.stage, item.level, item.contextBudgetTokens, item.replayGeneration,
+          item.replayCount, item.requiredCleanReplays, item.revision, item.contentHash,
+          item.sourceCandidateId || item.id, JSON.stringify(item.entryIds),
+          item.parentRevision ?? null, item.promotionId ?? null, item.createdAt, item.updatedAt,
         )
         item.patches.forEach((patch, ordinal) => insertPatch.run(
           item.id, ordinal, patch.variableName, patch.baseHash, patch.unifiedDiff,
@@ -601,6 +670,112 @@ export class TrainingStore {
           replay_passed = NULL, replay_score = NULL, replay_rationale = NULL, updated_at = ?
         WHERE id = ?
       `).run(new Date().toISOString(), id)
+    })
+    return this.getExperience(id)
+  }
+
+  recordExperienceReplay(id: string, replay: {
+    caseId: string
+    passed: boolean
+    score: number
+    rationale: string
+  }): ExperienceCandidate {
+    const current = this.getExperience(id)
+    if (['applied', 'rejected'].includes(current.status)) throw new Error('decided experience cannot be replayed')
+    this.database.prepare(`
+      UPDATE experience_candidates SET status = ?, replay_case_id = ?, replay_passed = ?,
+        replay_score = ?, replay_rationale = ?, replay_count = replay_count + 1, updated_at = ?
+      WHERE id = ?
+    `).run(
+      replay.passed ? 'accepted' : 'replay_failed', replay.caseId, Number(replay.passed),
+      replay.score, replay.rationale, new Date().toISOString(), id,
+    )
+    return this.getExperience(id)
+  }
+
+  transitionExperience(
+    id: string,
+    patches: VariableDiff[],
+    lifecycle: ExperienceLifecycle,
+    expected: { stage: ExperienceLifecycle['stage']; revision: number; contentHash: string },
+    finalized: boolean,
+  ): ExperienceCandidate {
+    const current = this.getExperience(id)
+    if (current.promotionId === lifecycle.promotionId
+      && current.stage === lifecycle.stage
+      && current.level === lifecycle.level
+      && current.contentHash === lifecycle.contentHash) {
+      return current
+    }
+    if (current.stage !== expected.stage || current.revision !== expected.revision || current.contentHash !== expected.contentHash) {
+      throw new Error('experience changed since promotion was proposed')
+    }
+    if (current.replayPassed !== true) throw new Error('experience promotion requires a passing replay')
+    if (finalized && current.replayCount < current.requiredCleanReplays) {
+      throw new Error('experience promotion requires all clean replays to pass')
+    }
+    const allowed = current.stage === 'candidate'
+      ? lifecycle.stage === 'project_experience' && lifecycle.level === 2
+      : current.stage === 'project_experience'
+        ? lifecycle.stage === 'plugin_stable' && lifecycle.level === 3
+        : false
+    if (!allowed || lifecycle.level !== current.level + 1) throw new Error('invalid experience promotion transition')
+    if (lifecycle.contextBudgetTokens > current.contextBudgetTokens) {
+      throw new Error('experience promotion cannot increase its context budget')
+    }
+    if (lifecycle.revision !== current.revision + 1 || lifecycle.parentRevision !== current.revision) {
+      throw new Error('experience promotion revision is not contiguous')
+    }
+    if (!lifecycle.promotionId) throw new Error('experience promotion requires an idempotency key')
+    const duplicate = this.database.prepare(`
+      SELECT id FROM experience_candidates WHERE promotion_id = ? AND id <> ?
+    `).get(lifecycle.promotionId, id) as { id: string } | undefined
+    if (duplicate) throw new Error('experience promotion id was already used')
+    this.transaction(() => {
+      this.database.prepare('DELETE FROM experience_patches WHERE candidate_id = ?').run(id)
+      const insert = this.database.prepare(`
+        INSERT INTO experience_patches (
+          candidate_id, ordinal, variable_name, base_hash, unified_diff, before_value, after_value
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `)
+      patches.forEach((patch, ordinal) => insert.run(
+        id, ordinal, patch.variableName, patch.baseHash, patch.unifiedDiff,
+        patch.beforeValue ?? null, patch.afterValue ?? null,
+      ))
+      this.database.prepare(`
+        UPDATE experience_candidates SET status = ?, stage = ?, level = ?,
+          context_budget_tokens = ?, replay_generation = ?, required_clean_replays = ?,
+          revision = ?, content_hash = ?, source_candidate_id = ?, entry_ids_json = ?,
+          parent_revision = ?, promotion_id = ?, replay_case_id = ?, replay_passed = ?,
+          replay_score = ?, replay_rationale = ?, updated_at = ? WHERE id = ?
+      `).run(
+        finalized ? 'accepted' : 'draft', lifecycle.stage, lifecycle.level,
+        lifecycle.contextBudgetTokens, lifecycle.replayGeneration, lifecycle.requiredCleanReplays,
+        lifecycle.revision, lifecycle.contentHash, lifecycle.sourceCandidateId,
+        JSON.stringify(lifecycle.entryIds), lifecycle.parentRevision ?? null, lifecycle.promotionId ?? null,
+        finalized ? current.replayCaseId ?? null : null,
+        finalized ? Number(current.replayPassed === true) : null,
+        finalized ? current.replayScore ?? null : null,
+        finalized ? current.replayRationale ?? null : null,
+        new Date().toISOString(), id,
+      )
+      this.event(current.runId, 'experience.transitioned', {
+        candidateId: id,
+        promotionId: lifecycle.promotionId,
+        from: { stage: current.stage, level: current.level, revision: current.revision },
+        to: { stage: lifecycle.stage, level: lifecycle.level, revision: lifecycle.revision },
+        replayCount: current.replayCount,
+        contentHash: lifecycle.contentHash,
+        finalized,
+      })
+      this.event(current.runId, 'experience.promoted', {
+        candidateId: id,
+        promotionId: lifecycle.promotionId,
+        stage: lifecycle.stage,
+        level: lifecycle.level,
+        revision: lifecycle.revision,
+        contentHash: lifecycle.contentHash,
+      })
     })
     return this.getExperience(id)
   }
@@ -706,6 +881,26 @@ export class TrainingStore {
       for (const [name, value] of Object.entries(variables)) insert.run(runId, name, value)
     })
     this.event(runId, 'variables.updated', { variables: Object.keys(variables).sort() })
+  }
+
+  publishExperience(id: string, variables: Record<string, string>, payload: Record<string, unknown>): void {
+    const candidate = this.getExperience(id)
+    if ((candidate.requiredCleanReplays > 1 && candidate.stage === 'candidate')
+      || candidate.replayCount < candidate.requiredCleanReplays) {
+      throw new Error('experience has not completed its replay admission policy')
+    }
+    this.transaction(() => {
+      this.database.prepare('DELETE FROM training_variable_states WHERE run_id = ?').run(candidate.runId)
+      const insert = this.database.prepare(`
+        INSERT INTO training_variable_states (run_id, variable_name, value) VALUES (?, ?, ?)
+      `)
+      for (const [name, value] of Object.entries(variables)) insert.run(candidate.runId, name, value)
+      this.database.prepare(`
+        UPDATE experience_candidates SET status = 'applied', updated_at = ? WHERE id = ?
+      `).run(new Date().toISOString(), id)
+      this.event(candidate.runId, 'variables.updated', { variables: Object.keys(variables).sort() })
+      this.event(candidate.runId, 'experience.published', payload)
+    })
   }
 
   recordEvent(runId: string, type: string, payload: unknown): void {
@@ -880,6 +1075,18 @@ export class TrainingStore {
         ...(patch.after_value === null ? {} : { afterValue: patch.after_value }),
       })),
       status: row.status,
+      stage: row.stage,
+      level: row.level as 1 | 2 | 3,
+      contextBudgetTokens: row.context_budget_tokens,
+      replayGeneration: row.replay_generation,
+      replayCount: row.replay_count,
+      requiredCleanReplays: row.required_clean_replays,
+      revision: row.revision,
+      contentHash: row.content_hash,
+      sourceCandidateId: row.source_candidate_id || row.id,
+      entryIds: parseJson<string[]>(row.entry_ids_json, []),
+      ...(row.parent_revision === null ? {} : { parentRevision: row.parent_revision }),
+      ...(row.promotion_id ? { promotionId: row.promotion_id } : {}),
       ...(row.replay_case_id ? { replayCaseId: row.replay_case_id } : {}),
       ...(row.replay_passed === null ? {} : { replayPassed: Boolean(row.replay_passed) }),
       ...(row.replay_score === null ? {} : { replayScore: row.replay_score }),

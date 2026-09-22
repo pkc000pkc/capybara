@@ -80,6 +80,80 @@ test('LLM failover rotates candidates and keeps the successful candidate sticky'
   })
 })
 
+test('LLM failover exhausts five retries on a profile before switching models', async () => {
+  let unavailableRequests = 0
+  let healthyRequests = 0
+  const retries: LlmRetryNotification[] = []
+  await withApi((_body, _path, response) => {
+    unavailableRequests += 1
+    response.statusCode = 503
+    return { error: { message: 'temporary provider outage' } }
+  }, async (unavailableBaseUrl) => {
+    await withApi(() => {
+      healthyRequests += 1
+      return {
+        model: 'healthy-model',
+        choices: [{ finish_reason: 'stop', message: { content: 'recovered' } }],
+      }
+    }, async (healthyBaseUrl) => {
+      const service = createFailoverLlmService([
+        { id: 'unavailable', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: unavailableBaseUrl, model: 'unavailable-model' } },
+        { id: 'healthy', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: healthyBaseUrl, model: 'healthy-model' } },
+      ], { retriesPerCandidate: 5, initialDelayMs: 1, maxDelayMs: 2 })
+
+      const response = await service.chat({
+        messages: [{ role: 'user', content: 'wait before switching' }],
+        onRetry: retry => retries.push(retry),
+      })
+      assert.equal(response.model, 'healthy-model')
+    })
+  })
+
+  // One initial request plus five retries must be spent on the first profile.
+  assert.equal(unavailableRequests, 6)
+  assert.equal(healthyRequests, 1)
+  const switchNotification = retries.find(retry => retry.kind === 'profile_switch' && retry.phase === 'waiting')
+  assert.equal(switchNotification?.profileId, 'unavailable')
+  assert.equal(switchNotification?.nextProfileId, 'healthy')
+})
+
+test('LLM failover retries semantically invalid output before switching models', async () => {
+  let invalidRequests = 0
+  let fallbackRequests = 0
+  await withApi(() => {
+    invalidRequests += 1
+    return {
+      model: 'invalid-model',
+      choices: [{ finish_reason: 'stop', message: { content: 'not valid loop output' } }],
+    }
+  }, async (invalidBaseUrl) => {
+    await withApi(() => {
+      fallbackRequests += 1
+      return {
+        model: 'fallback-model',
+        choices: [{ finish_reason: 'stop', message: { content: '{"status":"completed","content":"recovered"}' } }],
+      }
+    }, async (fallbackBaseUrl) => {
+      const service = createFailoverLlmService([
+        { id: 'invalid', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: invalidBaseUrl, model: 'invalid-model' } },
+        { id: 'fallback', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: fallbackBaseUrl, model: 'fallback-model' } },
+      ], { initialDelayMs: 1, maxDelayMs: 2 })
+
+      const response = await service.chat({
+        messages: [{ role: 'user', content: 'retry invalid output' }],
+        validateResponse: candidate => candidate.text === '{"status":"completed","content":"recovered"}'
+          ? undefined
+          : 'invalid loop output',
+      })
+      assert.equal(response.model, 'fallback-model')
+    })
+  })
+
+  // The default failover policy is also five retries (six total attempts).
+  assert.equal(invalidRequests, 6)
+  assert.equal(fallbackRequests, 1)
+})
+
 test('LLM failover does not rotate deterministic context-limit failures', async () => {
   let fallbackRequests = 0
   await withApi((_body, _path, response) => {
@@ -109,6 +183,134 @@ test('LLM failover does not rotate deterministic context-limit failures', async 
         /maximum context length/i,
       )
       assert.equal(fallbackRequests, 0)
+    })
+  })
+})
+
+test('LLM failover rotates on a short-input upstream rejection', async () => {
+  let fallbackRequests = 0
+  await withApi((_body, _path, response) => {
+    response.statusCode = 400
+    return { error: { message: 'short_input_rejected: Upstream rejected illegal short-input distillation or heartbeat probing.' } }
+  }, async (rejectedBaseUrl) => {
+    await withApi(() => {
+      fallbackRequests += 1
+      return {
+        model: 'fallback-model',
+        choices: [{ finish_reason: 'stop', message: { content: '{"status":"completed","content":"recovered"}' } }],
+      }
+    }, async (fallbackBaseUrl) => {
+      const service = createFailoverLlmService([
+        { id: 'rejected', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: rejectedBaseUrl, model: 'rejected-model' } },
+        { id: 'fallback', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: fallbackBaseUrl, model: 'fallback-model' } },
+      ], { retriesPerCandidate: 0, initialDelayMs: 1, maxDelayMs: 2 })
+
+      const response = await service.chat({ messages: [{ role: 'user', content: 'answer the task' }] })
+      assert.equal(response.model, 'fallback-model')
+      assert.equal(fallbackRequests, 1)
+    })
+  })
+})
+
+test('LLM failover rotates on semantically unusable successful responses', async () => {
+  for (const invalidText of ['', '   \n', 'ordinary plain text']) {
+    let fallbackRequests = 0
+    await withApi(() => ({
+      model: 'invalid-model',
+      choices: [{ finish_reason: 'stop', message: { content: invalidText } }],
+    }), async (invalidBaseUrl) => {
+      await withApi(() => {
+        fallbackRequests += 1
+        return {
+          model: 'fallback-model',
+          choices: [{ finish_reason: 'stop', message: { content: '{"status":"completed","content":"valid"}' } }],
+        }
+      }, async (fallbackBaseUrl) => {
+        const service = createFailoverLlmService([
+          { id: 'invalid', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: invalidBaseUrl, model: 'invalid-model' } },
+          { id: 'fallback', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: fallbackBaseUrl, model: 'fallback-model' } },
+        ], { retriesPerCandidate: 0, initialDelayMs: 1, maxDelayMs: 2 })
+
+        const response = await service.chat({
+          messages: [{ role: 'user', content: 'answer the task' }],
+          validateResponse: candidate => {
+            if ((candidate.toolCalls?.length ?? 0) > 0) return undefined
+            if (!candidate.text.trim()) return 'empty output'
+            try {
+              const value = JSON.parse(candidate.text) as { status?: unknown; content?: unknown }
+              return (value.status === 'running' || value.status === 'completed') && typeof value.content === 'string'
+                ? undefined
+                : 'invalid loop output'
+            } catch {
+              return 'invalid loop output'
+            }
+          },
+        })
+        assert.equal(response.model, 'fallback-model')
+        assert.equal(fallbackRequests, 1)
+      })
+    })
+  }
+})
+
+test('LLM semantic validation accepts a valid tool call without requiring text', async () => {
+  let fallbackRequests = 0
+  await withApi(() => ({
+    model: 'tool-model',
+    choices: [{
+      finish_reason: 'tool_calls',
+      message: {
+        content: null,
+        tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'lookup', arguments: '{"query":"x"}' } }],
+      },
+    }],
+  }), async (toolBaseUrl) => {
+    await withApi(() => {
+      fallbackRequests += 1
+      return { model: 'fallback-model', choices: [{ finish_reason: 'stop', message: { content: 'unexpected' } }] }
+    }, async (fallbackBaseUrl) => {
+      const service = createFailoverLlmService([
+        { id: 'tool', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: toolBaseUrl, model: 'tool-model' } },
+        { id: 'fallback', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: fallbackBaseUrl, model: 'fallback-model' } },
+      ], { retriesPerCandidate: 0, initialDelayMs: 1, maxDelayMs: 2 })
+      const response = await service.chat({
+        messages: [{ role: 'user', content: 'use a tool' }],
+        validateResponse: candidate => (candidate.toolCalls?.length ?? 0) > 0 ? undefined : 'missing tool call',
+      })
+      assert.equal(response.toolCalls?.[0]?.name, 'lookup')
+      assert.equal(fallbackRequests, 0)
+    })
+  })
+})
+
+test('stream failover does not expose deltas from a semantically rejected candidate', async () => {
+  await withSseApi((_body, _path, response) => {
+    response.write(`data: ${JSON.stringify({ model: 'invalid-model', choices: [{ delta: { content: 'ordinary plain text' }, finish_reason: null }] })}\n\n`)
+    response.end('data: [DONE]\n\n')
+  }, async (invalidBaseUrl) => {
+    const validText = '{"status":"completed","content":"valid"}'
+    await withSseApi((_body, _path, response) => {
+      response.write(`data: ${JSON.stringify({ model: 'valid-model', choices: [{ delta: { content: validText }, finish_reason: null }] })}\n\n`)
+      response.end('data: [DONE]\n\n')
+    }, async (validBaseUrl) => {
+      const service = createFailoverLlmService([
+        { id: 'invalid', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: invalidBaseUrl, model: 'invalid-model' } },
+        { id: 'valid', config: { provider: 'custom', protocol: 'chat-completions', baseUrl: validBaseUrl, model: 'valid-model' } },
+      ], { retriesPerCandidate: 0, initialDelayMs: 1, maxDelayMs: 2 })
+      const deltas: string[] = []
+      const response = await service.stream({
+        messages: [{ role: 'user', content: 'answer' }],
+        validateResponse: candidate => {
+          try {
+            const value = JSON.parse(candidate.text) as { status?: unknown; content?: unknown }
+            return value.status === 'completed' && typeof value.content === 'string' ? undefined : 'invalid output'
+          } catch {
+            return 'invalid output'
+          }
+        },
+      }, delta => deltas.push(delta))
+      assert.equal(response.text, validText)
+      assert.deepEqual(deltas, [validText])
     })
   })
 })

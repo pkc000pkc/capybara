@@ -40,7 +40,7 @@ import {
   type TrainingVariableSource,
   type VariableDiff,
 } from '#core/experiments/training/training-types'
-import type { HookExperienceCandidate, HookTrainingContext } from '#core/hooks/types'
+import type { HookExperienceCandidate, HookExperienceTransition, HookTrainingContext } from '#core/hooks/types'
 import { HookRegistry } from '#core/hooks/hook-registry'
 import { ProjectResources } from '#core/project-resources'
 import { PluginRegistry } from '#core/plugins/plugin-registry'
@@ -103,6 +103,12 @@ function binding(value: unknown, field: string, required: boolean): TrainingHook
 
 function failure(error: unknown, code = 'TRAINING_FAILED'): ExperimentFailure {
   return { code, message: error instanceof Error ? error.message : String(error) }
+}
+
+function experienceContentHash(patches: readonly VariableDiff[]): string {
+  return variableHash(JSON.stringify(patches
+    .map((patch) => ({ variableName: patch.variableName, afterValue: patch.afterValue ?? '' }))
+    .sort((left, right) => left.variableName.localeCompare(right.variableName))))
 }
 
 class CorrectionBudgetError extends Error {
@@ -631,9 +637,19 @@ export class TrainingManager {
     // Session baselines are replay inputs, never long-term project promotions.
     const sessionKeys = new Set(new PluginRegistry(this.projectDir).effectiveSystemVariablesState().resource.variables
       .filter(variable => variable.scope === 'session').map(variable => variable.key))
-    const baseline = Object.fromEntries(Object.entries(this.store.baselineVariables(id))
-      .filter(([key]) => !sessionKeys.has(key)))
-    const result = await this.writer.promote(baseline, this.store.runVariables(id))
+    const runVariables = this.store.runVariables(id)
+    const projectVariables = new ProjectResources(this.projectDir).readSystemVariables().variables
+    const values = Object.fromEntries(projectVariables
+      .filter((variable) => !variable.readonly && variable.scope === 'project' && typeof variable.value === 'string')
+      .filter((variable) => !sessionKeys.has(variable.key) && runVariables[variable.key] !== undefined)
+      .map((variable) => [variable.key, runVariables[variable.key] as string]))
+    const baseline = Object.fromEntries(projectVariables
+      .filter((variable) => variable.key in values && typeof variable.value === 'string')
+      .filter((variable) => variable.value !== values[variable.key])
+      .map((variable) => [variable.key, variable.value as string]))
+    const result = Object.keys(baseline).length > 0
+      ? await this.writer.promote(baseline, values)
+      : { variables: values, contentHash: variableHash(JSON.stringify(Object.fromEntries(Object.entries(values).sort()))) }
     this.store.recordEvent(id, 'variables.promoted', {
       contentHash: result.contentHash,
       variables: Object.keys(result.variables).sort(),
@@ -903,6 +919,18 @@ export class TrainingManager {
         return
       }
       extractionItem = corrected.successfulItem
+      this.store.recordEvaluation(item.id, {
+        experimentCaseId: extractionItem.experimentCaseId ?? '',
+        actualAnswer: extractionItem.actualAnswer,
+        actualTools: extractionItem.actualTools,
+        toolCalls: extractionItem.toolCalls,
+        usage: extractionItem.usage,
+        score: extractionItem.score,
+        passed: true,
+        rationale: extractionItem.rationale,
+        ...(extractionItem.evaluation ? { evaluation: extractionItem.evaluation } : {}),
+        ...(extractionItem.failure ? { failure: extractionItem.failure } : {}),
+      })
     }
 
     while (true) {
@@ -970,12 +998,12 @@ export class TrainingManager {
         )
         attempts = corrected.attempts
         if (!corrected.successfulItem) {
-          this.store.setCaseStatus(item.id, 'unresolved')
-          this.store.recordEvent(run.id, 'correction.unresolved', {
+          this.store.recordEvent(run.id, 'correction.retry_abandoned', {
             sourceCaseId: item.id,
             attempts: attempts.length,
-            reason: 'admission_requested_retry',
+            reason: 'admission_requested_retry_failed',
           })
+          this.refreshReviewState(run.id, item.id, false)
           return
         }
         extractionItem = corrected.successfulItem
@@ -1279,7 +1307,7 @@ export class TrainingManager {
           score: detail.score ?? 0,
           rationale: detail.rationale ?? detail.failure?.message ?? '',
         }
-        this.store.setExperienceStatus(candidate.id, replay.passed ? 'accepted' : 'replay_failed', replay)
+        candidate = this.store.recordExperienceReplay(candidate.id, replay)
         const hooks = new LearningHookRunner(this.projectDir, this.experiments.runtimeLlm())
         const decisions = []
         const replayItem = this.caseFromDetail(source, detail, source.evaluation?.reference)
@@ -1289,8 +1317,8 @@ export class TrainingManager {
             binding,
             this.hookContext(run, replayItem, 'replay', {
               ...candidate,
-              patches: candidate.patches.map(({ variableName, baseHash, unifiedDiff }) => ({
-                variableName, baseHash, unifiedDiff,
+              patches: candidate.patches.map(({ variableName, baseHash, unifiedDiff, beforeValue, afterValue }) => ({
+                variableName, baseHash, unifiedDiff, beforeValue, afterValue,
               })),
             }, correctionAttempts),
             overrides,
@@ -1299,15 +1327,20 @@ export class TrainingManager {
           )
           if (execution.admission) decisions.push(execution.admission)
         }
-        let verdict: 'accept' | 'reject' | 'revise' | 'retry_correction' = replay.passed ? 'accept' : 'reject'
+        let verdict: 'accept' | 'reject' | 'revise' | 'promote' | 'retry_correction' = replay.passed ? 'accept' : 'reject'
         if (decisions.some((decision) => decision.verdict === 'reject')) verdict = 'reject'
         else if (decisions.some((decision) => decision.verdict === 'retry_correction')) verdict = 'retry_correction'
         else if (decisions.some((decision) => decision.verdict === 'revise')) verdict = 'revise'
+        else if (decisions.some((decision) => decision.verdict === 'promote')) verdict = 'promote'
         else if (decisions.some((decision) => decision.verdict === 'accept')) verdict = 'accept'
         const reasons = decisions.flatMap((decision) => decision.reasons)
         if (verdict === 'accept' && !replay.passed) {
           verdict = 'reject'
           reasons.push('A failed closed-book replay cannot be admitted.')
+        }
+        if (verdict === 'accept' && candidate.requiredCleanReplays > 1) {
+          verdict = 'reject'
+          reasons.push('A managed experience must complete its structured promotion lifecycle before publication.')
         }
         this.store.recordEvent(run.id, 'admission.decided', {
           candidateId: candidate.id,
@@ -1315,6 +1348,10 @@ export class TrainingManager {
           replayPassed: replay.passed,
           verdict,
           reasons,
+          stage: candidate.stage,
+          level: candidate.level,
+          replayCount: candidate.replayCount,
+          contentHash: candidate.contentHash,
         })
         if (verdict === 'revise') {
           const revised = decisions.find((decision) => decision.verdict === 'revise')?.revisedCandidate
@@ -1323,8 +1360,32 @@ export class TrainingManager {
             return { verdict: 'reject', reasons: [...reasons, 'Replay revision limit reached.'], detail }
           }
           const revisedCandidate = this.candidate(run, source, candidate.hookId, revised)
-          candidate = this.store.updateExperiencePatches(candidate.id, revisedCandidate.patches)
+          const transition = decisions.find((decision) => decision.verdict === 'revise')?.transition
+          candidate = transition
+            ? this.transitionCandidate(candidate, revisedCandidate, transition, false)
+            : this.store.updateExperiencePatches(candidate.id, revisedCandidate.patches)
+          const searchStrategyPatch = revisedCandidate.patches.find((patch) => patch.variableName === "gaia_search_strategy")
+          if (searchStrategyPatch) {
+            const beforeValue = searchStrategyPatch.beforeValue ?? ""
+            const afterValue = searchStrategyPatch.afterValue ?? beforeValue
+            await this.writer.promote(
+              { gaia_search_strategy: beforeValue },
+              { gaia_search_strategy: afterValue },
+            )
+          }
           continue
+        }
+        if (verdict === 'promote') {
+          const promoted = decisions.find((decision) => decision.verdict === 'promote')?.revisedCandidate
+          if (!promoted) {
+            this.store.setExperienceStatus(candidate.id, 'rejected', replay)
+            return { verdict: 'reject', reasons: [...reasons, 'Promotion did not include a finalized candidate.'], detail }
+          }
+          const promotedCandidate = this.candidate(run, source, candidate.hookId, promoted)
+          const transition = decisions.find((decision) => decision.verdict === 'promote')?.transition
+          if (!transition) throw new Error('Promotion did not include a structured transition.')
+          candidate = this.transitionCandidate(candidate, promotedCandidate, transition, true)
+          return { verdict: 'accept', reasons, detail }
         }
         if (verdict === 'retry_correction') {
           this.store.setExperienceStatus(candidate.id, 'replay_failed', replay)
@@ -1353,34 +1414,120 @@ export class TrainingManager {
     })
     const after = this.writer.preview(patches, values)
     const now = new Date().toISOString()
+    const id = randomUUID()
+    const lifecycle = generated.lifecycle ?? {
+      stage: 'candidate' as const,
+      level: 1 as const,
+      contextBudgetTokens: 32_768,
+      requiredCleanReplays: 1,
+      entryIds: [],
+    }
+    const normalizedPatches = patches.map((patch) => ({
+      ...patch,
+      beforeValue: values[patch.variableName] ?? '',
+      afterValue: after[patch.variableName] ?? '',
+    }))
     return {
-      id: randomUUID(),
+      id,
       runId: run.id,
       sourceCaseId: item.id,
       sourceOutcome: item.passed ? 'success' : 'failure',
       hookId,
       summary: generated.summary,
       rationale: generated.rationale,
-      patches: patches.map((patch) => ({
-        ...patch,
-        beforeValue: values[patch.variableName] ?? '',
-        afterValue: after[patch.variableName] ?? '',
-      })),
+      patches: normalizedPatches,
+      stage: lifecycle.stage,
+      level: lifecycle.level,
+      contextBudgetTokens: lifecycle.contextBudgetTokens,
+      replayGeneration: Math.max(0, lifecycle.level - 1),
+      replayCount: 0,
+      requiredCleanReplays: lifecycle.requiredCleanReplays,
+      revision: 1,
+      contentHash: experienceContentHash(normalizedPatches),
+      sourceCandidateId: id,
+      entryIds: lifecycle.entryIds,
       status: 'draft',
       createdAt: now,
       updatedAt: now,
     }
   }
 
+  private transitionCandidate(
+    current: ExperienceCandidate,
+    revised: ExperienceCandidate,
+    transition: HookExperienceTransition,
+    finalized: boolean,
+  ): ExperienceCandidate {
+    if (current.promotionId === transition.promotionId
+      && current.stage === transition.targetStage
+      && current.level === transition.targetLevel
+      && current.contextBudgetTokens === transition.contextBudgetTokens) {
+      return current
+    }
+    if (transition.expectedStage !== current.stage
+      || transition.expectedRevision !== current.revision
+      || transition.expectedContentHash !== current.contentHash) {
+      throw new Error('Promotion command does not match the current experience revision')
+    }
+    if (revised.stage !== transition.targetStage
+      || revised.level !== transition.targetLevel
+      || revised.contextBudgetTokens !== transition.contextBudgetTokens) {
+      throw new Error('Revised candidate lifecycle does not match its promotion command')
+    }
+    const lifecycle = {
+      stage: transition.targetStage,
+      level: transition.targetLevel,
+      contextBudgetTokens: transition.contextBudgetTokens,
+      replayGeneration: current.replayGeneration + 1,
+      replayCount: current.replayCount,
+      requiredCleanReplays: current.requiredCleanReplays,
+      revision: current.revision + 1,
+      contentHash: revised.contentHash,
+      sourceCandidateId: current.sourceCandidateId || current.id,
+      entryIds: current.entryIds,
+      parentRevision: current.revision,
+      promotionId: transition.promotionId,
+    }
+    return this.store.transitionExperience(
+      current.id,
+      revised.patches,
+      lifecycle,
+      {
+        stage: transition.expectedStage,
+        revision: transition.expectedRevision,
+        contentHash: transition.expectedContentHash,
+      },
+      finalized,
+    )
+  }
+
   private async applyCandidate(candidate: ExperienceCandidate): Promise<void> {
     try {
-      this.store.setExperienceStatus(candidate.id, 'accepted', this.replayMetadata(candidate))
       const current = this.store.runVariables(candidate.runId)
       const updates = this.writer.preview(candidate.patches, current)
-      this.store.replaceRunVariables(candidate.runId, { ...current, ...updates })
-      this.store.setExperienceStatus(candidate.id, 'applied', this.replayMetadata(candidate))
-    } catch {
+      const baseline = Object.fromEntries(candidate.patches.map((patch) => {
+        const beforeValue = patch.beforeValue ?? current[patch.variableName]
+        if (beforeValue === undefined) throw new Error(`candidate baseline is missing: ${patch.variableName}`)
+        return [patch.variableName, beforeValue]
+      }))
+      const published = await this.writer.promote(baseline, updates)
+      this.store.publishExperience(candidate.id, { ...current, ...updates }, {
+        candidateId: candidate.id,
+        sourceCaseId: candidate.sourceCaseId,
+        contentHash: published.contentHash,
+        variables: Object.keys(published.variables).sort(),
+        stage: candidate.stage,
+        level: candidate.level,
+        replayCount: candidate.replayCount,
+        promotionId: candidate.promotionId,
+      })
+    } catch (error) {
       this.store.setExperienceStatus(candidate.id, 'conflict', this.replayMetadata(candidate))
+      this.store.recordEvent(candidate.runId, 'experience.publish_conflict', {
+        candidateId: candidate.id,
+        sourceCaseId: candidate.sourceCaseId,
+        message: error instanceof Error ? error.message : String(error),
+      })
     }
   }
 

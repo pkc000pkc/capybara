@@ -147,7 +147,7 @@ function normalizeProjectSettings(value: ProjectSettings): ProjectSettings {
     : [legacyProfile];
   const failover = {
     enabled: rawLlm.failover?.enabled ?? profiles.length > 1,
-    retries_per_profile: rawLlm.failover?.retries_per_profile ?? 0,
+    retries_per_profile: rawLlm.failover?.retries_per_profile ?? 5,
     initial_delay_ms: rawLlm.failover?.initial_delay_ms ?? 1000,
     max_delay_ms: rawLlm.failover?.max_delay_ms ?? 30000,
   };
@@ -1209,7 +1209,7 @@ export default function ResourcesWorkspace({
       }],
       failover: {
         enabled: false,
-        retries_per_profile: 0,
+        retries_per_profile: 5,
         initial_delay_ms: 1000,
         max_delay_ms: 30000,
       },
