@@ -1,0 +1,20 @@
+{
+  "runner": "capybara-gaia2-smoke",
+  "runnerVersion": "0.1.0",
+  "mode": "dataset-preflight",
+  "dataset": "meta-agents-research-environments/gaia2-cli",
+  "datasetRevision": "main",
+  "split": "test",
+  "capabilities": [
+    "execution",
+    "search",
+    "adaptability",
+    "time",
+    "ambiguity"
+  ],
+  "model": null,
+  "officialVerifier": null,
+  "seed": null,
+  "scenarioTimeoutSeconds": null,
+  "notes": "Phase-1 data and schema smoke only; no model, ARE runtime, official judge, A2A, Noise, or score execution."
+}

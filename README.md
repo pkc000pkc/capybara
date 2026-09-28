@@ -1,0 +1,32 @@
+# Capybara GAIA2 最小工作项目
+
+这是 GAIA2 接入的第一阶段工作区，不实现完整 Agent、评分、Agent2Agent 或 Noise，只完成：
+
+1. 下载官方 `meta-agents-research-environments/gaia2-cli` 五个标准能力分片；
+2. 保存数据集来源、大小和 SHA-256 manifest；
+3. 使用支持 ZSTD 的 Parquet 读取器抽样解析场景；
+4. 检查场景 JSON 的基本结构和事件统计；
+5. 输出不含题目正文的 smoke 报告。
+
+`src/scenario_importer.mjs` 是第一阶段的只读 Scenario Adapter：保留官方场景 JSON，抽取 scenario ID、时间信息和事件摘要，不改写原始数据。
+
+`runner-manifest.json` 明确记录本阶段实际入口和未配置项；它不是官方 runner 配置，不会被误认为已经具备 GAIA2 评分能力。
+
+## 运行
+
+```powershell
+npm install
+npm run download
+npm run smoke
+```
+
+`npm run verify` 是 `npm run smoke` 的别名，可用于 CI 冒烟门禁。
+
+下载的数据文件存放在 `data/`，默认不会提交到 Git。smoke 报告写入 `reports/gaia2-smoke.json`。
+
+数据源：
+
+- https://huggingface.co/datasets/meta-agents-research-environments/gaia2-cli
+- https://github.com/facebookresearch/meta-agents-research-environments
+
+当前 smoke 只验证数据和场景结构，不启动模型、不执行应用写操作、不调用官方 judge，也不产生 GAIA2 分数。

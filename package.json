@@ -1,0 +1,14 @@
+{
+  "name": "capybara-gaia2-smoke",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "download": "node scripts/download_dataset.mjs",
+    "smoke": "node scripts/smoke_dataset.mjs",
+    "verify": "npm run smoke"
+  },
+  "dependencies": {
+    "hyparquet": "^1.31.2",
+    "hyparquet-compressors": "^1.1.2"
+  }
+}
