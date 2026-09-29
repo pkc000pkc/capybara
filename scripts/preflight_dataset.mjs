@@ -9,7 +9,7 @@ import { importScenarioRow } from '../src/scenario_importer.mjs'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const dataDir = join(root, 'data')
 const manifestPath = join(dataDir, 'manifest.json')
-const runnerManifestPath = join(root, 'runner-manifest.json')
+const runnerManifestPath = join(root, 'gaia2-runner-manifest.json')
 if (!existsSync(manifestPath)) throw new Error('data/manifest.json is missing; run npm run download first')
 
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
