@@ -17,6 +17,9 @@ const runner = JSON.parse(readFileSync(runnerManifestPath, 'utf8'))
 if (runner.dataset !== manifest.dataset || runner.split !== manifest.split) {
   throw new Error('runner and download manifests disagree')
 }
+if (runner.resolvedDatasetRevision && runner.resolvedDatasetRevision !== manifest.revision) {
+  throw new Error('runner manifest is pinned to a different dataset revision')
+}
 if (manifest.files.length !== runner.capabilities.length) {
   throw new Error('download manifest has an unexpected number of capability files')
 }

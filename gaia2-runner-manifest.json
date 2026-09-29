@@ -4,6 +4,7 @@
   "mode": "dataset-preflight-gate0-gate1-dry-run",
   "dataset": "meta-agents-research-environments/gaia2-cli",
   "datasetRevision": "main",
+  "resolvedDatasetRevision": "240ac47bfc62b24c934f95d014ffa5a3cab8b04c",
   "split": "test",
   "capabilities": [
     "execution",

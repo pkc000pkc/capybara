@@ -3,7 +3,7 @@
 这是 GAIA2 接入的第一阶段工作区，不实现完整 Agent、评分、Agent2Agent 或 Noise，只完成：
 
 1. 下载官方 `meta-agents-research-environments/gaia2-cli` 五个标准能力分片；
-2. 保存数据集来源、大小和 SHA-256 manifest；
+2. 先解析 Hugging Face 的不可变 commit，再保存数据集来源、版本、大小和 SHA-256 manifest；
 3. 使用支持 ZSTD 的 Parquet 读取器抽样解析场景；
 4. 检查场景 JSON 的基本结构和事件统计；
 5. 输出不含题目正文的 smoke 报告。

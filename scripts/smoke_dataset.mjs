@@ -16,6 +16,9 @@ const runnerManifest = JSON.parse(readFileSync(runnerManifestPath, 'utf8'))
 if (runnerManifest.dataset !== manifest.dataset || runnerManifest.split !== manifest.split) {
   throw new Error('runner-manifest.json does not match downloaded dataset manifest')
 }
+if (runnerManifest.resolvedDatasetRevision && runnerManifest.resolvedDatasetRevision !== manifest.revision) {
+  throw new Error('runner manifest is pinned to a different dataset revision')
+}
 const samples = []
 
 for (const file of manifest.files) {

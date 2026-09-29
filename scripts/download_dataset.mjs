@@ -8,7 +8,12 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const dataDir = join(root, 'data')
 mkdirSync(dataDir, { recursive: true })
 
-const base = 'https://huggingface.co/datasets/meta-agents-research-environments/gaia2-cli/resolve/main'
+const curl = process.platform === 'win32' ? 'curl.exe' : 'curl'
+const dataset = 'meta-agents-research-environments/gaia2-cli'
+const revisionApi = `https://huggingface.co/api/datasets/${dataset}/revision/main`
+const revision = JSON.parse(execFileSync(curl, ['--fail', '--location', revisionApi], { encoding: 'utf8' })).sha
+if (!/^[0-9a-f]{40}$/.test(revision)) throw new Error(`invalid dataset revision returned by Hugging Face: ${revision}`)
+const base = `https://huggingface.co/datasets/${dataset}/resolve/${revision}`
 const files = [
   ['execution', 'data/execution-test-00000-of-00001.parquet'],
   ['search', 'data/search-test-00000-of-00001.parquet'],
@@ -30,7 +35,6 @@ async function download(name, relativePath) {
     return { name, url, path: target, bytes: statSync(target).size, sha256: sha256(target), reused: true }
   }
 
-  const curl = process.platform === 'win32' ? 'curl.exe' : 'curl'
   const temporary = `${target}.part`
   execFileSync(curl, ['--fail', '--location', '--retry', '3', '--retry-delay', '2', '--output', temporary, url], {
     stdio: 'inherit',
@@ -47,8 +51,8 @@ for (const [name, relativePath] of files) {
 }
 
 const manifest = {
-  dataset: 'meta-agents-research-environments/gaia2-cli',
-  revision: 'main',
+  dataset,
+  revision,
   split: 'test',
   downloadedAt: new Date().toISOString(),
   files: downloaded,
