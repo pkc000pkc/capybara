@@ -24,7 +24,7 @@ npm run smoke
 
 `npm run gate1` 会从五类真实场景各回放一个无模型 dry-run；`npm run preflight` 会校验全部 800 个场景；`npm run verify` 会运行单元测试、Gate 1、抽样 smoke 和完整 preflight。
 
-`npm run real-smoke` 会读取 `gaia2-model-config.json` 指向的外部 `llm-config.txt`，使用其中的 `base_url` 和 `key`，以 `gpt-6-luna` 对五类真实题目各发出一次 Chat Completions 请求（不重试、不落盘密钥）。由于 GAIA1 配置标记为 Responses，而 ARE 官方运行器使用 Chat Completions，本命令明确记录了 `sourceProtocol: responses` 与 `protocol: chat-completions-adapter`。报告写入 `reports/gaia2-real-model-smoke.json`，只记录状态、HTTP 码、响应长度和哈希，不记录模型正文。
+`npm run real-smoke` 会读取 `gaia2-model-config.json` 指向的外部 `llm-config.txt`，使用其中的 `base_url` 和 `key`，以 `gpt-6-luna` 对五类真实题目各发出 Chat Completions 请求；对 408/429/5xx 和 overloaded 错误默认最多尝试 3 次并指数退避，可用 `GAIA2_MODEL_MAX_ATTEMPTS`、`GAIA2_MODEL_RETRY_BASE_MS`、`GAIA2_MODEL_TIMEOUT_MS` 调整。由于 GAIA1 配置标记为 Responses，而 ARE 官方运行器使用 Chat Completions，本命令明确记录了 `sourceProtocol: responses` 与 `protocol: chat-completions-adapter`。报告写入 `reports/gaia2-real-model-smoke.json`，只记录状态、HTTP 码、尝试次数、响应长度和哈希，不记录模型正文。
 
 下载的数据文件存放在 `data/`，默认不会提交到 Git。smoke 报告写入 `reports/gaia2-smoke.json`。
 
