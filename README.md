@@ -12,7 +12,7 @@
 
 `runner-manifest.json` 明确记录本阶段实际入口和未配置项；它不是官方 runner 配置，不会被误认为已经具备 GAIA2 评分能力。
 
-P0 的最小运行原语位于 `src/`：`VirtualClock`、`EventBus`、`CheckpointStore`、`tool_contract` 和 `WriteActionLedger`。它们负责确定性时间推进、事件依赖/去重、恢复形状、effect/idempotency 约束和 mutation trace，不连接模型或真实外部副作用。
+P0/P1 的最小运行原语位于 `src/`：`VirtualClock`、`EventBus`、`CheckpointStore`、`tool_contract`、`WriteActionLedger`、`ClarificationGate` 和 `ReplanController`。它们负责确定性时间推进、事件依赖/去重、恢复形状、effect/idempotency 约束、mutation trace、澄清暂停和父子 replan，不连接模型或真实外部副作用。
 
 ## 运行
 

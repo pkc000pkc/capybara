@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { CheckpointStore } from '../src/checkpoint_store.mjs'
+import { ClarificationGate } from '../src/clarification_gate.mjs'
 import { EventBus } from '../src/event_bus.mjs'
 import { VirtualClock } from '../src/virtual_clock.mjs'
 
@@ -59,4 +60,18 @@ test('checkpoint preserves clock and event state without replaying consumed even
   assert.equal(restoredClock.now(), 10)
   assert.deepEqual(restoredBus.ready(10), [])
   assert.deepEqual(restored.state.executedWriteActionIds, ['write-1'])
+})
+
+test('clarification gate pauses on ambiguity and resumes only with an answer', () => {
+  const gate = new ClarificationGate()
+  const pending = gate.request({
+    question: 'Which calendar should receive the event?',
+    reason: 'two calendars match the request',
+    safeActions: ['list_calendars'],
+  })
+  assert.equal(pending.state, 'waiting_user')
+  assert.throws(() => gate.answer(pending.id, '   '), /cannot be empty/)
+  const approved = gate.answer(pending.id, 'Work calendar')
+  assert.equal(approved.state, 'approved')
+  assert.equal(approved.answer, 'Work calendar')
 })

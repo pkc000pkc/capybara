@@ -21,6 +21,7 @@ test('write ledger deduplicates successful mutation keys and blocks unknown repl
     toolName: 'calendar.create',
     operation: 'create',
     args: { title: 'demo' },
+    parentActionIds: ['parent-1'],
     mutationKey: 'scenario-1:calendar:create:1',
   })
   assert.equal(started.duplicate, false)
@@ -34,6 +35,7 @@ test('write ledger deduplicates successful mutation keys and blocks unknown repl
   })
   assert.equal(duplicate.duplicate, true)
   assert.equal(duplicate.action.actionId, 'a-1')
+  assert.deepEqual(duplicate.action.parentActionIds, ['parent-1'])
 
   const unknown = ledger.start({
     actionId: 'a-3',
@@ -43,6 +45,7 @@ test('write ledger deduplicates successful mutation keys and blocks unknown repl
     mutationKey: 'scenario-1:calendar:create:2',
   })
   assert.equal(unknown.action.result, 'unknown')
+  ledger.fail('a-3', new Error('transport timeout'), 'unknown')
   assert.throws(() => ledger.start({
     actionId: 'a-4',
     toolName: 'calendar.create',
