@@ -12,6 +12,8 @@
 
 `runner-manifest.json` 明确记录本阶段实际入口和未配置项；它不是官方 runner 配置，不会被误认为已经具备 GAIA2 评分能力。
 
+P0 的最小运行原语位于 `src/`：`VirtualClock`、`EventBus`、`CheckpointStore`、`tool_contract` 和 `WriteActionLedger`。它们负责确定性时间推进、事件依赖/去重、恢复形状、effect/idempotency 约束和 mutation trace，不连接模型或真实外部副作用。
+
 ## 运行
 
 ```powershell
@@ -20,7 +22,7 @@ npm run download
 npm run smoke
 ```
 
-`npm run verify` 是 `npm run smoke` 的别名，可用于 CI 冒烟门禁。
+`npm run preflight` 会校验全部 800 个场景；`npm run verify` 会运行单元测试、抽样 smoke 和完整 preflight，可作为 Gate 0 的本地门禁。
 
 下载的数据文件存放在 `data/`，默认不会提交到 Git。smoke 报告写入 `reports/gaia2-smoke.json`。
 

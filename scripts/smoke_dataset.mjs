@@ -42,6 +42,7 @@ const report = {
     'each file contains rows',
     'sample row contains scenario JSON',
     'scenario contains metadata/apps/events/version/augmentation',
+    'scenario adapter validates event dependencies without exposing raw state or oracle actions',
     'no model or score evaluation was executed',
   ],
   samples,

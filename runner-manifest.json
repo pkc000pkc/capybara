@@ -1,7 +1,7 @@
 {
   "runner": "capybara-gaia2-smoke",
-  "runnerVersion": "0.1.0",
-  "mode": "dataset-preflight",
+  "runnerVersion": "0.2.0",
+  "mode": "dataset-preflight-and-gate0",
   "dataset": "meta-agents-research-environments/gaia2-cli",
   "datasetRevision": "main",
   "split": "test",
@@ -16,5 +16,5 @@
   "officialVerifier": null,
   "seed": null,
   "scenarioTimeoutSeconds": null,
-  "notes": "Phase-1 data and schema smoke only; no model, ARE runtime, official judge, A2A, Noise, or score execution."
+  "notes": "Phase-1 data/schema plus deterministic Gate-0 primitives; no model, ARE runtime, official judge, A2A, Noise, or score execution."
 }

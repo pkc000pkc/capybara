@@ -4,8 +4,10 @@
   "type": "module",
   "scripts": {
     "download": "node scripts/download_dataset.mjs",
+    "preflight": "node scripts/preflight_dataset.mjs",
     "smoke": "node scripts/smoke_dataset.mjs",
-    "verify": "npm run smoke"
+    "verify": "npm test && npm run smoke && npm run preflight",
+    "test": "node --test"
   },
   "dependencies": {
     "hyparquet": "^1.31.2",
