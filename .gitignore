@@ -1,6 +1,8 @@
 node_modules/
 .official-python/
 official-results/
+.official-fixtures/
+scripts/__pycache__/
 data/*.parquet
 data/*.json
 reports/*.json

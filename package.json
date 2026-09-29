@@ -7,6 +7,8 @@
     "gate1": "node scripts/gate1_smoke.mjs",
     "preflight": "node scripts/preflight_dataset.mjs",
     "real-smoke": "node scripts/real_model_smoke.mjs",
+    "official-e2e": "node scripts/official_e2e_smoke.mjs",
+    "install-official": "powershell -ExecutionPolicy Bypass -File scripts/install_official_requirements.ps1",
     "smoke": "node scripts/smoke_dataset.mjs",
     "verify": "npm test && npm run smoke && npm run gate1 && npm run preflight",
     "test": "node --test"

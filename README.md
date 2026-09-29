@@ -34,3 +34,15 @@ npm run smoke
 - https://github.com/facebookresearch/meta-agents-research-environments
 
 `npm run gate1` 和 `npm run preflight` 仍然不启动模型、不执行应用写操作、不调用官方 judge，也不产生 GAIA2 分数；`npm run real-smoke` 只验证真实模型传输，不代表 ARE 环境执行成功或产生分数。
+
+## 官方 ARE 端到端冒烟
+
+官方运行器依赖固定版本 `meta-agents-research-environments==1.2.0`。安装到隔离目录（Windows 若系统没有 `python`，先设置 `GAIA2_PYTHON`）：
+
+```powershell
+$env:GAIA2_PYTHON = 'C:\path\to\python.exe'
+npm run install-official
+npm run official-e2e
+```
+
+`official-e2e` 默认从官方 execution 分片的第一条题目派生一个最小、确定性的单动作场景，只保留 AgentUserInterface、Contacts 和 Messages，仍由官方 ARE loader、Environment、AppTool 和 event judge 执行；报告要求官方 `macro_success_rate > 0` 才会标记通过。结果写入 `reports/gaia2-official-e2e-smoke.json`，追踪文件写入 `official-results/`，两者均不提交。设置 `GAIA2_E2E_MINIMAL=0` 可运行未裁剪的原始首题。Windows 下的 SIGALRM 兼容处理在 runner 启动代码中完成，不修改官方包源码。
