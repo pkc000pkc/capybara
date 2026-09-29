@@ -22,7 +22,7 @@ npm run download
 npm run smoke
 ```
 
-`npm run preflight` 会校验全部 800 个场景；`npm run verify` 会运行单元测试、抽样 smoke 和完整 preflight，可作为 Gate 0 的本地门禁。
+`npm run gate1` 会从五类真实场景各回放一个无模型 dry-run；`npm run preflight` 会校验全部 800 个场景；`npm run verify` 会运行单元测试、Gate 1、抽样 smoke 和完整 preflight。
 
 下载的数据文件存放在 `data/`，默认不会提交到 Git。smoke 报告写入 `reports/gaia2-smoke.json`。
 

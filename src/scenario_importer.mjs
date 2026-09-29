@@ -104,6 +104,12 @@ export function importScenarioRow(row, capability) {
     eventIdCollisionCount,
     eventTypes,
     augmentationKeys: Object.keys(scenario.augmentation).sort(),
+    eventPlan: scenario.events.map((event) => ({
+      id: event.event_id,
+      type: event.event_type ?? 'unknown',
+      scheduledAt: event.event_time ?? (definition.start_time + (event.event_relative_time ?? 0)),
+      dependencies: [...(event.dependencies ?? [])],
+    })),
     agentView: {
       scenarioId,
       capability,
