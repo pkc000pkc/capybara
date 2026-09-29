@@ -6,6 +6,7 @@
     "download": "node scripts/download_dataset.mjs",
     "gate1": "node scripts/gate1_smoke.mjs",
     "preflight": "node scripts/preflight_dataset.mjs",
+    "real-smoke": "node scripts/real_model_smoke.mjs",
     "smoke": "node scripts/smoke_dataset.mjs",
     "verify": "npm test && npm run smoke && npm run gate1 && npm run preflight",
     "test": "node --test"

@@ -1,0 +1,10 @@
+{
+  "provider": "custom-openai-compatible",
+  "protocol": "responses",
+  "model": "gpt-6-luna",
+  "baseUrl": "http://127.0.0.1:8317/v1",
+  "apiKeySource": "D:\\gitlocals\\kanli8-human\\capybara-test-workspaces\\gaia-project\\llm-config.txt",
+  "apiKeyPath": "key",
+  "source": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia-project/llm-config.txt",
+  "note": "Endpoint/key source supplied for this smoke run. The key is not copied into this file or committed."
+}

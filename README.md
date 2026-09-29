@@ -24,6 +24,8 @@ npm run smoke
 
 `npm run gate1` 会从五类真实场景各回放一个无模型 dry-run；`npm run preflight` 会校验全部 800 个场景；`npm run verify` 会运行单元测试、Gate 1、抽样 smoke 和完整 preflight。
 
+`npm run real-smoke` 会读取 `gaia2-model-config.json` 指向的外部 `llm-config.txt`，使用其中的 `base_url` 和 `key`，以 `gpt-6-luna` 对五类真实题目各发出一次 Chat Completions 请求（不重试、不落盘密钥）。由于 GAIA1 配置标记为 Responses，而 ARE 官方运行器使用 Chat Completions，本命令明确记录了 `sourceProtocol: responses` 与 `protocol: chat-completions-adapter`。报告写入 `reports/gaia2-real-model-smoke.json`，只记录状态、HTTP 码、响应长度和哈希，不记录模型正文。
+
 下载的数据文件存放在 `data/`，默认不会提交到 Git。smoke 报告写入 `reports/gaia2-smoke.json`。
 
 数据源：
@@ -31,4 +33,4 @@ npm run smoke
 - https://huggingface.co/datasets/meta-agents-research-environments/gaia2-cli
 - https://github.com/facebookresearch/meta-agents-research-environments
 
-当前 smoke 只验证数据和场景结构，不启动模型、不执行应用写操作、不调用官方 judge，也不产生 GAIA2 分数。
+`npm run gate1` 和 `npm run preflight` 仍然不启动模型、不执行应用写操作、不调用官方 judge，也不产生 GAIA2 分数；`npm run real-smoke` 只验证真实模型传输，不代表 ARE 环境执行成功或产生分数。

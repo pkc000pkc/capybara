@@ -1,4 +1,6 @@
 node_modules/
+.official-python/
+official-results/
 data/*.parquet
 data/*.json
 reports/*.json
