@@ -1,0 +1,143 @@
+import { createHash } from 'node:crypto'
+import { RuntimeAttempt } from './runtime_attempt.mjs'
+
+function clone(value) {
+  return structuredClone(value)
+}
+
+function seedFor(rootSeed, attemptIndex, correctionOrdinal = 0) {
+  const digest = createHash('sha256').update(`${rootSeed}:${attemptIndex}:${correctionOrdinal}`).digest()
+  return digest.readInt32BE(0)
+}
+
+function assertNoEvaluatorLeak(value, label = 'input') {
+  const text = JSON.stringify(value ?? {})
+  for (const key of ['expectedAnswer', 'referenceAnswer', 'oracle', 'judgeRationale', 'scorerRationale']) {
+    if (text.includes(`"${key}"`)) throw new Error(`sealed evaluator violation: ${label} contains ${key}`)
+  }
+}
+
+/** Five independent attempts with answer-blind correction and trusted aggregation. */
+export class Pass5Orchestrator {
+  constructor({ rootSeed = 17, attempts = 5, noiseProfile = 'off', maxCorrections = 1,
+    runtimeFactory = (options) => new RuntimeAttempt(options), verifier = null, correction = null } = {}) {
+    if (!Number.isInteger(attempts) || attempts !== 5) throw new Error('GAIA2 pass@5 requires exactly five attempts')
+    if (!Number.isInteger(rootSeed)) throw new Error('rootSeed must be an integer')
+    if (verifier !== null && typeof verifier !== 'function') throw new Error('verifier must be a function or null')
+    if (correction !== null && typeof correction !== 'function') throw new Error('correction must be a function or null')
+    this.rootSeed = rootSeed
+    this.attempts = attempts
+    this.noiseProfile = noiseProfile
+    this.maxCorrections = Math.max(0, Math.floor(maxCorrections))
+    this.runtimeFactory = runtimeFactory
+    this.verifier = verifier
+    this.correction = correction
+  }
+
+  async runScenario({ scenarioId, capability, eventPlan = [], plan = { steps: [] }, runAttempt } = {}) {
+    if (!scenarioId || !capability) throw new Error('scenarioId and capability are required')
+    if (runAttempt !== undefined && typeof runAttempt !== 'function') throw new Error('runAttempt must be a function')
+    const outcomes = []
+    for (let attemptIndex = 1; attemptIndex <= this.attempts; attemptIndex += 1) {
+      const seed = seedFor(this.rootSeed, attemptIndex)
+      const attempt = this.runtimeFactory({ scenarioId, capability, attemptIndex, seed, noiseProfile: this.noiseProfile })
+      const initialStateHash = attempt.checkpoint().stateHash
+      let correctionOrdinal = 0
+      let strategy = null
+      const corrections = []
+      let execution
+      try {
+        execution = await this.#execute({ attempt, runAttempt, eventPlan, plan, mode: 'initial', strategy })
+      } catch (error) {
+        execution = { passed: false, infrastructureError: false, failureReason: String(error?.message ?? error) }
+      }
+      while (!execution.passed && this.correction && correctionOrdinal < this.maxCorrections && !execution.infrastructureError) {
+        correctionOrdinal += 1
+        const failure = this.#sanitizeFailure(execution)
+        assertNoEvaluatorLeak(failure, 'correction failure')
+        strategy = await this.correction({
+          scenarioId, capability, attemptIndex, correctionOrdinal,
+          failure, observableTrace: clone(execution.trace ?? []),
+        })
+        assertNoEvaluatorLeak(strategy, 'correction strategy')
+        corrections.push({ ordinal: correctionOrdinal, strategyHash: hash(strategy) })
+        const replay = this.runtimeFactory({ scenarioId, capability, attemptIndex, seed: seedFor(this.rootSeed, attemptIndex, correctionOrdinal), noiseProfile: this.noiseProfile })
+        execution = await this.#execute({ attempt: replay, runAttempt, eventPlan, plan, mode: 'correction', strategy })
+      }
+      const verification = this.verifier
+        ? await this.verifier({ scenarioId, capability, attemptIndex, execution: clone(execution), corrections: clone(corrections) })
+        : { status: 'not_configured', passed: Boolean(execution.passed) }
+      if (verification && Object.hasOwn(verification, 'referenceAnswer')) throw new Error('sealed evaluator violation: verifier result leaked referenceAnswer')
+      const finalPassed = verification.status === 'evaluated' ? verification.passed === true : execution.passed === true
+      const runtime = execution.runtime ?? {}
+      outcomes.push({
+        attemptIndex,
+        seed,
+        noiseSeed: runtime.noiseSeed ?? seedFor(this.rootSeed, attemptIndex),
+        initialStateHash,
+        finalStateHash: runtime.stateHash ?? null,
+        passed: finalPassed,
+        infrastructureError: execution.infrastructureError === true,
+        failureReason: execution.failureReason ?? null,
+        correctionCount: corrections.length,
+        corrections,
+        verification: { status: verification.status ?? 'not_configured', passed: verification.passed ?? null },
+        noise: runtime.noise ?? null,
+        traceHash: runtime.traceHash ?? null,
+      })
+    }
+    return this.aggregate({ scenarioId, capability, outcomes })
+  }
+
+  aggregate({ scenarioId, capability, outcomes }) {
+    if (!Array.isArray(outcomes) || outcomes.length !== 5) throw new Error('pass@5 aggregation requires five outcomes')
+    const valid = outcomes.filter((outcome) => !outcome.infrastructureError)
+    const passed = outcomes.filter((outcome) => outcome.passed)
+    const correctionCount = outcomes.reduce((sum, outcome) => sum + outcome.correctionCount, 0)
+    const noiseInjectedCount = outcomes.reduce((sum, outcome) => sum + Number(outcome.noise?.injected ?? 0), 0)
+    const noiseRecoveredCount = outcomes.reduce((sum, outcome) => sum + (outcome.correctionCount > 0 && outcome.passed ? 1 : 0), 0)
+    const noiseBlockedCount = outcomes.reduce((sum, outcome) => sum + Number(outcome.noise?.conflicting ?? 0) + Number(outcome.noise?.truncated ?? 0), 0)
+    return {
+      schemaVersion: 'gaia2-pass5-v1',
+      scenarioId,
+      capability,
+      attempts: outcomes,
+      taskPassAt5: passed.length > 0,
+      passAt5: passed.length > 0 ? 1 : 0,
+      attemptPassRate: passed.length / outcomes.length,
+      taskPassAll5: passed.length === outcomes.length,
+      unresolvedRate: outcomes.filter((outcome) => !outcome.passed && !outcome.infrastructureError).length / outcomes.length,
+      infrastructureErrorRate: outcomes.filter((outcome) => outcome.infrastructureError).length / outcomes.length,
+      correctionSuccessRate: correctionCount ? noiseRecoveredCount / correctionCount : 0,
+      noiseInjectedCount,
+      noiseRecoveredCount,
+      noiseBlockedCount,
+      validAttemptCount: valid.length,
+      aggregation: 'task_pass_at_5=any(attempt_pass_i); correction does not add attempts',
+    }
+  }
+
+  async #execute({ attempt, runAttempt, eventPlan, plan, mode, strategy }) {
+    const runtimeResult = await attempt.run({ eventPlan, plan })
+    const execution = runAttempt
+      ? await runAttempt({ attempt, attemptIndex: attempt.attemptIndex, runtime: runtimeResult, mode, strategy })
+      : { passed: false, failureReason: 'no attempt runner configured' }
+    assertNoEvaluatorLeak(execution, 'attempt execution')
+    return { ...execution, runtime: { ...runtimeResult, noise: attempt.noise.summary() } }
+  }
+
+  #sanitizeFailure(execution) {
+    return {
+      failureReason: String(execution.failureReason ?? 'attempt failed').slice(0, 1000),
+      observableErrors: clone(execution.observableErrors ?? []),
+      trace: clone(execution.trace ?? []),
+      infrastructureError: execution.infrastructureError === true,
+    }
+  }
+}
+
+function hash(value) {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+export { seedFor }

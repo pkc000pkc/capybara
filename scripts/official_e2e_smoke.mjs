@@ -9,6 +9,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const config = JSON.parse(readFileSync(join(root, 'gaia2-model-config.json'), 'utf8'))
 const manifest = JSON.parse(readFileSync(join(root, 'data', 'manifest.json'), 'utf8'))
 const capability = process.env.GAIA2_E2E_CAPABILITY || 'execution'
+const numRuns = Math.max(1, Number(process.env.GAIA2_E2E_NUM_RUNS || 1))
 const source = manifest.files.find((file) => file.name === capability)
 if (!source) throw new Error(`No downloaded GAIA2 source for capability ${capability}`)
 
@@ -104,7 +105,7 @@ const args = [
   '--provider', 'local',
   '--endpoint', baseUrl,
   '--limit', '1',
-  '--num_runs', '1',
+  '--num_runs', String(numRuns),
   '--max_concurrent_scenarios', '1',
   '--scenario_timeout', process.env.GAIA2_E2E_TIMEOUT_SECONDS || '180',
   '--output_dir', outputDir,
@@ -168,7 +169,7 @@ const report = {
   model: config.model,
   provider: 'local',
   baseUrl,
-  runs: 1,
+  runs: numRuns,
   exitCode: result.status,
   signal: result.signal,
   error: result.error?.message,
