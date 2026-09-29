@@ -14,6 +14,8 @@
   ],
   "model": null,
   "officialVerifier": null,
+  "a2a": "protocol-only",
+  "noise": "seeded-adapter-only",
   "seed": null,
   "scenarioTimeoutSeconds": null,
   "notes": "Phase-1 data/schema plus deterministic Gate-0 primitives and Gate-1 no-model replay; no model, ARE runtime, official judge, A2A, Noise, or score execution."
