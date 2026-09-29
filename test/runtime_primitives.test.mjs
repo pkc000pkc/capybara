@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { CheckpointStore } from '../src/checkpoint_store.mjs'
 import { ClarificationGate } from '../src/clarification_gate.mjs'
 import { EventBus } from '../src/event_bus.mjs'
@@ -60,6 +63,19 @@ test('checkpoint preserves clock and event state without replaying consumed even
   assert.equal(restoredClock.now(), 10)
   assert.deepEqual(restoredBus.ready(10), [])
   assert.deepEqual(restored.state.executedWriteActionIds, ['write-1'])
+})
+
+test('file-backed checkpoint can be loaded by a new store instance', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'capybara-gaia2-checkpoint-'))
+  try {
+    const path = join(directory, 'checkpoint.json')
+    const first = new CheckpointStore(path)
+    first.save({ virtualClock: { now: 42 }, executedWriteActionIds: ['write-7'] })
+    const second = new CheckpointStore(path)
+    assert.deepEqual(second.load()?.state, { virtualClock: { now: 42 }, executedWriteActionIds: ['write-7'] })
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('clarification gate pauses on ambiguity and resumes only with an answer', () => {
