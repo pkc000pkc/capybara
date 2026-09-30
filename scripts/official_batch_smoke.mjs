@@ -56,6 +56,11 @@ for (const capability of capabilities) {
     writeFileSync(join(outputDir, 'process.stdout.log'), stdout)
     const report = reportFromChild(stdout, outputDir)
     const infrastructureError = Boolean(child.error) || child.signal !== null || child.status === null
+    const runnerLogPath = join(outputDir, 'runner.log')
+    const runnerLog = existsSync(runnerLogPath) ? readFileSync(runnerLogPath, 'utf8') : ''
+    const diagnosticText = `${stdout}\n${runnerLog}`
+    const rateLimited = /HTTP\/1\.1 429|usage_limit_reached|model_cooldown/i.test(diagnosticText)
+    const providerMisconfigured = /LLM Provider NOT provided|BadRequestError/i.test(diagnosticText)
     const fixtureDir = join(root, '.official-fixtures', 'batch-10', capability)
     const fixtureScenarioId = existsSync(fixtureDir)
       ? readdirSync(fixtureDir).filter((name) => name.endsWith('.json')).sort()[scenarioIndex]?.replace(/\.json$/, '')
@@ -67,12 +72,17 @@ for (const capability of capabilities) {
       capability,
       scenarioIndex,
       scenarioId: fixtureScenarioId || report.sourceScenarioId || report.scenarioId || null,
-      status: infrastructureError ? 'infrastructure_error' : report.status,
+      status: infrastructureError || rateLimited
+        ? 'infrastructure_error'
+        : providerMisconfigured ? 'configuration_error' : report.status,
+      failureClass: infrastructureError
+        ? (child.error?.code === 'ETIMEDOUT' ? 'timeout' : 'process_error')
+        : rateLimited ? 'model_rate_limit' : providerMisconfigured ? 'provider_configuration' : (report.status === 'passed' ? null : 'judge_failure'),
       score: infrastructureError ? null : (report.score ?? null),
       validationPassed: report.validationPassed ?? false,
       eventCount,
       exitCode: child.status,
-      error: child.error?.message || report.error || null,
+      error: child.error?.message || report.error || (rateLimited ? 'model usage limit/cooldown' : providerMisconfigured ? 'LLM provider configuration error' : null),
       outputDir,
     })
   }
