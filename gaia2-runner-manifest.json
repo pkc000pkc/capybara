@@ -14,7 +14,7 @@
     "ambiguity"
   ],
   "model": "gpt-6-luna",
-  "officialVerifier": "meta-agents-research-environments==1.2.0 ScenarioValidationResult",
+  "officialVerifier": "meta-agents-research-environments==1.2.0 ScenarioValidationResult (judge_model=gpt-6-luna, judge_provider=local, judge_endpoint=baseUrl)",
   "a2a": "protocol-only",
   "noise": "off-baseline-observation-ledger",
   "seed": 20260930,
