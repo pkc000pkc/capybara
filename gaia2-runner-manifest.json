@@ -1,9 +1,9 @@
 {
-  "runner": "capybara-gaia2-smoke",
-  "runnerVersion": "0.3.0",
-  "mode": "dataset-preflight-gate0-gate1-dry-run",
+  "runner": "capybara-gaia2-integrated-pilot",
+  "runnerVersion": "0.4.0",
+  "mode": "official-are-original-scenario-pass5-pilot",
   "dataset": "meta-agents-research-environments/gaia2-cli",
-  "datasetRevision": "main",
+  "datasetRevision": "240ac47bfc62b24c934f95d014ffa5a3cab8b04c",
   "resolvedDatasetRevision": "240ac47bfc62b24c934f95d014ffa5a3cab8b04c",
   "split": "test",
   "capabilities": [
@@ -13,11 +13,13 @@
     "time",
     "ambiguity"
   ],
-  "model": null,
-  "officialVerifier": null,
+  "model": "gpt-6-luna",
+  "officialVerifier": "meta-agents-research-environments==1.2.0 ScenarioValidationResult",
   "a2a": "protocol-only",
-  "noise": "seeded-adapter-only",
-  "seed": null,
-  "scenarioTimeoutSeconds": null,
-  "notes": "Phase-1 data/schema plus deterministic Gate-0 primitives and Gate-1 no-model replay; no model, ARE runtime, official judge, A2A, Noise, or score execution."
+  "noise": "off-baseline-observation-ledger",
+  "seed": 20260930,
+  "scenarioTimeoutSeconds": 180,
+  "pass5Attempts": 5,
+  "pilotScenarioIndex": 0,
+  "notes": "Five original parquet scenarios (one per capability) were each run five times through the official ARE bridge, Capybara RuntimeAttempt hooks, and trusted pass@5 aggregation. This is an integrated pilot, not the full 800-scenario benchmark."
 }

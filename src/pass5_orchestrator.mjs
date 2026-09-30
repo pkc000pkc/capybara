@@ -82,6 +82,7 @@ export class Pass5Orchestrator {
         correctionCount: corrections.length,
         corrections,
         verification: { status: verification.status ?? 'not_configured', passed: verification.passed ?? null },
+        official: execution.official ?? null,
         noise: runtime.noise ?? null,
         traceHash: runtime.traceHash ?? null,
       })
@@ -118,12 +119,14 @@ export class Pass5Orchestrator {
   }
 
   async #execute({ attempt, runAttempt, eventPlan, plan, mode, strategy }) {
-    const runtimeResult = await attempt.run({ eventPlan, plan })
+    await attempt.run({ eventPlan, plan })
     const execution = runAttempt
-      ? await runAttempt({ attempt, attemptIndex: attempt.attemptIndex, runtime: runtimeResult, mode, strategy })
+      ? await runAttempt({ attempt, attemptIndex: attempt.attemptIndex, runtime: attempt.result(), mode, strategy })
       : { passed: false, failureReason: 'no attempt runner configured' }
     assertNoEvaluatorLeak(execution, 'attempt execution')
-    return { ...execution, runtime: { ...runtimeResult, noise: attempt.noise.summary() } }
+    // Re-read the runtime after the external bridge returns so hook events
+    // emitted during model/tool execution are included in trace/state hashes.
+    return { ...execution, runtime: { ...attempt.result(), noise: attempt.noise.summary() } }
   }
 
   #sanitizeFailure(execution) {

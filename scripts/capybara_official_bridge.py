@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import time
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,6 +22,33 @@ from are.simulation.notification_system import MessageType
 from are.simulation.scenarios.scenario import ScenarioValidationResult
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_hash(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, default=str, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _emit_runtime_event(event_type: str, **payload: Any) -> None:
+    """Emit a compact, evaluator-blind lifecycle event for Capybara hooks.
+
+    The official ARE process remains the source of truth for execution and
+    judging.  This sidecar is intentionally limited to operational metadata;
+    it never serializes Oracle events or reference answers.
+    """
+    path = os.environ.get("GAIA2_RUNTIME_EVENT_FILE")
+    if not path:
+        return
+    record = {
+        "type": event_type,
+        "attemptIndex": int(os.environ.get("GAIA2_E2E_ATTEMPT_INDEX", "0") or 0),
+        "time": time.time(),
+        **payload,
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, default=str, sort_keys=True) + "\n")
+    except OSError:
+        logger.debug("Unable to emit Capybara runtime event", exc_info=True)
 
 
 def _native_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -126,8 +154,9 @@ def _native_run_with_agent(
     simulated_generation_time_mode: str = "measured",
     use_custom_logger: bool = True,
 ) -> ScenarioValidationResult:
-    del self, scenario_id, agent, max_turns, simulated_generation_time_mode, use_custom_logger
+    del self, agent, max_turns, simulated_generation_time_mode, use_custom_logger
 
+    _emit_runtime_event("official_run_started", scenarioId=scenario_id, toolCount=len(scenario.get_tools()))
     app_tools = scenario.get_tools()
     allowlist = {
         name.strip()
@@ -139,6 +168,7 @@ def _native_run_with_agent(
     tool_map = {tool._public_name: tool for tool in app_tools}
     openai_tools = [_native_openai_tool(tool) for tool in app_tools]
     task = _read_user_task(env)
+    _emit_runtime_event("user_task_observed", taskHash=_stable_hash(task), taskLength=len(task))
     system = (
         "You are an agent inside the official Meta Agents Research Environments. "
         "Complete the user's task by calling the provided native tools. "
@@ -155,12 +185,19 @@ def _native_run_with_agent(
     max_actions = int(os.environ.get("GAIA2_E2E_MAX_ACTIONS", "24"))
     sent_user_message = False
 
-    for _ in range(max_actions):
+    for turn in range(max_actions):
+        _emit_runtime_event("model_request", turn=turn, toolCount=len(openai_tools))
         response = _call_model(messages, openai_tools, model, provider, endpoint)
         choice = response.choices[0]
         message = choice.message
         tool_calls = list(getattr(message, "tool_calls", None) or [])
         content = getattr(message, "content", None)
+        _emit_runtime_event(
+            "model_response",
+            turn=turn,
+            toolCallCount=len(tool_calls),
+            hasContent=bool(content),
+        )
         if not tool_calls:
             if isinstance(content, str) and content.strip() and not sent_user_message:
                 aui = next(
@@ -190,6 +227,18 @@ def _native_run_with_agent(
 
         for call in tool_calls:
             function = call.function
+            try:
+                decoded_arguments = json.loads(function.arguments or "{}")
+            except Exception:
+                decoded_arguments = {}
+            _emit_runtime_event(
+                "tool_call_started",
+                turn=turn,
+                callId=call.id,
+                function=function.name,
+                argumentKeys=sorted(decoded_arguments.keys()) if isinstance(decoded_arguments, dict) else [],
+                argumentHash=_stable_hash(decoded_arguments),
+            )
             tool = tool_map.get(function.name)
             if tool is None:
                 result = f"Unknown tool: {function.name}"
@@ -209,9 +258,22 @@ def _native_run_with_agent(
                     "content": json.dumps(result, default=str),
                 }
             )
+            _emit_runtime_event(
+                "tool_call_completed",
+                turn=turn,
+                callId=call.id,
+                function=function.name,
+                ok=not (isinstance(result, dict) and "error" in result),
+                resultHash=_stable_hash(result),
+            )
 
     time.sleep(0.5)
-    return scenario.validate(env)
+    validation = scenario.validate(env)
+    _emit_runtime_event(
+        "official_validation_completed",
+        validationType=type(validation).__name__,
+    )
+    return validation
 
 
 def install() -> None:

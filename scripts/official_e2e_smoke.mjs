@@ -24,7 +24,8 @@ if (!existsSync(join(officialPythonPath, 'are'))) throw new Error(`Official ARE 
 const python = process.env.GAIA2_PYTHON || 'python'
 
 const parquetFile = await asyncBufferFromFile(source.path)
-const [row] = await parquetReadObjects({ file: parquetFile, rowStart: 0, rowEnd: 1, compressors })
+const scenarioIndex = Math.max(0, Number(process.env.GAIA2_E2E_SCENARIO_INDEX || 0))
+const [row] = await parquetReadObjects({ file: parquetFile, rowStart: scenarioIndex, rowEnd: scenarioIndex + 1, compressors })
 if (!row?.scenario_id || !row?.scenario) throw new Error(`Invalid ${capability} parquet row`)
 const scenario = JSON.parse(row.scenario)
 const minimal = process.env.GAIA2_E2E_MINIMAL !== '0'
@@ -83,14 +84,18 @@ if (minimal) {
   ]
 }
 
-const fixtureRoot = join(root, '.official-fixtures', minimal ? 'minimal' : 'dataset')
+const fixtureRoot = process.env.GAIA2_E2E_FIXTURE_ROOT
+  ? process.env.GAIA2_E2E_FIXTURE_ROOT
+  : join(root, '.official-fixtures', minimal ? 'minimal' : 'dataset')
 const fixtureDir = join(fixtureRoot, capability)
 mkdirSync(fixtureDir, { recursive: true })
 const fixtureScenarioId = scenario.metadata?.definition?.scenario_id || row.scenario_id
 const fixturePath = join(fixtureDir, `${fixtureScenarioId}.json`)
 writeFileSync(fixturePath, `${JSON.stringify(scenario, null, 2)}\n`)
 
-const outputDir = join(root, 'official-results', 'capybara-e2e', capability)
+const outputDir = process.env.GAIA2_E2E_OUTPUT_DIR
+  ? process.env.GAIA2_E2E_OUTPUT_DIR
+  : join(root, 'official-results', 'capybara-e2e', capability)
 mkdirSync(outputDir, { recursive: true })
 const logPath = join(outputDir, 'runner.log')
 const bridgeDir = join(root, 'scripts').replaceAll('\\\\', '/')

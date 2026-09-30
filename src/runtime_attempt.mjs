@@ -121,6 +121,21 @@ export class RuntimeAttempt {
     return this.observe({ kind: 'environment', subject: event.id, source: event.source ?? 'runtime', content: event.payload ?? event })
   }
 
+  /** Record an evaluator-blind event emitted by an external execution bridge. */
+  recordHookEvent(event = {}) {
+    const type = String(event.type ?? 'hook_event')
+    const subject = event.subject ?? event.function ?? type
+    const observed = this.observe({
+      kind: event.kind ?? 'runtime',
+      subject,
+      source: event.source ?? 'official-are',
+      content: event.content ?? null,
+      observedAt: this.clock.now(),
+    })
+    this.trace.push({ type: 'hook_event', eventType: type, subject, status: observed.status, at: this.clock.now() })
+    return observed
+  }
+
   requestReplan(plan, reason) {
     const result = this.replan.replan(plan, reason)
     this.trace.push({ type: 'replan', attemptId: result.attemptId, parentAttemptId: result.parentAttemptId, reason })
