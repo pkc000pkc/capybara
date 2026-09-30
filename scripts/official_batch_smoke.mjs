@@ -8,7 +8,16 @@ const capabilities = (process.env.GAIA2_BATCH_CAPABILITIES || 'execution,search,
   .split(',').map((item) => item.trim()).filter(Boolean)
 const indices = (process.env.GAIA2_BATCH_INDICES || '0,1')
   .split(',').map((item) => Math.max(0, Number(item.trim()))).filter(Number.isInteger)
-const timeoutMs = Number(process.env.GAIA2_BATCH_PROCESS_TIMEOUT_MS || 180000)
+// Long-running GAIA2 scenarios can legitimately take hours.  Keep the
+// timeout explicit and overridable: 0 means no Node process timeout.
+const timeoutMinutes = Number(process.env.GAIA2_BATCH_TIMEOUT_MINUTES ?? 8000)
+const timeoutMs = Number(process.env.GAIA2_BATCH_PROCESS_TIMEOUT_MS
+  ?? (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0 ? timeoutMinutes * 60_000 : 0))
+const scenarioTimeoutSeconds = Number(process.env.GAIA2_E2E_TIMEOUT_SECONDS
+  ?? (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0 ? timeoutMinutes * 60 : 0))
+// ARE expects a positive scenario timeout.  An unlimited Node wrapper still
+// uses the 8000-minute ARE ceiling instead of passing an invalid zero.
+const scenarioTimeoutArg = scenarioTimeoutSeconds > 0 ? scenarioTimeoutSeconds : 480000
 const outputRoot = join(root, 'official-results', 'batch-10')
 
 function reportFromChild(stdout, outputDir) {
@@ -43,13 +52,16 @@ for (const capability of capabilities) {
         GAIA2_E2E_SCENARIO_INDEX: String(scenarioIndex),
         GAIA2_E2E_NUM_RUNS: '1',
         GAIA2_E2E_OUTPUT_DIR: outputDir,
-        GAIA2_E2E_FIXTURE_ROOT: join(root, '.official-fixtures', 'batch-10'),
+        // Isolate each fixture set.  Otherwise --limit 1 can repeatedly pick
+        // the first JSON left by a previous capability/index run.
+        GAIA2_E2E_FIXTURE_ROOT: join(root, '.official-fixtures', 'batch-10', capability, String(scenarioIndex)),
         GAIA2_E2E_ATTEMPT_INDEX: '1',
         GAIA2_RUNTIME_EVENT_FILE: eventPath,
         GAIA2_E2E_MAX_ACTIONS: process.env.GAIA2_E2E_MAX_ACTIONS || '20',
         GAIA2_E2E_PROCESS_TIMEOUT_MS: String(timeoutMs),
+        GAIA2_E2E_TIMEOUT_SECONDS: String(scenarioTimeoutArg),
       },
-      timeout: timeoutMs,
+      ...(timeoutMs > 0 ? { timeout: timeoutMs } : {}),
       maxBuffer: 64 * 1024 * 1024,
     })
     const stdout = `${child.stdout || ''}\n${child.stderr || ''}`
@@ -61,9 +73,9 @@ for (const capability of capabilities) {
     const diagnosticText = `${stdout}\n${runnerLog}`
     const rateLimited = /HTTP\/1\.1 429|usage_limit_reached|model_cooldown/i.test(diagnosticText)
     const providerMisconfigured = /LLM Provider NOT provided|BadRequestError/i.test(diagnosticText)
-    const fixtureDir = join(root, '.official-fixtures', 'batch-10', capability)
+    const fixtureDir = join(root, '.official-fixtures', 'batch-10', capability, String(scenarioIndex))
     const fixtureScenarioId = existsSync(fixtureDir)
-      ? readdirSync(fixtureDir).filter((name) => name.endsWith('.json')).sort()[scenarioIndex]?.replace(/\.json$/, '')
+      ? readdirSync(fixtureDir).filter((name) => name.endsWith('.json')).sort()[0]?.replace(/\.json$/, '')
       : null
     const eventCount = existsSync(eventPath)
       ? readFileSync(eventPath, 'utf8').split(/\r?\n/).filter(Boolean).length
@@ -99,6 +111,11 @@ const report = {
   indices,
   results,
   generatedAt: new Date().toISOString(),
+  timeout: {
+    processMinutes: timeoutMs > 0 ? timeoutMs / 60_000 : null,
+    scenarioMinutes: scenarioTimeoutSeconds > 0 ? scenarioTimeoutSeconds / 60 : null,
+    unlimitedProcess: timeoutMs === 0,
+  },
 }
 const reportPath = join(root, 'reports', 'gaia2-official-batch-10.json')
 mkdirSync(dirname(reportPath), { recursive: true })

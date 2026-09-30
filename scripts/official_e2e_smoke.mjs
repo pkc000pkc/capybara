@@ -115,12 +115,13 @@ const args = [
   '--limit', '1',
   '--num_runs', String(numRuns),
   '--max_concurrent_scenarios', '1',
-  '--scenario_timeout', process.env.GAIA2_E2E_TIMEOUT_SECONDS || '180',
+  '--scenario_timeout', process.env.GAIA2_E2E_TIMEOUT_SECONDS || '480000',
   '--output_dir', outputDir,
   '--trace_dump_format', 'both',
   '--log-level', 'INFO',
 ]
 
+const processTimeoutMs = Number(process.env.GAIA2_E2E_PROCESS_TIMEOUT_MS || 480000 * 1000)
 const result = spawnSync(python, args, {
   cwd: root,
   encoding: 'utf8',
@@ -135,7 +136,7 @@ const result = spawnSync(python, args, {
       ? 'Messages__send_message,AgentUserInterface__send_message_to_user'
       : ''),
   },
-  timeout: Number(process.env.GAIA2_E2E_PROCESS_TIMEOUT_MS || 240000),
+  ...(processTimeoutMs > 0 ? { timeout: processTimeoutMs } : {}),
   maxBuffer: 32 * 1024 * 1024,
 })
 const stdout = result.stdout || ''
@@ -190,6 +191,11 @@ const report = {
   validationPassed,
   note: 'Runs the official ARE local scenario loader, environment, default GAIA2 agent, model endpoint, tool execution and judge boundary for one scenario. The Capybara Node workspace orchestrates this boundary; it does not alter official scoring.',
   generatedAt: new Date().toISOString(),
+  timeout: {
+    processMinutes: processTimeoutMs > 0 ? processTimeoutMs / 60_000 : null,
+    scenarioMinutes: Number(process.env.GAIA2_E2E_TIMEOUT_SECONDS || 480000) / 60,
+    unlimitedProcess: processTimeoutMs === 0,
+  },
 }
 const reportPath = join(root, 'reports', 'gaia2-official-e2e-smoke.json')
 mkdirSync(dirname(reportPath), { recursive: true })
