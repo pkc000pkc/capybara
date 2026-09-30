@@ -10,6 +10,7 @@
     "official-e2e": "node scripts/official_e2e_smoke.mjs",
     "official-e2e-all": "node scripts/official_all_smoke.mjs",
     "official-integrated-pilot": "node scripts/official_integrated_pilot.mjs",
+    "official-batch-smoke": "node scripts/official_batch_smoke.mjs",
     "pass5-smoke": "node scripts/pass5_smoke.mjs",
     "install-official": "powershell -ExecutionPolicy Bypass -File scripts/install_official_requirements.ps1",
     "smoke": "node scripts/smoke_dataset.mjs",
