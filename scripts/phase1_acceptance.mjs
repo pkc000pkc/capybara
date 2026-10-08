@@ -44,9 +44,12 @@ assert.equal(fileDigest(resolve(root, controlled.state.path)), controlled.state.
 assert.equal(readJson(join(dirname(args['--controlled']), 'batch-heartbeat.json')).terminal, true)
 
 const xml = readFileSync(args['--test-report'], 'utf8')
-const suites = [...xml.matchAll(/<testsuite\s[^>]*>/g)].map(match => Object.fromEntries([...match[0].matchAll(/(tests|failures|errors|skipped)="(\d+)"/g)].map(item => [item[1], Number(item[2])])) )
-assert.ok(suites.length && suites.every(suite => suite.tests !== undefined), 'unrecognized JUnit report')
-const tests = suites.reduce((total, suite) => ({ tests: total.tests + suite.tests, failures: total.failures + (suite.failures ?? 0), errors: total.errors + (suite.errors ?? 0), skipped: total.skipped + (suite.skipped ?? 0) }), { tests: 0, failures: 0, errors: 0, skipped: 0 })
+assert.match(xml, /<testsuites(?:\s[^>]*)?>/); assert.match(xml, /<\/testsuites>\s*$/)
+const tests = { tests: [...xml.matchAll(/<testcase\b/g)].length, failures: [...xml.matchAll(/<failure\b/g)].length, errors: [...xml.matchAll(/<error\b/g)].length, skipped: [...xml.matchAll(/<skipped\b/g)].length }
+// Node 22 emits flat testcases and summary comments, not testsuite attributes.
+const summary = Object.fromEntries([...xml.matchAll(/<!--\s+(tests|pass|fail|cancelled|skipped|todo)\s+(\d+)\s+-->/g)].map(match => [match[1], Number(match[2])]))
+assert.equal(summary.tests, tests.tests); assert.equal(summary.pass, tests.tests)
+assert.equal(summary.fail, 0); assert.equal(summary.cancelled, 0); assert.equal(summary.skipped, 0); assert.equal(summary.todo, 0)
 assert.ok(tests.tests === Number(args['--expected-tests']) && tests.failures === 0 && tests.errors === 0 && tests.skipped === 0, 'automated test count/result differs from expected final suite')
 
 // Remove inherited runtime overrides, then prove every actual CLI uses the same defaults.
