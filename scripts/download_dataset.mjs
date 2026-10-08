@@ -1,61 +1,38 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { datasetFilesFromMetadata, ensureDatasetFile, pinnedDatasetMetadata } from '../src/phase0_dataset.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const dataDir = join(root, 'data')
 mkdirSync(dataDir, { recursive: true })
-
-const curl = process.platform === 'win32' ? 'curl.exe' : 'curl'
-const dataset = 'meta-agents-research-environments/gaia2-cli'
-const revisionApi = `https://huggingface.co/api/datasets/${dataset}/revision/main`
-const revision = JSON.parse(execFileSync(curl, ['--fail', '--location', revisionApi], { encoding: 'utf8' })).sha
-if (!/^[0-9a-f]{40}$/.test(revision)) throw new Error(`invalid dataset revision returned by Hugging Face: ${revision}`)
-const base = `https://huggingface.co/datasets/${dataset}/resolve/${revision}`
-const files = [
-  ['execution', 'data/execution-test-00000-of-00001.parquet'],
-  ['search', 'data/search-test-00000-of-00001.parquet'],
-  ['adaptability', 'data/adaptability-test-00000-of-00001.parquet'],
-  ['time', 'data/time-test-00000-of-00001.parquet'],
-  ['ambiguity', 'data/ambiguity-test-00000-of-00001.parquet'],
-]
-
-function sha256(path) {
-  const hash = createHash('sha256')
-  hash.update(readFileSync(path))
-  return hash.digest('hex')
+function readJson(path) { return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null }
+const protocol = readJson(join(root, 'config', 'phase0-protocol.json'))
+const lock = readJson(join(root, 'locks', 'dataset-lock.json'))
+const runner = readJson(join(root, 'gaia2-runner-manifest.json'))
+const previous = readJson(join(dataDir, 'manifest.json'))
+const lockedSource = protocol?.datasets?.source ?? lock?.datasets?.source
+const dataset = lockedSource?.id ?? runner?.dataset ?? previous?.dataset
+const revision = lockedSource?.revision ?? runner?.resolvedDatasetRevision ?? runner?.datasetRevision ?? previous?.revision
+if (!/^[0-9a-f]{40}$/.test(revision ?? '')) throw new Error('an immutable dataset revision is required in the phase0 protocol, dataset lock, runner manifest, or data manifest; main is never resolved automatically')
+const spec = {
+  id: dataset, revision,
+  split: lockedSource?.split ?? runner?.split ?? previous?.split ?? 'test',
+  configs: lockedSource?.configs ?? runner?.capabilities ?? ['execution', 'search', 'adaptability', 'time', 'ambiguity'],
+  // Retain the old source-manifest/cache layout for existing scripts.
+  cacheDir: 'data',
 }
-
-async function download(name, relativePath) {
-  const target = join(dataDir, basename(relativePath))
-  const url = `${base}/${relativePath}?download=true`
-  if (existsSync(target) && statSync(target).size > 0) {
-    return { name, url, path: target, bytes: statSync(target).size, sha256: sha256(target), reused: true }
-  }
-
-  const temporary = `${target}.part`
-  execFileSync(curl, ['--fail', '--location', '--retry', '3', '--retry-delay', '2', '--output', temporary, url], {
-    stdio: 'inherit',
-  })
-  renameSync(temporary, target)
-  const bytes = statSync(target).size
-  return { name, url, path: target, bytes, sha256: sha256(target), reused: false }
-}
-
+const files = datasetFilesFromMetadata(spec, await pinnedDatasetMetadata(spec))
 const downloaded = []
-for (const [name, relativePath] of files) {
-  process.stdout.write(`Downloading ${name}...\n`)
-  downloaded.push(await download(name, relativePath))
+for (const entry of files) {
+  const result = await ensureDatasetFile({ root, spec, entry })
+  downloaded.push({
+    name: entry.config,
+    url: `https://huggingface.co/datasets/${dataset}/resolve/${revision}/${entry.remotePath}?download=true`,
+    path: join(dataDir, basename(entry.path)),
+    remotePath: entry.remotePath,
+    bytes: entry.bytes, sha256: entry.sha256, reused: result.reused,
+  })
 }
-
-const manifest = {
-  dataset,
-  revision,
-  split: 'test',
-  downloadedAt: new Date().toISOString(),
-  files: downloaded,
-}
-writeFileSync(join(dataDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
-process.stdout.write(`Downloaded ${downloaded.length} GAIA2 capability files.\n`)
+writeFileSync(join(dataDir, 'manifest.json'), `${JSON.stringify({ dataset, revision, split: spec.split, downloadedAt: new Date().toISOString(), files: downloaded }, null, 2)}\n`)
+process.stdout.write(`Verified ${downloaded.length} GAIA2 source files against immutable remote LFS metadata.\n`)

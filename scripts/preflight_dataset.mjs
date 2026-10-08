@@ -5,8 +5,14 @@ import { fileURLToPath } from 'node:url'
 import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from 'hyparquet'
 import { compressors } from 'hyparquet-compressors'
 import { importScenarioRow } from '../src/scenario_importer.mjs'
+import { scenarioIdSetSha256, verifyDatasetLock } from '../src/phase0_dataset.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
+if (process.argv.includes('--phase0')) {
+  const protocol = JSON.parse(readFileSync(join(root, 'config', 'phase0-protocol.json'), 'utf8'))
+  process.stdout.write(`${JSON.stringify(await verifyDatasetLock({ root, protocol, deep: !process.argv.includes('--shallow') }), null, 2)}\n`)
+  process.exit(0)
+}
 const dataDir = join(root, 'data')
 const manifestPath = join(dataDir, 'manifest.json')
 const runnerManifestPath = join(root, 'gaia2-runner-manifest.json')
@@ -14,6 +20,11 @@ if (!existsSync(manifestPath)) throw new Error('data/manifest.json is missing; r
 
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
 const runner = JSON.parse(readFileSync(runnerManifestPath, 'utf8'))
+const lockPath = join(root, 'locks', 'dataset-lock.json')
+const lockedSource = existsSync(lockPath) ? JSON.parse(readFileSync(lockPath, 'utf8')).datasets?.source : null
+if (lockedSource && (lockedSource.id !== manifest.dataset || lockedSource.revision !== manifest.revision || lockedSource.split !== manifest.split)) {
+  throw new Error('source download manifest disagrees with immutable dataset lock')
+}
 if (runner.dataset !== manifest.dataset || runner.split !== manifest.split) {
   throw new Error('runner and download manifests disagree')
 }
@@ -22,6 +33,9 @@ if (runner.resolvedDatasetRevision && runner.resolvedDatasetRevision !== manifes
 }
 if (manifest.files.length !== runner.capabilities.length) {
   throw new Error('download manifest has an unexpected number of capability files')
+}
+if (new Set(manifest.files.map((entry) => entry.name)).size !== runner.capabilities.length) {
+  throw new Error('download manifest has duplicate or missing capability files')
 }
 
 async function sha256(path) {
@@ -46,6 +60,10 @@ for (const entry of manifest.files) {
   if (bytes !== entry.bytes) throw new Error(`${entry.name}: file size disagrees with manifest`)
   const digest = await sha256(path)
   if (digest !== entry.sha256) throw new Error(`${entry.name}: SHA-256 disagrees with manifest`)
+  const pinned = lockedSource?.files.find((file) => file.config === entry.name)
+  if (lockedSource && (!pinned || pinned.sha256 !== digest || pinned.bytes !== bytes)) {
+    throw new Error(`${entry.name}: source file differs from pinned remote LFS lock`)
+  }
 
   const file = await asyncBufferFromFile(path)
   const parquetMetadata = await parquetMetadataAsync(file)
@@ -99,6 +117,7 @@ const report = {
   datasetRevision: manifest.revision,
   split: manifest.split,
   scenarioCount: scenarioIds.size,
+  scenarioIdSetSha256: scenarioIdSetSha256(scenarioIds),
   capabilities,
   checks: [
     'all five capability files match their downloaded size and SHA-256',
@@ -115,6 +134,9 @@ const report = {
   generatedAt: new Date().toISOString(),
 }
 const reportDir = join(root, 'reports')
+if (lockedSource && report.scenarioIdSetSha256 !== lockedSource.scenarioIdSetSha256) {
+  throw new Error('source scenario ID set differs from immutable dataset lock')
+}
 mkdirSync(reportDir, { recursive: true })
 writeFileSync(join(reportDir, 'gaia2-preflight.json'), `${JSON.stringify(report, null, 2)}\n`)
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)

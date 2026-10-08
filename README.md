@@ -37,6 +37,27 @@ npm run smoke
 
 `npm run gate1` 和 `npm run preflight` 不启动模型、不执行应用写操作、不调用官方 judge，也不产生 GAIA2 分数；`npm run real-smoke` 只验证真实模型传输；`npm run official-e2e` 才会进入官方 ARE 的环境、工具和 judge 边界。
 
+## 阶段 0 运行基线
+
+`config/phase0-protocol.json` 显式固定数据集 revision、ARE 版本、Actor/Judge 模型、两种评测模式和工作目录。source 数据继续用于内部试运行；submission 数据使用独立缓存，CLI 的 test 标签与官方 validation 标签通过完整 ID/hash 比较记录关系。
+
+```powershell
+npm run phase0-freeze-data
+npm run phase0-freeze-inventory
+npm run phase0-preflight
+npm run prepare-run -- --mode internal_pass5 --per-capability 1
+npm run prepare-run -- --mode official_submission
+npm run phase0-preflight -- --manifest runs/<run-id>/run-manifest.json
+```
+
+数据冻结校验固定远端 LFS SHA-256，完整读取 source 800、submission 800 和 mini 160 行。缓存/索引保留在 `data/`，版本和内容摘要提交到 `locks/`。已有缓存可用 `npm run phase0-freeze-data -- --offline` 离线重建锁。
+
+环境冻结记录 Node/Python、依赖版本、ARE 代码树、bridge、主后端和本项目代码内容，并将两个 GAIA2 插件复制为内容寻址快照。资源可读性与实际接线分别记录：当前 TS 插件没有加载，实际执行是 Python bridge 与事后 sidecar。
+
+`prepare-run` 只生成不可覆盖的清单，不调用模型。内部默认生成 25 个初始 attempt；完整官方计划生成 3360 个执行，覆盖 Standard 五类和 A2A/Noise mini，每场景 3 次。每项固定 scenario ID、原始行号、内容 hash、seed 和独立输出/fixture/workspace 路径。
+
+`phase0-preflight` 重验锁定代码、插件快照、数据文件和全部 Parquet 行与索引的关联；检查清单 hash、任务重复、编号、配置和路径隔离。`phase0Passed=true` 仅表示这一阶段验收通过，报告仍明确 `executionReady=false` 和后续接线缺口。现有 legacy 实验入口尚不消费新清单；阶段 1 再统一启动行为。
+
 ## 官方 ARE 端到端冒烟
 
 官方运行器依赖固定版本 `meta-agents-research-environments==1.2.0`。安装到隔离目录（Windows 若系统没有 `python`，先设置 `GAIA2_PYTHON`）：

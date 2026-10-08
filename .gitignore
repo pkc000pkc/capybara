@@ -7,3 +7,8 @@ data/*.parquet
 data/*.json
 reports/*.json
 *.log
+data/source/
+data/submission/
+data/*.jsonl
+.phase0-cache/
+runs/

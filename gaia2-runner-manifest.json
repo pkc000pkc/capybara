@@ -1,6 +1,6 @@
 {
   "runner": "capybara-gaia2-integrated-pilot",
-  "runnerVersion": "0.4.0",
+  "runnerVersion": "0.5.0-phase0",
   "mode": "official-are-original-scenario-pass5-pilot",
   "dataset": "meta-agents-research-environments/gaia2-cli",
   "datasetRevision": "240ac47bfc62b24c934f95d014ffa5a3cab8b04c",
@@ -18,8 +18,17 @@
   "a2a": "protocol-only",
   "noise": "off-baseline-observation-ledger",
   "seed": 20260930,
-  "scenarioTimeoutSeconds": 180,
+  "scenarioTimeoutSeconds": 480000,
   "pass5Attempts": 5,
   "pilotScenarioIndex": 0,
-  "notes": "Five original parquet scenarios (one per capability) were each run five times through the official ARE bridge, Capybara RuntimeAttempt hooks, and trusted pass@5 aggregation. This is an integrated pilot, not the full 800-scenario benchmark."
+  "phase0Protocol": "config/phase0-protocol.json",
+  "datasetLock": "locks/dataset-lock.json",
+  "environmentLock": "locks/environment-lock.json",
+  "capabilityInventory": "locks/capability-inventory.json",
+  "pluginLoadStatus": "not_loaded",
+  "runtimeBinding": "sidecar_only",
+  "entrypointStatus": "legacy-runners-do-not-consume-frozen-run-manifest",
+  "requestedProcessTimeoutMinutes": 8000,
+  "legacyOuterTimeoutMinutes": { "pilot": 8, "all": 15 },
+  "notes": "Phase 0 freezes the actual runtime boundary and creates immutable plans. Five original scenarios were tried five times in the historical pilot, with no passing attempts. Dynamic TypeScript hooks, correction strategy consumption, unified wrapper timeouts and the official enhancement pipeline remain later-stage work."
 }
