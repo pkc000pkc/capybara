@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "variables": [
+    {
+      "key": "gaia2_runtime_policy",
+      "type": "object",
+      "label": "GAIA2 runtime policy",
+      "description": "Bounded event, recovery, write, A2A, and observation-noise policy; never contains evaluator truth.",
+      "value": {
+        "max_tool_rounds": 300,
+        "max_runtime_repairs": 2,
+        "max_network_retries": 0,
+        "max_a2a_retries": 0,
+        "stale_after_ms": 60000,
+        "observation_summary_limit": 12,
+        "noise_profile": "off"
+      },
+      "required": true,
+      "readonly": false,
+      "show_in_status": true,
+      "scope": "project"
+    },
+    {
+      "key": "gaia2_correction_policy",
+      "type": "object",
+      "label": "GAIA2 correction policy",
+      "description": "Answer-blind correction limits. Correction replays use a clean session and never add pass@5 attempts.",
+      "value": { "max_corrections_per_attempt": 1, "fresh_replay": true, "answer_blind": true },
+      "required": true,
+      "readonly": false,
+      "show_in_status": true,
+      "scope": "project"
+    },
+    {
+      "key": "gaia2_scenario_state",
+      "type": "object",
+      "label": "GAIA2 scenario state",
+      "description": "Safe scenario identity and agent-visible capability metadata for the current session.",
+      "value": { "scenario_id": "", "capability": "", "source_hash": "", "event_count": 0 },
+      "required": false,
+      "readonly": false,
+      "show_in_status": false,
+      "scope": "session"
+    },
+    {
+      "key": "gaia2_clock_state",
+      "type": "object",
+      "label": "GAIA2 virtual clock state",
+      "description": "Checkpointable virtual time and pending waits; wall-clock sleeps are not task truth.",
+      "value": { "now": 0, "revision": 0, "pending_waits": [] },
+      "required": false,
+      "readonly": false,
+      "show_in_status": false,
+      "scope": "session"
+    },
+    {
+      "key": "gaia2_event_state",
+      "type": "object",
+      "label": "GAIA2 event state",
+      "description": "Consumed and pending event occurrences with dependency and deduplication metadata.",
+      "value": { "pending": [], "consumed": [], "deduplicated": [], "revision": 0 },
+      "required": false,
+      "readonly": false,
+      "show_in_status": false,
+      "scope": "session"
+    },
+    {
+      "key": "gaia2_attempt_state",
+      "type": "object",
+      "label": "GAIA2 attempt state",
+      "description": "Current attempt identity and lifecycle. Experiment-level pass@5 state is kept outside Prompt Variables.",
+      "value": { "attempt_id": "", "attempt_index": 0, "status": "created", "trace_hash": "" },
+      "required": false,
+      "readonly": false,
+      "show_in_status": true,
+      "scope": "session"
+    },
+    {
+      "key": "gaia2_write_state",
+      "type": "object",
+      "label": "GAIA2 write state",
+      "description": "Mutation-key and read-back state; unknown non-idempotent writes are never replayed automatically.",
+      "value": { "actions": [], "unknown": [], "blocked": [] },
+      "required": false,
+      "readonly": false,
+      "show_in_status": false,
+      "scope": "session"
+    },
+    {
+      "key": "gaia2_replan_state",
+      "type": "object",
+      "label": "GAIA2 replan state",
+      "description": "Parent/child plan lineage and invalidated steps after environment changes.",
+      "value": { "current_plan": [], "parent_attempt_id": null, "invalidated_steps": [], "reason": null },
+      "required": false,
+      "readonly": false,
+      "show_in_status": false,
+      "scope": "session"
+    },
+    {
+      "key": "gaia2_observation_state",
+      "type": "object",
+      "label": "GAIA2 observation state",
+      "description": "Append-only information-noise ledger summary. Raw observations stay in artifacts; this is a bounded prompt view.",
+      "value": { "observations": [], "provenance": [], "stale_ids": [], "unverified_ids": [], "conflict_ids": [] },
+      "required": false,
+      "readonly": false,
+      "show_in_status": false,
+      "scope": "session"
+    },
+    {
+      "key": "gaia2_noise_state",
+      "type": "object",
+      "label": "GAIA2 information-noise state",
+      "description": "Profile, independent seed, injection decisions, deduplicated records, conflicts, quarantined results, and schedule hash.",
+      "value": { "profile": "off", "seed": null, "decisions": [], "deduplicated": [], "conflicts": [], "quarantined": [], "schedule_hash": "" },
+      "required": false,
+      "readonly": false,
+      "show_in_status": true,
+      "scope": "session"
+    },
+    {
+      "key": "gaia2_runtime_context",
+      "type": "text",
+      "label": "GAIA2 runtime context",
+      "description": "Bounded, answer-blind runtime summary injected into the actor Loop.",
+      "value": "",
+      "required": false,
+      "readonly": false,
+      "show_in_status": false,
+      "scope": "session"
+    }
+  ]
+}

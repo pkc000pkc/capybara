@@ -102,7 +102,7 @@ test('phase0 captures shared Stage 1 original-task defaults across all four wrap
     assert.equal(entry.settings.concurrency, 1)
     assert.equal(entry.sha256.length, 64)
   }
-  assert.deepEqual(Object.fromEntries(snapshots.map(entry => [entry.id, entry.settings.maxActions])), { e2e: 24, batch: 20, pilot: 32, all: 24 })
+  assert.deepEqual(Object.fromEntries(snapshots.map(entry => [entry.id, entry.settings.maxActions])), { e2e: 300, batch: 300, pilot: 300, all: 300 })
   assert.equal(inspectEntrypoints(root, { GAIA2_E2E_MINIMAL: '1' }).entries.find((entry) => entry.id === 'e2e').settings.maxActions, 1)
   assert.equal(inspectEntrypoints(root, { GAIA2_BATCH_TIMEOUT_MINUTES: '0' }).entries.find((entry) => entry.id === 'batch').settings.processTimeoutMs, 0)
   assert.throws(() => inspectEntrypoints(root, { GAIA2_BATCH_TIMEOUT_MINUTES: 'NaN' }), /strict numeric/)

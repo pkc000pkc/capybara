@@ -196,7 +196,7 @@ test('unknown actual runner binding is not silently labeled loaded or sidecar-on
   assert.throws(() => inspectRuntimeBinding(root, backend), /unknown runtime binding/)
 })
 
-test('Stage 1 manifest wiring remains sidecar-only and excludes legacy orchestrators', (t) => {
+test('partial live wiring is rejected rather than mislabeled as sidecar-only', (t) => {
   const root = fixture(t)
   const project = dirname(dirname(fileURLToPath(import.meta.url)))
   const backend = join(root, 'backend')
@@ -208,13 +208,33 @@ test('Stage 1 manifest wiring remains sidecar-only and excludes legacy orchestra
     'src/phase1_runner.mjs', 'src/phase1_official.mjs', 'src/phase1_process.mjs',
   ]
   for (const path of paths) write(root, path, readFileSync(join(project, path), 'utf8'))
-  const binding = inspectRuntimeBinding(root, backend)
-  assert.equal(binding.pluginLoadStatus, 'not_loaded')
-  assert.equal(binding.runtimeBinding, 'sidecar_only')
-  assert.equal(binding.effectiveHookDecision, false)
-  assert.equal(binding.checks.length, 11)
-  assert.ok(binding.checks.every(check => check.passed))
-  assert.ok(binding.limitations.some(value => value.includes('Legacy Pass5Orchestrator')))
+  assert.throws(() => inspectRuntimeBinding(root, backend), /unknown runtime binding: missing live/)
   write(root, 'scripts/official_integrated_pilot.mjs', 'unknown integration')
   assert.throws(() => inspectRuntimeBinding(root, backend), /unknown runtime binding/)
+})
+
+test('actual live wiring requires execution receipts and does not claim generic backend interception', () => {
+  const project = dirname(dirname(fileURLToPath(import.meta.url)))
+  const protocol = JSON.parse(readFileSync(join(project, 'config/phase0-protocol.json'), 'utf8'))
+  const binding = inspectRuntimeBinding(project, protocol.runtime.backendRoot)
+  assert.equal(binding.pluginLoadStatus, 'configured_requires_execution_receipt')
+  assert.equal(binding.runtimeBinding, 'synchronous_pre_action_ipc')
+  assert.equal(binding.effectiveHookDecision, true)
+  assert.equal(binding.runtimeAttestationRequired, true)
+  assert.ok(binding.checks.every(check => check.passed))
+  assert.ok(binding.limitations.some(value => value.includes('generic backend tool dispatcher')))
+  assert.ok(binding.limitations.some(value => value.includes('Training hook')))
+})
+
+test('v1.1 plugin resources can be frozen without claiming a particular execution loaded them', (t) => {
+  const root = fixture(t), sourceRoot = plugin(root)
+  const path = join(sourceRoot, 'capybara.plugin.json'), manifest = JSON.parse(readFileSync(path, 'utf8'))
+  manifest.version = '1.1.0'
+  writeFileSync(path, JSON.stringify(manifest))
+  const inspected = inspectPluginResources(freezePluginSnapshot({ root, id: 'gaia2-runtime', sourceRoot }))
+  assert.equal(inspected.version, '1.1.0')
+  assert.equal(inspected.pluginLoadStatus, 'not_loaded')
+  manifest.version = '2.0.0'
+  writeFileSync(path, JSON.stringify(manifest))
+  assert.throws(() => inspectPluginResources(freezePluginSnapshot({ root, id: 'gaia2-runtime', sourceRoot })), /supported version/)
 })

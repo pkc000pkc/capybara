@@ -22,7 +22,7 @@
     "selection": {"type": "object", "additionalProperties": false, "required": ["perCapability", "miniLimit", "expectedInitialExecutions", "fullOfficialCoverage"], "properties": {"perCapability": {"type": ["integer", "null"], "minimum": 1}, "miniLimit": {"type": ["integer", "null"], "minimum": 1}, "expectedInitialExecutions": {"type": "integer", "minimum": 1}, "fullOfficialCoverage": {"type": "boolean"}}},
     "runRoot": {"type": "string", "minLength": 1},
     "stateFile": {"type": "string", "minLength": 1},
-    "executionBinding": {"enum": ["planning_only_pending_phase1_and_phase3", "manifest_driven_standard_only_real_hooks_pending_phase3"]},
+    "executionBinding": {"enum": ["planning_only_pending_phase1_and_phase3", "manifest_driven_standard_only_real_hooks_pending_phase3", "phase3_live_plugin_host_required"]},
     "tasks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/task"}}
   },
   "$defs": {

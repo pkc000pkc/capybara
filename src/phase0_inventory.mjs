@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 
 const PLUGINS = ['gaia2-runtime', 'gaia2-evaluation']
 const EXCLUDED = new Set(['.git', '__pycache__', 'node_modules'])
-const CODE_DIRS = ['src', 'scripts', 'test', 'schemas', 'config']
+const CODE_DIRS = ['src', 'scripts', 'test', 'schemas', 'config', 'plugins']
 const ARE_PROTOCOL_FILES = [
   'simulation/scenario_runner.py', 'simulation/scenarios/scenario.py',
   'simulation/environment.py', 'simulation/types.py', 'simulation/tools.py',
@@ -111,7 +111,7 @@ export function freezePluginSnapshot({ root, id, sourceRoot }) {
 export function inspectPluginResources(snapshot) {
   const root = snapshot.snapshotRoot
   const manifest = readJson(safePath(root, 'capybara.plugin.json', 'plugin manifest'))
-  assert(manifest.schemaVersion === 1 && manifest.id === snapshot.id && manifest.version === '1.0.0', `${snapshot.id} manifest must declare schemaVersion 1 and version 1.0.0`)
+  assert(manifest.schemaVersion === 1 && manifest.id === snapshot.id && ['1.0.0', '1.1.0'].includes(manifest.version), `${snapshot.id} manifest must declare schemaVersion 1 and a supported version (1.0.0/1.1.0)`)
   const resources = manifest.resources
   assert(isObject(resources), `${snapshot.id} resources declaration missing`)
   assert(Object.keys(resources).every((key) => ['variables', 'harnesses', 'hooks', 'trainingHooks'].includes(key)), `${snapshot.id} unknown resource declaration`)
@@ -241,7 +241,7 @@ function pythonMetadata(python, officialPythonPath) {
   return { ...result, executable: normalized(resolve(python)), executableSha256: sha256(readFileSync(python)), officialPythonPath: normalized(officialPythonPath), importPolicy: 'stdlib-metadata-only-isolated-no-site-no-ARE-import' }
 }
 
-/** The current bridge emits events; the manifest adapter consumes them after its child exits. */
+/** Inspect known code wiring only; per-execution receipts prove actual loading. */
 export function inspectRuntimeBinding(root, backendRoot) {
   const paths = {
     e2e: 'scripts/official_e2e_smoke.mjs', all: 'scripts/official_all_smoke.mjs',
@@ -266,11 +266,38 @@ export function inspectRuntimeBinding(root, backendRoot) {
     { path: paths.adapter, check: 'binds-official-child-to-streaming-supervisor', passed: /import\s*\{\s*runChildProcess\s*\}\s*from\s*['"]\.\/phase1_process\.mjs['"]/.test(sources.adapter) && /await runChildProcess\(\{/.test(sources.adapter) && /child\s*=\s*spawn\(/.test(sources.process) },
     { path: paths.bridge, check: 'patches-ARE-ScenarioRunner-agent-method', passed: /scenario_runner\.ScenarioRunner\._run_with_agent\s*=\s*_native_run_with_agent/.test(sources.bridge) },
     { path: paths.bridge, check: 'writes-runtime-events-to-sidecar-file', passed: /GAIA2_RUNTIME_EVENT_FILE/.test(sources.bridge) && /def _emit_runtime_event\(/.test(sources.bridge) },
-    { path: paths.adapter, check: 'reads-lifecycle-sidecar-only-after-official-child-returns', passed: /const processResult = await runChildProcess\([\s\S]*?if \(existsSync\(eventPath\)\) events = readFileSync\(eventPath/.test(sources.adapter) && /readNativeResult\(\{[^}]*events\s*\}\)/.test(sources.adapter) },
+    { path: paths.adapter, check: 'collects-lifecycle-events-after-supervised-child-returns', passed: /processResult = await runChildProcess\([\s\S]*?if \(existsSync\(eventPath\)\) events = readFileSync\(eventPath/.test(sources.adapter) && /readNativeResult\(\{[^}]*events\s*\}\)/.test(sources.adapter) },
   ]
   for (const check of checks) assert(check.passed, `unknown runtime binding: ${check.path}: ${check.check}`)
   const projectSources = collectCodeInputs(root).filter((file) => /^(?:src|scripts)\/.*\.(?:mjs|js|ts|py)$/.test(file.path))
   const backendSources = hashTree(join(backendRoot, 'src'), { excludeSecrets: true }).files.filter((file) => /\.(?:ts|js|mjs)$/.test(file.relativePath))
+  if (/startRuntimeHookService/.test(sources.adapter)) {
+    const livePaths = { service: 'src/phase3_hook_service.mjs', server: 'scripts/phase3_hook_server.ts', client: 'scripts/gaia2_runtime_hooks.py' }
+    const live = Object.fromEntries(Object.entries(livePaths).map(([key, path]) => {
+      assert(existsSync(join(root, path)), `unknown runtime binding: missing live ${path}`)
+      return [key, readFileSync(join(root, path), 'utf8')]
+    }))
+    const hostPath = 'src/core/plugins/runtime-plugin-host.ts'
+    assert(existsSync(join(backendRoot, hostPath)), `unknown runtime binding: missing backend ${hostPath}`)
+    const host = readFileSync(join(backendRoot, hostPath), 'utf8')
+    checks.push(
+      { path: paths.adapter, check: 'starts-session-host-before-official-child-and-closes-in-finally', passed: /await startRuntimeHookService\(/.test(sources.adapter) && /GAIA2_HOOK_URL:\s*hookService.endpoint/.test(sources.adapter) && /finally\s*\{\s*hostProcess = await hookService.close\(\)/.test(sources.adapter) },
+      { path: livePaths.service, check: 'supervises-real-typescript-host-with-frozen-files-and-session-capability', passed: /manifest.lockRefs.capabilities.sha256/.test(live.service) && /plugins:\s*capabilities.plugins.map/.test(live.service) && /phase3_hook_server.ts/.test(live.service) && /GAIA2_HOOK_TOKEN:\s*token/.test(live.service) && /await processPromise/.test(live.service) },
+      { path: livePaths.server, check: 'authenticates-loopback-and-invokes-real-backend-host', passed: /src\/core\/plugins\/runtime-plugin-host.ts/.test(live.server) && /new RuntimePluginHost\(/.test(live.server) && /await host.initialize\(\)/.test(live.server) && /timingSafeEqual\(/.test(live.server) && /executionId, sessionId, \.\.\.invocation/.test(live.server) && /await host.invoke\(invocation\)/.test(live.server) && /127.0.0.1/.test(live.server) },
+      { path: livePaths.client, check: 'synchronous-loopback-client-validates-raw-context-sha', passed: /class RuntimeHookClient/.test(live.client) && /self.opener.open\(request/.test(live.client) && /loopback_host_required/.test(live.client) && /context_hash_mismatch/.test(live.client) },
+      { path: paths.bridge, check: 'tool-execution-waits-for-before-tool-allow-and-after-tool-must-pass', passed: /before_tool = _invoke_hook\(client, "before_tool"/.test(sources.bridge) && /permission != "allow"/.test(sources.bridge) && /result = tool\(\*\*arguments\)/.test(sources.bridge) && /after_tool_rejected/.test(sources.bridge) },
+      { path: paths.bridge, check: 'official-arrived-notifications-drive-live-harness-context', passed: /get_by_timestamp\(/.test(sources.bridge) && /_invoke_hook\(client, "before_model"/.test(sources.bridge) && /dynamic_context_injected/.test(sources.bridge) && /actor_input/.test(sources.bridge) },
+      { path: normalized(join(backendRoot, hostPath)), check: 'isolated-ts-hooks-use-typed-values-and-real-harness-registry', passed: /transformSync\(/.test(host) && /workerCall\(/.test(host) && /new HarnessRegistry\(/.test(host) && /assertSystemVariableValue\(/.test(host) && /safety_hook_missing_decision/.test(host) },
+    )
+    for (const check of checks) assert(check.passed, `unknown runtime binding: ${check.path}: ${check.check}`)
+    return {
+      pluginLoadStatus: 'configured_requires_execution_receipt', runtimeBinding: 'synchronous_pre_action_ipc', effectiveHookDecision: true, runtimeAttestationRequired: true,
+      checks, inspectedProjectSourceCount: projectSources.length, inspectedBackendSourceCount: backendSources.length,
+      projectPluginLoader: { status: 'session_scoped_real_backend_host', evidence: [paths.adapter, ...Object.values(livePaths), paths.bridge] },
+      backendPluginLoader: { status: 'real_typescript_worker_and_persistent_harness', evidence: [hostPath] },
+      limitations: ['Static wiring inspection is not proof that a particular execution loaded hooks; valid session receipts are mandatory.', 'Integration scope is the GAIA2 ARE adapter, not a claim that every generic backend tool dispatcher has plugin hooks.', 'Training hook sources are registered but after_evaluation/after_replay execution remains disabled until stage 4.', 'Official A2A delegation permissions and semantic noise/stale/conflict detection remain stage 5 work.', 'Legacy Pass5Orchestrator and RuntimeAttempt are not the manifest entrypoints execution path.'],
+    }
+  }
   // Search executable import/load/registration syntax, not arbitrary mention strings.
   const loaderPattern = /(?:from\s*["'][^"']*(?:@capybara-agent\/sdk|plugin-loader)[^"']*["']|import\s*\([^)]*capybara\.plugin|(?:loadPlugins|registerPlugin|PluginLoader)\s*\()/
   const projectLoaderEvidence = projectSources.filter((file) => file.path !== 'src/phase0_inventory.mjs' && loaderPattern.test(readFileSync(join(root, file.path), 'utf8'))).map((file) => file.path)
@@ -289,6 +316,15 @@ function backendCompatibility(backendRoot, plugins) {
   const harnessPath = join(backendRoot, 'src/core/harnesses/harness-registry.ts')
   const variablesSource = readFileSync(variablesPath, 'utf8')
   const harnessSource = readFileSync(harnessPath, 'utf8')
+  if (/assertSystemVariableValue\(type, item.value/.test(variablesSource) && /enum:\s*\['persistent', 'model', 'tool', 'experience'\]/.test(harnessSource)) {
+    const hostPath = join(backendRoot, 'src/core/plugins/runtime-plugin-host.ts')
+    assert(existsSync(hostPath), 'unknown backend plugin host; manual review required')
+    return {
+      status: 'resource_compatible', resourceIntegrityFailure: false, typedObjectVariables: true, persistentHarness: true, sessionScopedPluginHost: true,
+      schemaEvidence: [variablesPath, harnessPath, hostPath].map(path => ({ path: normalized(path), sha256: sha256(readFileSync(path)) })), gaps: [],
+      scope: 'typed-session-resources-and-gaia2-are-plugin-host-not-generic-runtime-tool-interception',
+    }
+  }
   assert(/typeof item\.value !== 'string'/.test(variablesSource), 'unknown backend variable schema; manual review required')
   assert(/type:\s*\{\s*enum:\s*\['model', 'tool', 'experience'\]/.test(harnessSource), 'unknown backend harness schema; manual review required')
   return {
@@ -323,7 +359,7 @@ export function freezeInventory({ root, protocol } = {}) {
     return { path: normalized(file), relativePath: path, sha256: sha256(readFileSync(file)) }
   })
   const binding = inspectRuntimeBinding(root, backendRoot)
-  const plugins = PLUGINS.map((id) => inspectPluginResources(freezePluginSnapshot({ root, id, sourceRoot: join(pluginSourceRoot, id) })))
+  const plugins = PLUGINS.map((id) => ({ ...inspectPluginResources(freezePluginSnapshot({ root, id, sourceRoot: join(pluginSourceRoot, id) })), pluginLoadStatus: binding.pluginLoadStatus, runtimeBinding: binding.runtimeBinding, effectiveHookDecision: binding.effectiveHookDecision }))
   const compatibility = backendCompatibility(backendRoot, plugins)
   const codeInputs = collectCodeInputs(root)
   const backendCodeInputs = collectCodeInputs(backendRoot)
@@ -347,8 +383,8 @@ export function freezeInventory({ root, protocol } = {}) {
     plugins, runtime: binding, backendCompatibility: compatibility,
     pluginLoadStatus: binding.pluginLoadStatus, runtimeBinding: binding.runtimeBinding,
     effectiveHookDecision: binding.effectiveHookDecision,
-    stage0Status: 'frozen_with_known_runtime_gaps', resourceIntegrity: 'passed',
-    scope: 'inventory-and-freeze-only-not-stage3-real-hook-integration',
+    stage0Status: binding.effectiveHookDecision ? 'frozen_live_wiring_requires_session_receipts' : 'frozen_with_known_runtime_gaps', resourceIntegrity: 'passed',
+    scope: 'static-inventory-and-freeze-session-receipts-are-separate-evidence',
   }
   mkdirSync(join(root, 'locks'), { recursive: true })
   for (const [name, content] of [['environment-lock.json', environment], ['capability-inventory.json', capabilities]]) {

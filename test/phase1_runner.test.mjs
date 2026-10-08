@@ -35,6 +35,39 @@ test('phase1 completed tasks including judged business failures are never rerun'
   } finally { clean(root) }
 })
 
+test('phase1 run-number selection preserves all 25 planned tasks and resumes selected tasks only', async () => {
+  const root = project(), contents = plan(), configs = ['execution', 'search', 'adaptability', 'time', 'ambiguity']
+  contents.tasks = configs.flatMap(config => [1, 2, 3, 4, 5].map(runNumber => ({ ...contents.tasks[0], config, scenarioId: `${config}-scenario`, runNumber, attemptIndex: runNumber, executionId: `${config}-${runNumber}`, outputDir: `runs/controlled/outputs/${config}-${runNumber}`, fixtureDir: `runs/controlled/fixtures/${config}-${runNumber}`, workspaceDir: `runs/controlled/workspaces/${config}-${runNumber}` })))
+  const { manifestHash, ...base } = contents, manifest = { ...base, manifestHash: digest(base) }
+  const calls = []
+  const executeTask = args => { calls.push(args.task.executionId); return good(args) }
+  try {
+    for (const onlyRunNumber of [0, 6, 1.2, true, '1']) await assert.rejects(runFrozenBatch(options(root, { manifest, onlyRunNumber, executeTask })), /planned integer/)
+    const first = await runFrozenBatch(options(root, { manifest, onlyRunNumber: 1, maxTasks: 1, executeTask }))
+    assert.equal(first.status, 'incomplete'); assert.equal(first.selectedExecutions, 5); assert.equal(first.selectedCompleted, 1); assert.equal(first.selectedEvaluationComplete, false)
+    const second = await runFrozenBatch(options(root, { manifest, onlyRunNumber: 1, resume: true, executeTask }))
+    assert.equal(second.status, 'incomplete'); assert.equal(second.selectedCompleted, 5); assert.equal(second.selectedEvaluationComplete, true)
+    assert.equal(second.plannedInitialExecutions, 25); assert.equal(second.evaluatedInitialExecutions, 5); assert.equal(second.counts.pending, 20)
+    assert.equal(second.realHooksReady, false); assert.equal(second.officialSubmissionReady, false)
+    const third = await runFrozenBatch(options(root, { manifest, onlyRunNumber: 1, resume: true, executeTask }))
+    assert.equal(third.executedThisInvocation, 0); assert.equal(calls.length, 5); assert.equal(new Set(calls).size, 5)
+    const state = readJson(join(root, manifest.stateFile))
+    assert.equal(state.tasks.length, 25); assert.equal(state.tasks.filter(record => record.status === 'pending' && record.sessions.length === 0).length, 20)
+  } finally { clean(root) }
+})
+
+test('phase1 production hook binding cannot accept a judged result without live evidence', async () => {
+  const root = project(), { manifestHash, ...base } = plan()
+  base.executionBinding = 'phase3_live_plugin_host_required'
+  const manifest = { ...base, manifestHash: digest(base) }
+  try {
+    const report = await runFrozenBatch(options(root, { manifest }))
+    assert.equal(report.evaluatedInitialExecutions, 0); assert.equal(report.businessSuccesses, 0); assert.equal(report.counts.retry_pending, 1)
+    const state = readJson(join(root, manifest.stateFile)), result = readJson(join(root, state.tasks[0].resultPath))
+    assert.equal(result.runtimeEvidenceRequired, true); assert.equal(result.evaluationComplete, false); assert.equal(result.score, null); assert.equal(result.realHooksReady, false)
+  } finally { clean(root) }
+})
+
 test('phase1 interruption restarts in a new clean session preserving initial attempt count', async () => {
   const root = project()
   try {
@@ -127,6 +160,22 @@ test('phase1 refuses retry_pending restart when descendant termination is unreso
   } finally { clean(root) }
 })
 
+test('phase1 refuses a live or unknown hook host before restarting an interrupted official session', async () => {
+  for (const kind of ['heartbeat-live', 'final-live', 'final-unknown', 'reservation-only']) {
+    const root = project()
+    try {
+      await runFrozenBatch(options(root, { executeTask: async () => ({ processResult: { exitCode: null, interrupted: true }, report: null }) }))
+      const state = readJson(join(root, plan().stateFile)), session = state.tasks[0].sessions[0], hostDir = join(root, session.outputDir, 'hook-host')
+      if (kind === 'heartbeat-live') atomicJson(join(hostDir, 'heartbeat.json'), { processIdentity: await readProcessIdentity(process.pid) })
+      if (kind === 'final-live' || kind === 'final-unknown') atomicJson(join(hostDir, 'process-result.json'), { schemaVersion: 'gaia2-process-result-v1', finishedAt: new Date().toISOString(), exitCode: 0, processIdentity: kind === 'final-live' ? await readProcessIdentity(process.pid) : { pid: 123, verified: false }, childExited: true, childClosed: true, terminationErrors: [] })
+      if (kind === 'reservation-only') atomicJson(join(hostDir, 'process-reservation.json'), { spawnState: 'spawned', pid: 123 })
+      let calls = 0
+      await assert.rejects(runFrozenBatch(options(root, { resume: true, executeTask: args => { calls++; return good(args) } })), /hook host.*(?:live process|ownership|metadata)/)
+      assert.equal(calls, 0); assert.equal(readJson(join(root, plan().stateFile)).tasks[0].sessions.length, 1)
+    } finally { clean(root) }
+  }
+})
+
 test('phase1 recovers verified dead owner and dead orphan into a new session', async () => {
   const root = project()
   try {
@@ -143,6 +192,7 @@ test('phase1 recovers verified dead owner and dead orphan into a new session', a
     const synthetic = join(root, record.sessions[0].workspaceDir, 'task-result.json')
     writeFileSync(synthetic, JSON.stringify({ evaluationComplete: false }))
     atomicJson(join(root, record.sessions[0].outputDir, 'heartbeat.json'), { processIdentity: identity })
+    atomicJson(join(root, record.sessions[0].outputDir, 'hook-host/process-result.json'), { schemaVersion: 'gaia2-process-result-v1', finishedAt: new Date().toISOString(), exitCode: 0, processIdentity: identity, terminationErrors: [], manualInspectionRequired: false })
     atomicJson(join(root, plan().runRoot, 'run-owner.json'), { ownerId: 'dead-owner', processIdentity: identity })
     atomicJson(statePath, state)
     const result = await runFrozenBatch(options(root, { resume: true }))

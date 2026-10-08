@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "package": "gaia2-evaluation",
+  "harnesses": [
+    {
+      "name": "gaia2-evaluation-contract",
+      "description": "Explains the sealed verifier boundary and pass@5 attempt contract to the actor.",
+      "type": "persistent",
+      "entry": "evaluation-contract.j2",
+      "priority": 180,
+      "activation": {},
+      "inputs": ["builtin.variables.gaia2_experiment_context", "builtin.variables.gaia2_pass5_policy"],
+      "requiredTools": []
+    }
+  ]
+}

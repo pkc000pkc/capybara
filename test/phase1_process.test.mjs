@@ -19,8 +19,8 @@ async function until(check, ms = 10000) {
 }
 
 test('all four entries default to an 8000 minute ceiling and original scenarios', () => {
-  for (const [entrypoint, actions] of [['e2e', 24], ['all', 24], ['batch', 20], ['pilot', 32]]) {
-    assert.deepEqual(resolveRuntimeSettings({ entrypoint, env: {} }), { processTimeoutMs: 480000000, scenarioTimeoutSeconds: 480000, modelRequestTimeoutSeconds: 60, concurrency: 1, maxActions: actions, minimal: false, heartbeatIntervalMs: 1000 })
+  for (const entrypoint of ['e2e', 'all', 'batch', 'pilot']) {
+    assert.deepEqual(resolveRuntimeSettings({ entrypoint, env: {} }), { processTimeoutMs: 480000000, scenarioTimeoutSeconds: 480000, modelRequestTimeoutSeconds: 60, concurrency: 1, maxActions: 300, minimal: false, heartbeatIntervalMs: 1000 })
   }
   assert.equal(resolveRuntimeSettings({ env: { GAIA2_E2E_MINIMAL: '1' } }).maxActions, 1)
   assert.equal(resolveRuntimeSettings({ env: { GAIA2_E2E_MINIMAL: '1' } }).minimal, true)

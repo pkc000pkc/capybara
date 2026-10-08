@@ -1,0 +1,439 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)))
+const python = process.env.GAIA2_PYTHON || 'C:/Users/pkc00/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe'
+
+test('live Python bridge consumes real ARE dynamics and fails closed around synchronous hook receipts offline', () => {
+  const result = spawnSync(python, ['-c', String.raw`
+import copy, hashlib, json, os, socket, sys, threading, unittest
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+external_attempts=[]
+original_connect=socket.socket.connect
+def loopback_only(sock,address):
+    if not isinstance(address,tuple) or address[0] not in ('127.0.0.1','::1'):
+        external_attempts.append(str(type(address).__name__))
+        raise AssertionError('External network forbidden')
+    return original_connect(sock,address)
+socket.socket.connect=loopback_only
+sys.path.insert(0,str(Path('scripts').resolve()))
+import capybara_official_bridge as bridge
+from gaia2_runtime_hooks import HookProtocolError, RuntimeHookClient
+from are.simulation.apps.agent_user_interface import AgentUserInterface, Sender
+from are.simulation.apps.app import App
+from are.simulation.apps.system import SystemApp
+from are.simulation.agents.default_agent.app_agent import AppAgent
+from are.simulation.environment import Environment, EnvironmentConfig
+from are.simulation.notification_system import Message, MessageType
+from are.simulation.scenarios.scenario import Scenario
+from are.simulation.scenarios.validation_result import ScenarioValidationResult
+from are.simulation.tool_utils import OperationType, app_tool
+from are.simulation.types import Event, EventType, EnvironmentState, event_registered
+
+class LedgerApp(App):
+    def __init__(self):
+        super().__init__()
+        self.values=[]
+        self.reads=0
+    @app_tool()
+    @event_registered(operation_type=OperationType.WRITE)
+    def write(self,value:str)->dict:
+        """Write the supplied value into the ledger.
+        :param value: the value to write
+        :returns: the observed ledger
+        """
+        self.values.append(value)
+        if value=='uncertain':
+            raise RuntimeError('Hidden effect happened; actual exception text is not logged')
+        return {'values':list(self.values)}
+    @app_tool()
+    @event_registered(operation_type=OperationType.READ)
+    def read(self)->dict:
+        """Read the authoritative current ledger.
+        :returns: the observed ledger
+        """
+        self.reads+=1
+        return {'values':list(self.values)}
+
+class ControlledScenario(Scenario):
+    def validate(self,env):
+        self.judge_calls+=1
+        return ScenarioValidationResult(success=self.judge_success)
+
+def setup_scenario(turns=1,success=True):
+    env=Environment(config=EnvironmentConfig(start_time=1000,duration=60,verbose=False))
+    aui=AgentUserInterface(); system=SystemApp(); ledger=LedgerApp()
+    env.register_apps([aui,system,ledger])
+    env.state=EnvironmentState.RUNNING
+    scenario=ControlledScenario(scenario_id='phase3-controlled',apps=[aui,system,ledger],nb_turns=turns,
+                                start_time=1000,duration=60,additional_system_prompt='PUBLIC_SYSTEM_DETAIL')
+    scenario.judge_calls=0; scenario.judge_success=success
+    # These privileged fields must never become Actor inputs.
+    scenario.hints=['ORACLE_HINT_SECRET']
+    scenario.events=['FUTURE_EVENT_SECRET']
+    env.world_logs=['EVALUATOR_WORLD_LOG_SECRET']
+    aui.send_message_to_agent('Initial request')
+    return scenario,env,aui,system,ledger
+
+def response(name=None,arguments=None,content=None,call_id='call'):
+    calls=[] if name is None else [SimpleNamespace(id=call_id,function=SimpleNamespace(name=name,arguments=json.dumps(arguments or {})))]
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content,tool_calls=calls))])
+
+@contextmanager
+def hook_server(policy=None,corrupt=None,after_hook=None):
+    state={'requests':[],'failures':[],'unknown':False,'readBackObserved':False}
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_POST(self):
+            try:
+                assert self.path=='/invoke'
+                assert self.headers.get('Authorization')=='Bearer controlled-token'
+                request=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                assert request['executionId']=='controlled-execution'
+                assert request['sessionId']=='controlled-session'
+                assert all(set(message)<={'role','content','id','name','toolCallId','requestId'} for message in request['messages'])
+                assert all(isinstance(message['content'],str) for message in request['messages'])
+                assert request.get('action','absent') is not None
+                assert request.get('outcome','absent') is not None
+                state['requests'].append(request)
+                action=request.get('action') or {}
+                checkpoint=request['checkpoint']
+                decision='allow'
+                if checkpoint=='before_tool' and policy:
+                    decision=policy(request,state)
+                if checkpoint=='after_tool':
+                    if request['outcome']['status']=='unknown': state['unknown']=True
+                    if action.get('authoritativeRead') and request['outcome']['status']=='succeeded': state['readBackObserved']=True
+                    if after_hook:after_hook(request,state)
+                text='visible_hook_context_'+str(len(state['requests']))
+                receipt={'decision':{'action':decision,'reason':'controlled_'+decision},'context':text,
+                         'contextHash':hashlib.sha256(text.encode()).hexdigest(),
+                         'variablesHash':hashlib.sha256(b'controlled_variables').hexdigest(),
+                         'hookReceipts':[{'plugin':'controlled_live_stub','checkpoint':checkpoint}],
+                         'revision':len(state['requests']),'evidencePath':'controlled-no-file-evidence.json'}
+                if corrupt: receipt=corrupt(receipt,request)
+                raw=json.dumps(receipt).encode()
+                self.send_response(200); self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
+            except BaseException as error:
+                state['failures'].append(type(error).__name__)
+                self.send_error(500)
+    server=HTTPServer(('127.0.0.1',0),Handler)
+    thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
+    settings={'GAIA2_HOOK_URL':f'http://127.0.0.1:{server.server_port}/invoke','GAIA2_HOOK_TOKEN':'controlled-token',
+              'GAIA2_EXECUTION_ID':'controlled-execution','GAIA2_SESSION_ID':'controlled-session',
+              'GAIA2_E2E_MAX_ACTIONS':'30'}
+    try:
+        with patch.dict(os.environ,settings): yield state
+    finally:
+        server.shutdown(); server.server_close(); thread.join(2)
+        assert not state['failures'],state['failures']
+
+class Tests(unittest.TestCase):
+    def setUp(self):
+        self.events=[]
+        self.patcher=patch.object(bridge,'_emit_runtime_event',lambda kind,**data:self.events.append({'type':kind,**data}))
+        self.patcher.start()
+    def tearDown(self):
+        self.patcher.stop()
+        self.assertEqual(external_attempts,[])
+    def run_bridge(self,scenario,env,model,**kwargs):
+        with patch.object(bridge,'_call_model',model):
+            return bridge._native_run_with_agent(None,scenario.scenario_id,scenario,env,'default','controlled-no-model',**kwargs)
+    def end_event(self):
+        return next(item for item in reversed(self.events) if item['type']=='attempt_execution_ended')
+
+    def test_01_dynamic_message_cancels_stale_write_and_enters_next_real_request(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        future=Event.from_function(aui.send_message_to_agent,event_type=EventType.USER,content='Updated instruction').at_absolute_time(1010)
+        env.event_queue.put(future)
+        calls=[]
+        def model(messages,tools,*unused):
+            calls.append(copy.deepcopy(messages))
+            self.assertEqual(env.state,EnvironmentState.PAUSED)
+            text=json.dumps(messages)
+            self.assertIn('visible_hook_context_',text)
+            self.assertIn('PUBLIC_SYSTEM_DETAIL',text)
+            self.assertNotIn('ORACLE_HINT_SECRET',text)
+            self.assertNotIn('FUTURE_EVENT_SECRET',text)
+            self.assertNotIn('EVALUATOR_WORLD_LOG_SECRET',text)
+            if len(calls)==1:
+                self.assertNotIn('Updated instruction',text)
+                env.time_manager.add_offset(10)
+                return response('LedgerApp__write',{'value':'obsolete'},call_id='old')
+            if len(calls)==2:
+                self.assertIn('Updated instruction',text)
+                return response('LedgerApp__write',{'value':'latest'},call_id='new')
+            return response('AgentUserInterface__send_message_to_user',{'content':'Done'},call_id='finish')
+        with hook_server() as host:
+            result=self.run_bridge(scenario,env,model)
+        self.assertTrue(result.success)
+        self.assertEqual(ledger.values,['latest'])
+        self.assertEqual(scenario.judge_calls,1)
+        self.assertEqual(len(calls),3)
+        self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='after_tool']),2)
+        self.assertEqual(self.end_event()['terminationReason'],'conversation_turn_limit')
+        self.assertTrue(any(e['type']=='tool_call_blocked' and e['reason']=='stale_dynamic_context' for e in self.events))
+        self.assertEqual(len([e for e in self.events if e['type']=='dynamic_context_injected']),3)
+        self.assertTrue(all(e['contextHash']==e['injectedContextHash'] for e in self.events if e['type']=='dynamic_context_injected'))
+
+    def test_02_unknown_write_is_not_retried_and_requires_read_back(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        steps=[response('LedgerApp__write',{'value':'uncertain'},call_id='first'),
+               response('LedgerApp__write',{'value':'uncertain'},call_id='retry'),
+               response('LedgerApp__read',call_id='read'),
+               response('AgentUserInterface__send_message_to_user',{'content':'Outcome requires confirmation'},call_id='finish')]
+        def policy(request,state):
+            return 'read_back' if request['action']['effect']=='write' and state['unknown'] else 'allow'
+        with hook_server(policy) as host:
+            self.run_bridge(scenario,env,lambda *a:steps.pop(0))
+        self.assertEqual(ledger.values,['uncertain'])
+        self.assertEqual(ledger.reads,1)
+        self.assertTrue(host['readBackObserved'])
+        actual=[r for r in host['requests'] if r['checkpoint']=='after_tool']
+        self.assertEqual([r['outcome']['status'] for r in actual],['unknown','succeeded','succeeded'])
+        self.assertFalse(actual[0]['outcome']['complete'])
+        self.assertTrue(any(e['type']=='tool_call_blocked' and e['reason']=='authoritative_read_required' for e in self.events))
+
+    def test_03_guard_block_does_not_run_or_record_after_tool(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        steps=[response('LedgerApp__write',{'value':'blocked'},call_id='blocked'),response(content='User reply')]
+        with hook_server(lambda request,state:'block' if request['action']['effect']=='write' else 'allow') as host:
+            self.run_bridge(scenario,env,lambda *a:steps.pop(0))
+        self.assertEqual(ledger.values,[])
+        self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='after_tool']),1)
+        self.assertEqual([m.content for m in aui.messages if m.sender==Sender.AGENT],['User reply'])
+
+    def test_04_text_final_answer_must_pass_live_before_tool(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        with hook_server(lambda *unused:'block') as host,patch.dict(os.environ,{'GAIA2_E2E_MAX_ACTIONS':'1'}):
+            with self.assertRaises(bridge.BridgeBudgetExceeded):
+                self.run_bridge(scenario,env,lambda *a:response(content='Must not bypass guard'))
+        self.assertFalse([m for m in aui.messages if m.sender==Sender.AGENT])
+        self.assertEqual(scenario.judge_calls,0)
+        self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='before_tool']),1)
+        self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='after_tool']),0)
+
+    def test_05_budget_exhaustion_is_technical_not_fake_judged_success(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        with hook_server(lambda *unused:'block') as host,patch.dict(os.environ,{'GAIA2_E2E_MAX_ACTIONS':'2'}):
+            with self.assertRaises(bridge.BridgeBudgetExceeded):
+                self.run_bridge(scenario,env,lambda *a:response('LedgerApp__write',{'value':'blocked'}))
+        self.assertEqual(scenario.judge_calls,0)
+        self.assertEqual(self.end_event()['terminationReason'],'action_budget_exhausted')
+        self.assertFalse(self.end_event()['evaluationAttempted'])
+        self.assertEqual(host['requests'][-1]['loop']['terminationReason'],'action_budget_exhausted')
+        self.assertFalse(host['requests'][-1]['outcome']['complete'])
+
+    def test_06_model_failure_resumes_official_environment(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        def model(*args):
+            self.assertEqual(env.state,EnvironmentState.PAUSED)
+            raise RuntimeError('controlled model failure')
+        with hook_server():
+            with self.assertRaises(RuntimeError):self.run_bridge(scenario,env,model)
+        self.assertEqual(env.state,EnvironmentState.RUNNING)
+        self.assertFalse(env.time_manager.is_paused)
+        self.assertEqual(scenario.judge_calls,0)
+
+    def test_07_no_hook_host_fails_before_model(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        settings={key:value for key,value in os.environ.items() if not key.startswith('GAIA2_HOOK_')}
+        with patch.dict(os.environ,settings,clear=True),patch.object(bridge,'_call_model') as model:
+            with self.assertRaises(HookProtocolError):
+                bridge._native_run_with_agent(None,scenario.scenario_id,scenario,env,'default','controlled')
+        model.assert_not_called()
+        self.assertEqual(scenario.judge_calls,0)
+
+    def test_08_corrupt_hook_receipt_fails_before_model(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        with hook_server(corrupt=lambda result,request:{**result,'contextHash':'0'*64}),patch.object(bridge,'_call_model') as model:
+            with self.assertRaises(HookProtocolError):
+                bridge._native_run_with_agent(None,scenario.scenario_id,scenario,env,'default','controlled')
+        model.assert_not_called()
+        self.assertEqual(scenario.judge_calls,0)
+
+    def test_09_noise_public_names_keep_canonical_finish_semantics(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        finish=next(tool for tool in aui.get_tools() if tool.func_name=='send_message_to_user')
+        finish._public_name='noisy_reply_731'
+        with hook_server() as host:
+            self.run_bridge(scenario,env,lambda *a:response('noisy_reply_731',{'content':'Reply through alias'}))
+        action=next(r['action'] for r in host['requests'] if r['checkpoint']=='before_tool')
+        self.assertEqual(action['effect'],'finish')
+        self.assertEqual(action['canonicalName'],'AgentUserInterface__send_message_to_user')
+        self.assertEqual(self.end_event()['usage']['completedTurns'],1)
+
+    def test_10_unknown_effect_cannot_be_allowed_by_tool_name(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        tool=next(tool for tool in ledger.get_tools() if tool.func_name=='write')
+        tool.write_operation=None
+        with hook_server() as host,patch.dict(os.environ,{'GAIA2_E2E_MAX_ACTIONS':'1'}):
+            with self.assertRaises(bridge.BridgeBudgetExceeded):
+                self.run_bridge(scenario,env,lambda *a:response('LedgerApp__write',{'value':'not_executed'}))
+        self.assertEqual(ledger.values,[])
+        action=next(r['action'] for r in host['requests'] if r['checkpoint']=='before_tool')
+        self.assertEqual(action['effect'],'unknown')
+
+    def test_11_true_official_wait_jumps_to_arrived_user_notification(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        event=Event.from_function(aui.send_message_to_agent,event_type=EventType.USER,content='Message after official wait').at_absolute_time(1010)
+        env.event_queue.put(event)
+        steps=[]
+        def model(messages,*unused):
+            steps.append(json.dumps(messages))
+            if len(steps)==1:return response('SystemApp__wait_for_notification',{'timeout':30},call_id='wait')
+            self.assertIn('Message after official wait',steps[-1])
+            return response('AgentUserInterface__send_message_to_user',{'content':'Wait completed'},call_id='finish')
+        with hook_server() as host:self.run_bridge(scenario,env,model)
+        action=next(r['action'] for r in host['requests'] if r['checkpoint']=='before_tool')
+        self.assertEqual(action['effect'],'wait')
+        self.assertGreaterEqual(env.time_manager.time(),1010)
+        self.assertNotIn('SystemApp__wait',[tool.name for tool in system.get_tools()])
+
+    def test_12_reply_does_not_end_scenario_without_turn_limit(self):
+        scenario,env,aui,system,ledger=setup_scenario(turns=None)
+        calls=[]
+        def model(messages,*unused):
+            calls.append(messages)
+            return response('AgentUserInterface__send_message_to_user',{'content':'First turn complete'})
+        def later():
+            # Lifecycle stop comes from a real environment operation, not Actor silence.
+            import time
+            time.sleep(.1)
+            env.stop()
+        stopper=threading.Thread(target=later);stopper.start()
+        with hook_server():self.run_bridge(scenario,env,model)
+        stopper.join(2)
+        self.assertEqual(self.end_event()['terminationReason'],'environment_stop')
+        self.assertEqual(len(calls),1)
+
+    def test_13_business_failure_is_real_judge_result(self):
+        scenario,env,aui,system,ledger=setup_scenario(success=False)
+        with hook_server():
+            result=self.run_bridge(scenario,env,lambda *a:response(content='Finished the attempt'))
+        self.assertFalse(result.success)
+        self.assertEqual(scenario.judge_calls,1)
+        judged=[e for e in self.events if e['type']=='official_validation_completed']
+        self.assertEqual(len(judged),1)
+        self.assertFalse(judged[0]['validationSuccess'])
+
+    def test_14_multiple_calls_are_not_partially_executed(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        two=response('LedgerApp__write',{'value':'a'},call_id='one')
+        two.choices[0].message.tool_calls.append(response('LedgerApp__write',{'value':'b'},call_id='two').choices[0].message.tool_calls[0])
+        with hook_server() as host,patch.dict(os.environ,{'GAIA2_E2E_MAX_ACTIONS':'1'}):
+            with self.assertRaises(bridge.BridgeBudgetExceeded):self.run_bridge(scenario,env,lambda *a:two)
+        self.assertEqual(ledger.values,[])
+        self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='after_tool']),0)
+
+    def test_15_client_rejects_remote_proxy_redirect_and_invalid_identity(self):
+        for url in ('https://127.0.0.1:1/invoke','http://localhost:1/invoke','http://example.com:1/invoke',
+                    'http://127.0.0.1:1/invoke?token=secret','http://user:password@127.0.0.1:1/invoke'):
+            with self.assertRaises(HookProtocolError):RuntimeHookClient(url=url,token='token',execution_id='e',session_id='s')
+        with self.assertRaises(HookProtocolError):
+            RuntimeHookClient(url='http://127.0.0.1:1/invoke',token='token',execution_id='',session_id='s')
+        with hook_server(),patch.dict(os.environ,{'HTTP_PROXY':'http://example.com:9','HTTPS_PROXY':'http://example.com:9','NO_PROXY':''}):
+            result=RuntimeHookClient().invoke('before_model',loop={'iteration':0,'terminal':False},messages=[],clock={'now':1000,'revision':0})
+        self.assertEqual(result['decision']['action'],'allow')
+
+    def test_16_tool_defaults_are_not_misrepresented_as_required(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        tool=next(tool for tool in system.get_tools() if tool.func_name=='wait_for_notification')
+        self.assertEqual(bridge._native_openai_tool(tool)['function']['parameters']['required'],[])
+        self.assertEqual(bridge._native_openai_tool(next(t for t in ledger.get_tools() if t.func_name=='write'))['function']['parameters']['required'],['value'])
+
+    def test_17_second_user_turn_is_observed_after_first_reply(self):
+        scenario,env,aui,system,ledger=setup_scenario(turns=2)
+        calls=[]
+        sent=[]
+        def after(request,state):
+            if request['action']['effect']=='finish' and not sent:
+                sent.append(True)
+                aui.send_message_to_agent('Second current request')
+        def model(messages,*unused):
+            calls.append(json.dumps(messages))
+            if len(calls)==1:
+                return response('AgentUserInterface__send_message_to_user',{'content':'First reply'},call_id='first')
+            self.assertIn('Second current request',calls[-1])
+            return response('AgentUserInterface__send_message_to_user',{'content':'Second reply'},call_id='second')
+        with hook_server(after_hook=after):self.run_bridge(scenario,env,model)
+        self.assertEqual([m.content for m in aui.messages if m.sender==Sender.AGENT],['First reply','Second reply'])
+        self.assertEqual(len(calls),2)
+        self.assertEqual(self.end_event()['usage']['completedTurns'],2)
+        self.assertEqual(scenario.judge_calls,1)
+
+    def test_18_notification_during_hook_gate_cancels_action(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        changed=[]
+        def policy(request,state):
+            if request['action']['effect']=='write' and not changed:
+                changed.append(True)
+                aui.send_message_to_agent('Change received during live gate')
+            return 'allow'
+        steps=[response('LedgerApp__write',{'value':'obsolete'},call_id='old'),response(content='Updated reply')]
+        def model(messages,*unused):
+            if len(steps)==1:self.assertIn('Change received during live gate',json.dumps(messages))
+            return steps.pop(0)
+        with hook_server(policy) as host:self.run_bridge(scenario,env,model)
+        self.assertEqual(ledger.values,[])
+        self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='after_tool']),1)
+
+    def test_19_duplicate_json_arguments_cannot_execute(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        invalid=response('LedgerApp__write',{'value':'a'})
+        invalid.choices[0].message.tool_calls[0].function.arguments='{"value":"a","value":"b"}'
+        with hook_server(),patch.dict(os.environ,{'GAIA2_E2E_MAX_ACTIONS':'1'}):
+            with self.assertRaises(bridge.BridgeBudgetExceeded):self.run_bridge(scenario,env,lambda *a:invalid)
+        self.assertEqual(ledger.values,[])
+
+    def test_20_a2a_read_metadata_is_not_authoritative_read_back(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        inner=SimpleNamespace(run=Mock())
+        delegated=AppAgent(inner,{},'DelegatedLedger')
+        scenario.apps.append(delegated);env.register_apps([delegated])
+        tool=delegated.get_tools()[0]
+        self.assertFalse(tool.write_operation)
+        action=bridge._action_for_tool(tool,'delegate',{'task':'May write through an inner agent'})
+        self.assertEqual(action['effect'],'unknown')
+        self.assertFalse(action['authoritativeRead'])
+        with hook_server(),patch.dict(os.environ,{'GAIA2_E2E_MAX_ACTIONS':'1'}):
+            with self.assertRaises(bridge.BridgeBudgetExceeded):
+                self.run_bridge(scenario,env,lambda *a:response('DelegatedLedger__expert_agent',{'task':'Write value'}))
+        inner.run.assert_not_called()
+
+    def test_21_after_tool_rejection_stops_actor_and_judge(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        def corrupt(result,request):
+            if request['checkpoint']=='after_tool':
+                return {**result,'decision':{'action':'block','reason':'controlled_failed_ledger_hook'}}
+            return result
+        model=Mock(return_value=response('LedgerApp__write',{'value':'already_executed'}))
+        with hook_server(corrupt=corrupt) as host:
+            with self.assertRaises(HookProtocolError) as caught:self.run_bridge(scenario,env,model)
+        self.assertEqual(caught.exception.code,'after_tool_rejected')
+        self.assertEqual(model.call_count,1)
+        self.assertEqual(ledger.values,['already_executed'])
+        self.assertEqual(scenario.judge_calls,0)
+        self.assertEqual(host['requests'][-1]['checkpoint'],'attempt_end')
+        self.assertFalse(self.end_event()['evaluationAttempted'])
+
+unittest.main(argv=['phase3_bridge_test'],verbosity=2)
+`], {
+    cwd: root,
+    env: { ...process.env, PYTHONPATH: join(root, '.official-python'), PYTHONUTF8: '1', HF_HUB_OFFLINE: '1', HF_DATASETS_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', LITELLM_LOCAL_MODEL_COST_MAP: 'True', LITELLM_TELEMETRY: 'False' },
+    encoding: 'utf8', timeout: 120000, maxBuffer: 1024 * 1024,
+  })
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stderr, /Ran 21 tests/)
+  assert.match(result.stderr, /OK/)
+})

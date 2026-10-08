@@ -58,7 +58,7 @@ export function resolveRuntimeSettings({ protocol = {}, entrypoint = 'e2e', env 
   const concurrency = first(env, ['GAIA2_CONCURRENCY'], number(requested.concurrency ?? 1, 'concurrency', { integer: true }), { integer: true })
   if (concurrency !== 1) throw new Error('Stage 1 requires concurrency=1')
   const minimal = boolean(env, ['GAIA2_MINIMAL', 'GAIA2_E2E_MINIMAL'], false)
-  const defaultActions = entrypoint === 'batch' ? 20 : entrypoint === 'pilot' ? 32 : minimal ? 1 : 24
+  const defaultActions = minimal ? 1 : 300
   const maxActions = first(env, ['GAIA2_MAX_ACTIONS', 'GAIA2_E2E_MAX_ACTIONS'], defaultActions, { integer: true })
   const heartbeatIntervalMs = first(env, ['GAIA2_HEARTBEAT_INTERVAL_MS'], 1000, { integer: true })
   return { processTimeoutMs, scenarioTimeoutSeconds, modelRequestTimeoutSeconds, concurrency, maxActions, minimal, heartbeatIntervalMs }

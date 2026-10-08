@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertPublicConfig, digest, fileDigest, readJson, within } from './phase0_run.mjs'
 import { classifyExecutionFailure } from './phase1_errors.mjs'
 import { isProcessIdentityAlive, readProcessIdentity } from './phase1_process.mjs'
+import { runtimeEvidenceRequired, validateRuntimeEvidence } from './phase3_runtime_evidence.mjs'
 
 export function atomicJson(path, value) {
   mkdirSync(dirname(path), { recursive: true })
@@ -95,11 +96,36 @@ function validateResult(root, manifest, task, session, record, runtimeHash) {
     const artifact = safePath(root, file.path, resolve(root, session.outputDir))
     assert(fileDigest(artifact) === file.sha256, 'completed native artifact changed or disappeared')
   }
+  if (runtimeEvidenceRequired(manifest, result) || result.runtimeAttestation || result.runtimeEvidence?.length) {
+    const eventsPath = safePath(root, portable(join(session.outputDir, 'runtime-events.jsonl')), resolve(root, session.outputDir))
+    const events = readFileSync(eventsPath, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse)
+    const hooks = validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation: result.runtimeAttestation, runtimeEvidence: result.runtimeEvidence, readEvidence: path => readFileSync(safePath(root, path, resolve(root, manifest.runRoot))) })
+    assert(result.realHooksReady === hooks.realHooksReady, 'runtime readiness differs from evidence')
+  } else assert(result.realHooksReady !== true, 'unattested runtime hooks claimed ready')
   return result
 }
 
 async function resolveOrphan(root, session) {
   const output = resolve(root, session.outputDir)
+  const hostOutput = join(output, 'hook-host')
+  if (existsSync(hostOutput)) {
+    safePath(root, portable(relative(root, hostOutput)), output)
+    assert(lstatSync(hostOutput).isDirectory(), 'hook host output is not a directory')
+    const hostFinal = join(hostOutput, 'process-result.json'), hostHeartbeat = join(hostOutput, 'heartbeat.json')
+    if (existsSync(hostFinal)) {
+      safePath(root, portable(relative(root, hostFinal)), hostOutput)
+      const final = readJson(hostFinal)
+      assert(final.schemaVersion === 'gaia2-process-result-v1' && Number.isFinite(Date.parse(final.finishedAt)) && (Number.isInteger(final.exitCode) || final.spawnError || final.signal), 'invalid hook host final result')
+      assert(final.processIdentity?.verified, 'hook host ownership is unknown; manual inspection required before restart')
+      assert(!await isProcessIdentityAlive(final.processIdentity), 'hook host still has a live process; duplicate restart refused')
+      assert(!final.terminationErrors?.length && final.manualInspectionRequired !== true, 'hook host termination is unresolved; manual inspection required before restart')
+    } else if (existsSync(hostHeartbeat)) {
+      safePath(root, portable(relative(root, hostHeartbeat)), hostOutput)
+      const snapshot = readJson(hostHeartbeat)
+      assert(snapshot.processIdentity?.verified, 'hook host ownership is unknown; manual inspection required before restart')
+      assert(!await isProcessIdentityAlive(snapshot.processIdentity), 'hook host still has a live process; duplicate restart refused')
+    } else assert(readdirSync(hostOutput).length === 0, 'used hook host lacks ownership metadata; manual inspection required before restart')
+  }
   const processResult = join(output, 'process-result.json')
   if (existsSync(processResult)) {
     const final = readJson(processResult)
@@ -139,12 +165,14 @@ async function delayUntil(deadline, signal) {
 }
 
 /** Manifest-driven sequential execution. A restart is a new disposable ARE environment, never a tool replay. */
-export async function runFrozenBatch({ root, manifest, settings, executeTask, signal, resume = false, retryInfrastructure = false, maxTasks = Infinity } = {}) {
+export async function runFrozenBatch({ root, manifest, settings, executeTask, signal, resume = false, retryInfrastructure = false, maxTasks = Infinity, onlyRunNumber = null } = {}) {
   root = resolve(root)
   assertPublicConfig(settings)
   assertSupportedPlan(manifest)
   assert(settings.concurrency === 1 && settings.minimal === false, 'frozen original tasks require concurrency 1 and minimal=false')
   assert(maxTasks === Infinity || Number.isInteger(maxTasks) && maxTasks > 0, 'maxTasks must be a positive integer')
+  assert(onlyRunNumber === null || Number.isInteger(onlyRunNumber) && onlyRunNumber >= 1 && onlyRunNumber <= 5 && manifest.tasks.some(task => task.runNumber === onlyRunNumber), 'onlyRunNumber must be a planned integer run number in 1..5')
+  const selectedTaskIds = new Set(manifest.tasks.filter(task => onlyRunNumber === null || task.runNumber === onlyRunNumber).map(task => task.executionId))
   const runRoot = safePath(root, manifest.runRoot, join(root, 'runs'))
   mkdirSync(runRoot, { recursive: true })
   const statePath = safePath(root, manifest.stateFile, runRoot)
@@ -198,6 +226,7 @@ export async function runFrozenBatch({ root, manifest, settings, executeTask, si
     let executed = 0
     for (let index = 0; index < state.tasks.length; index++) {
       const record = state.tasks[index], task = manifest.tasks[index]
+      if (!selectedTaskIds.has(task.executionId)) continue
       if (signal?.aborted || executed >= maxTasks) break
       if (record.status === 'completed') continue
       if (record.status === 'retry_pending') {
@@ -212,12 +241,20 @@ export async function runFrozenBatch({ root, manifest, settings, executeTask, si
       try { execution = await executeTask({ root, manifest, task, session, settings, signal }) }
       catch (error) { execution = { processResult: { exitCode: null, spawnError: { code: 'ADAPTER_FAILURE' } }, report: { hasException: true, exceptionType: /^[A-Za-z0-9_]+$/.test(error.name ?? '') ? error.name : 'Error' }, events: [] } }
       const processResult = execution?.processResult ?? { exitCode: null }
-      const report = execution?.report ?? {}
+      let report = execution?.report ?? {}
+      const evidenceRequired = runtimeEvidenceRequired(manifest, execution)
+      let realHooksReady = false
+      if (evidenceRequired || execution?.runtimeAttestation || execution?.runtimeEvidence?.length) {
+        try {
+          const hooks = validateRuntimeEvidence({ manifest, task, session, events: execution?.events, runtimeAttestation: execution?.runtimeAttestation, runtimeEvidence: execution?.runtimeEvidence, readEvidence: path => readFileSync(safePath(root, path, runRoot)) })
+          realHooksReady = hooks.realHooksReady
+        } catch { report = { ...report, evaluationComplete: false, hasException: true, exceptionType: 'RuntimeEvidenceError' } }
+      }
       const healthy = processResult.exitCode === 0 && !processResult.signal && !processResult.timedOut && !processResult.interrupted && !processResult.spawnError && !processResult.loggingError && !processResult.heartbeatError && !(processResult.terminationErrors?.length)
       const evaluated = healthy && report.evaluationComplete === true && report.hasException !== true && !report.exceptionType && report.scenarioId === task.scenarioId && report.runNumber === task.runNumber && typeof report.businessPassed === 'boolean'
       const failure = evaluated ? (report.businessPassed ? null : { category: 'business_failure', retryable: false }) : classifyExecutionFailure({ processResult, report: { ...report, evaluationComplete: false }, events: execution?.events ?? [] })
       const resultPath = portable(join(session.workspaceDir, 'task-result.json'))
-      const result = { schemaVersion: 'gaia2-task-result-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash, executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, runNumber: task.runNumber, phase: task.phase, config: task.config, evaluationComplete: evaluated, businessPassed: evaluated ? report.businessPassed : null, score: evaluated ? (report.businessPassed ? 1 : 0) : null, failure, process: { exitCode: processResult.exitCode ?? null, signal: processResult.signal ?? null, timedOut: processResult.timedOut === true, interrupted: processResult.interrupted === true, elapsedMs: processResult.elapsedMs ?? null }, artifacts: execution?.artifacts ?? [], finishedAt: new Date().toISOString() }
+      const result = { schemaVersion: 'gaia2-task-result-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash, executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, runNumber: task.runNumber, phase: task.phase, config: task.config, evaluationComplete: evaluated, businessPassed: evaluated ? report.businessPassed : null, score: evaluated ? (report.businessPassed ? 1 : 0) : null, failure, process: { exitCode: processResult.exitCode ?? null, signal: processResult.signal ?? null, timedOut: processResult.timedOut === true, interrupted: processResult.interrupted === true, elapsedMs: processResult.elapsedMs ?? null }, artifacts: execution?.artifacts ?? [], runtimeEvidenceRequired: evidenceRequired, runtimeAttestation: execution?.runtimeAttestation ?? null, runtimeEvidence: execution?.runtimeEvidence ?? [], realHooksReady, finishedAt: new Date().toISOString() }
       atomicJson(resolve(root, resultPath), result)
       record.resultPath = resultPath; record.resultSha256 = fileDigest(resolve(root, resultPath))
       if (evaluated) validateResult(root, manifest, task, session, record, runtimeHash)
@@ -229,7 +266,9 @@ export async function runFrozenBatch({ root, manifest, settings, executeTask, si
     }
     const counts = Object.fromEntries(['pending', 'running', 'completed', 'retry_pending'].map(status => [status, state.tasks.filter(task => task.status === status).length]))
     const results = state.tasks.filter(task => task.status === 'completed').map((record, index) => readJson(resolve(root, record.resultPath)))
-    const report = { schemaVersion: 'gaia2-batch-progress-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash, status: batchHeartbeatError ? 'infrastructure_error' : counts.completed === manifest.tasks.length ? 'evaluation_complete' : signal?.aborted ? 'interrupted' : 'incomplete', counts, plannedInitialExecutions: manifest.tasks.length, evaluatedInitialExecutions: results.length, businessSuccesses: results.filter(result => result.businessPassed).length, businessFailures: results.filter(result => !result.businessPassed).length, totalSessions: state.tasks.reduce((sum, task) => sum + task.sessions.length, 0), executedThisInvocation: executed, batchHeartbeatError, officialSubmissionReady: false, realHooksReady: false, generatedAt: new Date().toISOString() }
+    const selectedCompleted = state.tasks.filter(record => selectedTaskIds.has(record.executionId) && record.status === 'completed').length
+    const selectedResults = results.filter(result => selectedTaskIds.has(result.executionId))
+    const report = { schemaVersion: 'gaia2-batch-progress-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash, status: batchHeartbeatError ? 'infrastructure_error' : counts.completed === manifest.tasks.length ? 'evaluation_complete' : signal?.aborted ? 'interrupted' : 'incomplete', counts, plannedInitialExecutions: manifest.tasks.length, evaluatedInitialExecutions: results.length, onlyRunNumber, selectedExecutions: selectedTaskIds.size, selectedCompleted, selectedEvaluationComplete: !batchHeartbeatError && selectedCompleted === selectedTaskIds.size, selectedRealHooksReady: !batchHeartbeatError && selectedCompleted === selectedTaskIds.size && selectedResults.every(result => result.realHooksReady === true), businessSuccesses: results.filter(result => result.businessPassed).length, businessFailures: results.filter(result => !result.businessPassed).length, totalSessions: state.tasks.reduce((sum, task) => sum + task.sessions.length, 0), executedThisInvocation: executed, batchHeartbeatError, officialSubmissionReady: false, realHooksReady: !batchHeartbeatError && results.length === manifest.tasks.length && results.every(result => result.realHooksReady === true), runtimeAttestedExecutions: results.filter(result => result.runtimeAttestation).length, generatedAt: new Date().toISOString() }
     terminalStatus = report.status; finishedAt = report.generatedAt; terminalReportPath = portable(relative(root, join(runRoot, 'batch-report.json')))
     heartbeat()
     if (batchHeartbeatError) { report.status = 'infrastructure_error'; report.batchHeartbeatError = true; terminalStatus = report.status }

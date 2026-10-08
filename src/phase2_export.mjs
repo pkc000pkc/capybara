@@ -7,6 +7,7 @@ import { assertPublicConfig, buildRunManifest, digest, fileDigest, readJson, wit
 import { readNativeResult } from './phase1_official.mjs'
 import { runChildProcess } from './phase1_process.mjs'
 import { auditSubmissionPackage } from './phase2_audit.mjs'
+import { runtimeEvidenceRequired, validateRuntimeEvidence } from './phase3_runtime_evidence.mjs'
 
 const portable = path => path.replaceAll('\\', '/')
 const write = (path, value) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx' }) }
@@ -123,7 +124,11 @@ function gather(root, manifest) {
     for (const artifact of result.artifacts) check(fileDigest(checkedSource(root, artifact.path, output)) === artifact.sha256, 'native artifact changed')
     const native = readNativeResult({ root, outputDir: session.outputDir, task, session, events })
     check(native.report.evaluationComplete && native.report.businessPassed === result.businessPassed && digest(native.artifacts) === digest(result.artifacts), 'native judgment/artifacts differ')
-    records.push({ task, session, result, resultPath, processPath, eventsPath, nativePath: resolve(root, native.artifacts[0].path), tracePath: resolve(root, native.artifacts[1].path), sourceArtifacts: result.artifacts })
+    if (runtimeEvidenceRequired(manifest, result) || result.runtimeAttestation || result.runtimeEvidence?.length) {
+      const hooks = validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation: result.runtimeAttestation, runtimeEvidence: result.runtimeEvidence, readEvidence: path => readFileSync(checkedSource(root, path, runRoot)) })
+      check(result.realHooksReady === hooks.realHooksReady, 'hook readiness differs from evidence')
+    } else check(result.realHooksReady !== true, 'unattested hooks claimed ready')
+    records.push({ task, session, result, resultPath, processPath, eventsPath, nativePath: resolve(root, native.artifacts[0].path), tracePath: resolve(root, native.artifacts[1].path), sourceArtifacts: result.artifacts, sourceRuntimeEvidence: result.runtimeEvidence ?? [] })
   }
   return { state, runtime, statePath, runtimePath, stateSha256: fileDigest(statePath), records, missing }
 }
@@ -144,7 +149,12 @@ export async function exportSubmissionPackage({ root, manifestPath, outputDir, a
   const runtimeRef = source.runtime ? copy(source.runtimePath, 'evidence/runtime-settings.json') : null
   const records = source.records.map(record => {
     const id = record.task.executionId, prefix = `evidence/${id}`
-    return { phase: record.task.phase, config: record.task.config, scenarioId: record.task.scenarioId, runNumber: record.task.runNumber, executionId: id, sessionId: record.session.sessionId, result: copy(record.resultPath, `${prefix}/task-result.json`), processResult: copy(record.processPath, `${prefix}/process-result.json`), runtimeEvents: copy(record.eventsPath, `${prefix}/runtime-events.jsonl`), artifacts: [copy(record.nativePath, `${prefix}/native-output.jsonl`)].map(ref => ({ ...ref, sourcePath: record.sourceArtifacts[0].path })), trace: { path: `${record.task.phase}/${record.task.config}/hf/${id}.json`, sha256: fileDigest(record.tracePath) }, outputPath: `${record.task.phase}/${record.task.config}/output.jsonl` }
+    const runtimeEvidence = record.sourceRuntimeEvidence.map((ref, index) => {
+      const captured = copy(checkedSource(root, ref.path, resolve(root, manifest.runRoot)), `${prefix}/runtime-evidence/${String(index + 1).padStart(6, '0')}.${ref.path.endsWith('.json') ? 'json' : 'source'}`)
+      check(captured.sha256 === ref.sha256, 'runtime evidence changed during export')
+      return { ...captured, sourcePath: ref.path }
+    })
+    return { phase: record.task.phase, config: record.task.config, scenarioId: record.task.scenarioId, runNumber: record.task.runNumber, executionId: id, sessionId: record.session.sessionId, result: copy(record.resultPath, `${prefix}/task-result.json`), processResult: copy(record.processPath, `${prefix}/process-result.json`), runtimeEvents: copy(record.eventsPath, `${prefix}/runtime-events.jsonl`), runtimeEvidence, artifacts: [copy(record.nativePath, `${prefix}/native-output.jsonl`)].map(ref => ({ ...ref, sourcePath: record.sourceArtifacts[0].path })), trace: { path: `${record.task.phase}/${record.task.config}/hf/${id}.json`, sha256: fileDigest(record.tracePath) }, outputPath: `${record.task.phase}/${record.task.config}/output.jsonl` }
   })
   const diagnosticsRoot = join(dirname(outputDir), `${outputDir.split(/[\\/]/).at(-1)}-conversion`)
   const spec = { packageRoot: outputDir, model: manifest.models.actor.model, provider: manifest.models.actor.provider, rows: source.records.map(record => ({ executionId: record.task.executionId, phase: record.task.phase, config: record.task.config, scenarioId: record.task.scenarioId, runNumber: record.task.runNumber, success: record.result.businessPassed, traceSourcePath: record.tracePath })) }

@@ -73,6 +73,7 @@ export function inspectEntrypoints(root, env = process.env) {
 export function validateProtocol(protocol) {
   assertPublicConfig(protocol)
   if (protocol.schemaVersion !== 'gaia2-protocol-v1') throw new Error('unsupported protocol schema')
+  if (protocol.runtime?.executionBinding !== undefined && protocol.runtime.executionBinding !== 'phase3_live_plugin_host_required') throw new Error('unsupported live hook execution binding')
   const capabilities = ['execution', 'search', 'adaptability', 'time', 'ambiguity']
   for (const kind of ['source', 'submission']) {
     const data = protocol.datasets?.[kind]
@@ -155,7 +156,7 @@ export function buildRunManifest({ root, protocol, index, lockRefs, entrypoints,
     rootSeed, requestedRuntime: protocol.requestedRuntime, entrypoints, lockRefs,
     selection: { perCapability: limit, miniLimit: miniLimit ?? null, expectedInitialExecutions: tasks.length, fullOfficialCoverage: fullCoverage },
     runRoot, tasks, stateFile: join(runRoot, 'run-state.json'),
-    executionBinding: 'manifest_driven_standard_only_real_hooks_pending_phase3',
+    executionBinding: protocol.runtime?.executionBinding ?? 'manifest_driven_standard_only_real_hooks_pending_phase3',
   }
 }
 

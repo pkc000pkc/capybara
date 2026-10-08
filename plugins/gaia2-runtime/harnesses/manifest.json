@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "package": "gaia2-runtime",
+  "harnesses": [
+    {
+      "name": "gaia2-runtime-contract",
+      "description": "Keeps the actor inside the GAIA2 event, evidence, write, and answer-blind runtime contract.",
+      "type": "persistent",
+      "entry": "runtime-contract.j2",
+      "priority": 210,
+      "activation": {},
+      "inputs": ["builtin.variables.gaia2_runtime_context", "builtin.variables.gaia2_observation_state", "builtin.variables.gaia2_write_state"],
+      "requiredTools": []
+    }
+  ]
+}

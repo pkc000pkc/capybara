@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "gaia2-runtime",
+  "name": "GAIA2 Runtime",
+  "description": "Scenario events, virtual time, information-noise classification, safe writes, A2A boundaries, and answer-blind recovery.",
+  "version": "1.1.0",
+  "resources": {
+    "variables": "variables.json",
+    "harnesses": ["harnesses/manifest.json"],
+    "hooks": ["hooks"]
+  }
+}

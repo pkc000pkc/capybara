@@ -21,7 +21,8 @@
     "python": "C:/Users/pkc00/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe",
     "officialPythonPath": ".official-python",
     "backendRoot": "D:/gitlocals/kanli8-human/capybara-backend",
-    "pluginSourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia-project/workspace/plugins"
+    "pluginSourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/plugins",
+    "executionBinding": "phase3_live_plugin_host_required"
   },
   "models": {
     "actor": {"model": "gpt-6-luna", "provider": "local", "protocol": "chat-completions"},

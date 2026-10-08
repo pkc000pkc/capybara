@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "variables": [
+    {
+      "key": "gaia2_pass5_policy",
+      "type": "object",
+      "label": "GAIA2 pass@5 policy",
+      "description": "Exactly five isolated attempts. Correction replays remain inside an attempt and cannot change attempt count.",
+      "value": { "attempts": 5, "early_stop": false, "aggregate": "any_attempt_pass", "isolate_environment": true, "isolate_workspace": true, "isolate_clock": true, "isolate_noise": true },
+      "required": true,
+      "readonly": false,
+      "show_in_status": true,
+      "scope": "project"
+    },
+    {
+      "key": "gaia2_experiment_context",
+      "type": "text",
+      "label": "GAIA2 experiment context",
+      "description": "Bounded status only; authoritative attempt outcomes and pass@5 aggregation remain in the Experiment Store.",
+      "value": "",
+      "required": false,
+      "readonly": true,
+      "show_in_status": false,
+      "scope": "session"
+    }
+  ]
+}

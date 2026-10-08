@@ -114,6 +114,7 @@ export async function auditPhase0(root, { manifest = null, deep = true, env = pr
   if (resolve(inputs.environment.are?.root ?? '') !== resolve(root, inputs.protocol.runtime.officialPythonPath, 'are')) errors.push('ARE path differs from protocol')
   if (resolve(inputs.environment.backend?.root ?? '') !== resolve(inputs.protocol.runtime.backendRoot)) errors.push('backend path differs from protocol')
   for (const dependency of inputs.environment.node?.dependencyVersions?.installedDirect ?? []) checkFile(join(root, 'node_modules', dependency.name, 'package.json'), dependency.packageJsonSha256, 'Node dependency')
+  for (const dependency of inputs.environment.backend?.dependencyVersions?.installedDirect ?? []) checkFile(join(inputs.protocol.runtime.backendRoot, 'node_modules', dependency.name, 'package.json'), dependency.packageJsonSha256, 'backend Node dependency')
   checks.push({ name: 'environment_code_hashes', checked: (inputs.environment.codeInputs?.length ?? 0) + (inputs.environment.officialCodeInputs?.length ?? 0) })
   const plugins = inputs.capabilities.plugins ?? []
   if (plugins.length !== 2 || new Set(plugins.map((plugin) => plugin.id)).size !== 2) errors.push('expected two distinct GAIA2 plugins')
@@ -155,7 +156,7 @@ export async function auditPhase0(root, { manifest = null, deep = true, env = pr
   for (const entry of entrypoints.entries) {
     if (entry.settings.processTimeoutMs !== 0 && entry.settings.processTimeoutMs < inputs.protocol.requestedRuntime.processTimeoutMinutes * 60000) knownGaps.push({ code: 'short_outer_timeout', entrypoint: entry.id, actualMinutes: entry.settings.processTimeoutMs / 60000, requestedMinutes: inputs.protocol.requestedRuntime.processTimeoutMinutes, phase: 1 })
   }
-  knownGaps.push({ code: 'plugin_not_loaded', phase: 3 }, { code: 'real_correction_strategy_not_bound', phase: 4 }, { code: 'official_enhancement_pipeline_not_configured', phase: 5 }, { code: 'ARE_checkpoint_resume_unavailable_clean_session_restart_only', phase: null })
+  knownGaps.push({ code: inputs.capabilities.effectiveHookDecision ? 'per_execution_hook_receipt_required' : 'plugin_not_loaded', phase: 3 }, { code: 'real_correction_strategy_not_bound', phase: 4 }, { code: 'official_enhancement_pipeline_not_configured', phase: 5 }, { code: 'ARE_checkpoint_resume_unavailable_clean_session_restart_only', phase: null })
   knownGaps.push(...(inputs.capabilities.backendCompatibility?.gaps ?? []).map((gap) => ({ code: gap.id, description: gap.message, phase: 3 })))
   if (manifest) errors.push(...validateRunManifest(root, manifest, inputs, env))
   return { schemaVersion: 'gaia2-phase0-audit-v1', status: errors.length ? 'failed' : 'passed', phase0Passed: errors.length === 0, executionReady: false, officialSubmissionReady: false, errors, knownGaps, checks, entrypoints, runId: manifest?.runId ?? null, expectedInitialExecutions: manifest?.tasks.length ?? null, generatedAt: new Date().toISOString() }

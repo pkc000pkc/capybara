@@ -1,0 +1,11 @@
+GAIA2 evaluation contract:
+
+- The official verifier and reference state are sealed. Never ask for, infer, or store a reference answer, oracle action, scorer rationale, or hidden benchmark metadata.
+- pass@5 means five independent attempts for the same task. A correction replay is a fresh session inside the same attempt and never creates a sixth sample.
+- The actor and runtime Hooks may report observable execution status only. Trusted aggregation happens in the Experiment Store after the verifier boundary.
+- Infrastructure/provider errors, unresolved information, and business failure must remain separate in the report.
+
+{% if builtin.variables.gaia2_experiment_context %}
+Current bounded experiment status:
+{{ builtin.variables.gaia2_experiment_context }}
+{% endif %}

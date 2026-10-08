@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { validateSchema } from './phase0_audit.mjs'
 import { buildRunManifest, digest, fileDigest, readJson, within } from './phase0_run.mjs'
+import { runtimeEvidenceRequired, validateRuntimeEvidence } from './phase3_runtime_evidence.mjs'
 
 const phases = ['standard', 'agent2agent', 'noise']
 const configs = ['execution', 'search', 'adaptability', 'time', 'ambiguity', 'mini']
@@ -94,7 +95,7 @@ export function auditSubmissionPackage({ packageRoot, officialCheck = null } = {
     if (gate === 'evaluation') evaluation = false
     issues.push({ gate, code, ...detail })
   }
-  const metrics = { targetCount: 0, rowCount: 0, uniqueRowCount: 0, duplicateRows: 0, unknownRows: 0, missingRows: 0, structurallyValidRows: 0, evaluatedRows: 0, successCount: 0, businessFailureCount: 0, technicalCount: 0, provenanceValidRows: 0, officialReconstructedCount: null }
+  const metrics = { targetCount: 0, rowCount: 0, uniqueRowCount: 0, duplicateRows: 0, unknownRows: 0, missingRows: 0, structurallyValidRows: 0, evaluatedRows: 0, successCount: 0, businessFailureCount: 0, technicalCount: 0, provenanceValidRows: 0, runtimeAttestedRows: 0, realHookRows: 0, officialReconstructedCount: null }
   let manifest = null, sidecar = null
   const json = (path, gate, code) => { try { return readJson(packagePath(root, path)) } catch { issue(gate, code, { path }); return null } }
   try {
@@ -265,6 +266,21 @@ export function auditSubmissionPackage({ packageRoot, officialCheck = null } = {
           if (!refersToTrace) throw new Error('native_trace_identity')
         } catch { issue('evaluation', 'native_judgment_or_trace_binding_mismatch', { executionId: task.executionId }); continue }
         if (!events.every(event => object(event) && event.executionId === task.executionId && event.sessionId === record.sessionId)) { issue('evaluation', 'foreign_runtime_event', { executionId: task.executionId }); continue }
+        try {
+          const sourceRefs = result.runtimeEvidence ?? [], copies = record.runtimeEvidence ?? []
+          if (!Array.isArray(sourceRefs) || !Array.isArray(copies) || sourceRefs.length !== copies.length) throw new Error('runtime_evidence_count')
+          const runtimeCopies = new Map()
+          for (const ref of copies) {
+            const checked = evidence(ref, 'plugin_runtime_evidence')
+            if (!checked || files.get(ref.path) !== ref.sha256 || !pathSyntax(ref.sourcePath) || runtimeCopies.has(ref.sourcePath) || !sourceRefs.some(source => source?.path === ref.sourcePath && source.sha256 === ref.sha256)) throw new Error('runtime_evidence_copy')
+            runtimeCopies.set(ref.sourcePath, checked)
+          }
+          if (runtimeEvidenceRequired(manifest, result) || result.runtimeAttestation || sourceRefs.length) {
+            const hooks = validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation: result.runtimeAttestation, runtimeEvidence: sourceRefs, readEvidence: sourcePath => { if (!runtimeCopies.has(sourcePath)) throw new Error('unbound_runtime_copy'); return readFileSync(runtimeCopies.get(sourcePath)) } })
+            if (result.realHooksReady !== hooks.realHooksReady) throw new Error('runtime_readiness_mismatch')
+            metrics.runtimeAttestedRows++; if (hooks.realHooksReady) metrics.realHookRows++
+          } else if (result.realHooksReady === true) throw new Error('unattested_hooks_ready')
+        } catch { issue('evaluation', 'runtime_hook_evidence_invalid', { executionId: task.executionId }); continue }
         const validation = events.findLast(event => event.type === 'official_validation_completed')
         const passed = metadata.status === 'success'
         if (!item.judged || !rowFormat || stateTask.status !== 'completed' || result.evaluationComplete !== true || result.businessPassed !== passed || result.score !== row.score || (passed ? result.failure !== null : result.failure?.category !== 'business_failure' || result.failure.retryable !== false) || !processHealthy(process) || result.process?.exitCode !== process.exitCode || result.process?.signal !== (process.signal ?? null) || result.process?.timedOut !== (process.timedOut === true) || result.process?.interrupted !== (process.interrupted === true) || !validation || validation.hasException !== false || validation.validationSuccess !== passed) { issue('evaluation', 'execution_not_validly_evaluated', { executionId: task.executionId }); continue }
@@ -311,6 +327,6 @@ export function auditSubmissionPackage({ packageRoot, officialCheck = null } = {
   return finish()
 
   function finish() {
-    return { schemaVersion: 'gaia2-submission-audit-v1', format_valid: format, coverage_complete: coverage, evaluation_complete: evaluation, officialSubmissionReady: false, issues, metrics, mode: manifest?.mode ?? null, evidenceKind: sidecar?.evidenceKind ?? 'unverified_external', syntheticFixtureOnly: sidecar?.syntheticFixtureOnly === true, officialCheckPassed: officialCheck?.status === 'passed' && officialCheck?.traceValidationPassed === true && officialCheck?.hfSchemaValid === true, readinessBlockers: ['full_real_official_run_and_phase_3_to_5_gates_not_attested', ...(manifest?.mode !== 'official_submission' ? ['not_official_submission_mode'] : []), ...(manifest?.selection?.fullOfficialCoverage !== true ? ['not_full_official_coverage_plan'] : []), ...(sidecar?.evidenceKind !== 'native_runtime' ? ['not_native_runtime_evidence'] : []), ...(officialCheck === null ? ['official_reconstruction_not_checked'] : [])] }
+    return { schemaVersion: 'gaia2-submission-audit-v1', format_valid: format, coverage_complete: coverage, evaluation_complete: evaluation, officialSubmissionReady: false, realHooksReady: evaluation && metrics.targetCount > 0 && metrics.realHookRows === metrics.targetCount, issues, metrics, mode: manifest?.mode ?? null, evidenceKind: sidecar?.evidenceKind ?? 'unverified_external', syntheticFixtureOnly: sidecar?.syntheticFixtureOnly === true, officialCheckPassed: officialCheck?.status === 'passed' && officialCheck?.traceValidationPassed === true && officialCheck?.hfSchemaValid === true, readinessBlockers: ['full_real_official_run_and_phase_3_to_5_gates_not_attested', ...(metrics.realHookRows !== metrics.targetCount || metrics.targetCount === 0 ? ['real_runtime_hooks_not_attested'] : []), ...(manifest?.mode !== 'official_submission' ? ['not_official_submission_mode'] : []), ...(manifest?.selection?.fullOfficialCoverage !== true ? ['not_full_official_coverage_plan'] : []), ...(sidecar?.evidenceKind !== 'native_runtime' ? ['not_native_runtime_evidence'] : []), ...(officialCheck === null ? ['official_reconstruction_not_checked'] : [])] }
   }
 }

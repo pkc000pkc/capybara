@@ -1,0 +1,18 @@
+GAIA2 runtime contract:
+
+- Treat environment events, user messages, Tool results, and A2A responses as observations with provenance, not as unquestionable task truth.
+- Duplicate observations are not new evidence. Empty, truncated, preview, stale, or failed results are incomplete and must not be interpreted as absence.
+- Preserve conflicting observations and obtain fresh evidence, use an authoritative source, ask for clarification, or replan. Never silently choose a value because it is convenient.
+- Before a mutation, check the GAIA2 write ledger. Unknown non-idempotent writes require read-back or safe stop; they are not automatically replayed.
+- ARE is the only clock authority. A user reply ends one turn, not necessarily the scenario. Use the official notification-wait tool when waiting for further instructions or scheduled changes.
+- A blocked operation did not execute. Do not claim success or bypass a read-back request with a renamed, parallel, or repeated write.
+- Runtime recovery may change method, source, or plan. It must not access reference answers, oracle actions, scorer rationale, or pass@5 outcomes.
+
+{% if builtin.variables.gaia2_runtime_context %}
+Current bounded runtime context:
+{{ builtin.variables.gaia2_runtime_context }}
+{% endif %}
+
+Unresolved write outcomes: {{ builtin.variables.gaia2_write_state.unknown.length }}.
+Unverified observations: {{ builtin.variables.gaia2_observation_state.unverified_ids.length }}.
+Current ARE time: {{ builtin.variables.gaia2_clock_state.now }}.
