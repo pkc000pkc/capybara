@@ -99,7 +99,7 @@ npm run official-e2e -- --manifest runs/<run_id>/run-manifest.json --execute --r
 
 没有 durable ARE checkpoint：恢复是新建干净环境，不是从旧工具动作断点继续。恢复前验证进程出生身份；发现活跃 owner/子进程、未知身份、损坏产物或路径漂移会拒绝续跑，避免重复副作用。残留 `.owner-takeover` 或缺失进程所有权证据需要人工确认，不自动删除。
 
-当前仅接通 Standard 原始场景；含 A2A/Noise 的完整官方计划会在任何任务启动前整体拒绝。TS 插件仍未加载、真实 Hook/纠错仍未生效，官方提交格式和覆盖率留到阶段 2；不能将内部 task-result 或合成测试结果作为官方提交包。
+当前仅接通 Standard 原始场景；含 A2A/Noise 的完整官方计划会在任何任务启动前整体拒绝。TS 插件仍未加载、真实 Hook/纠错仍未生效。内部 task-result 不是官方提交行，合成结果不是基准成绩。
 
 ```powershell
 npm test
@@ -108,3 +108,25 @@ npm run phase1-model-probe # 最少量真实 Actor/Judge 请求；不执行基�
 ```
 
 Windows SIGALRM 兼容由启动适配处理，不修改官方包源码。完整阶段验收和实施文档保存在 `D:\gitlocals\kanli8-human\capybara-doc\docs\research\`。
+
+## 阶段 2：官方导出与三项审计
+
+```powershell
+npm run export-official -- --manifest runs/<run_id>/run-manifest.json --output runs/<export_id>/submission
+npm run audit-official -- --input runs/<export_id>/submission --report reports/<新的报告名>.json
+npm run phase2-controlled
+```
+
+导出和审计不执行任务、不调用模型、不上传。输出目录和报告必须是新路径；历史计划按其原始 SHA 查找当前或 `locks/archive/` 冻结输入，不能以新锁替代旧锁。迁移后的审计无需原工作目录或原场景数据，只需本机锁定 ARE 依赖。
+
+结果行位于 `submission/<phase>/<config>/output.jsonl`，完整 Trace 位于同包 `hf/` 子目录并使用包根相对路径。导出调用锁定 ARE 的结果构造和 JSONL 写入函数；再调用官方 reconstruct、HF 17 列 schema、Dataset/Parquet 及统计函数。执行身份、session、实际配置、原生判断和 SHA 证据保留在独立 `export-manifest.json`、`evidence/`、`provenance/`，不混入 HF 行 schema。Trace bytes 不改写；官方重建必须以包根为 CWD。旧工具产物保留，新重建产物写入独立 `_official/check-*/`。
+
+| 门禁 | 判断范围 |
+|---|---|
+| `format_valid` | JSON 字段及类型、目录布局、完整 Trace；默认另以官方 Pydantic 导入和 HF schema 交叉检查 |
+| `coverage_complete` | 相对冻结选题清单的 phase/config/scenario/run 唯一键、数量、缺失和多余记录；不自动表示全量官方覆盖 |
+| `evaluation_complete` | 同 session 的有效原生判断、健康终止、结果和 Trace hash、冻结配置与官方重建的一致性 |
+
+业务失败允许 score=0 并算已评估；技术异常或没有 judge 结果不算已评估，分数不伪造为 0，进入 `problems.json`。三个门禁有一项失败时 CLI 返回 2。`--structural-only` 跳过官方函数，只做项目结构和证据检查，报告会明确 `officialCheckPassed=false`。目前 `officialSubmissionReady` 始终保持 false，还需阶段 3—5 接线与完整真实评测。
+
+`phase2-controlled` 使用官方真实 Trace 导出/导入函数，但不初始化或执行基准场景；三个业务判断是明确标记的合成数据。它验证批次结果→导出→官方重建→搬移后重建，并注入六类错误。合成清单只能通过受控脚本的显式 fixture 选项导出，公开 `export-official` 不接受合成清单。测试不改变历史任务和评分。

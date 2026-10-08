@@ -1,0 +1,3 @@
+# Frozen JSON snapshots are byte-addressed by historical run manifests.
+# Preserve their original bytes even with core.autocrlf enabled on Windows.
+/locks/** -text

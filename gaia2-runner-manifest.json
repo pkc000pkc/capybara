@@ -1,6 +1,6 @@
 {
   "runner": "capybara-gaia2-frozen-manifest-sequential",
-  "runnerVersion": "0.6.0-phase1",
+  "runnerVersion": "0.7.0-phase2",
   "mode": "frozen-original-standard-tasks",
   "dataset": "meta-agents-research-environments/gaia2-cli",
   "datasetRevision": "240ac47bfc62b24c934f95d014ffa5a3cab8b04c",
@@ -38,5 +38,8 @@
   "defaultExecution": false,
   "officialSubmissionReady": false,
   "realHooksReady": false,
-  "notes": "Phase 1 implements asynchronous supervised execution, streamed redacted logs, terminal heartbeats, model-only retries and manifest-bound batch recovery. Valid judged business failures are completed and never retried. Frozen scenario content is preserved except explicit run_number metadata. A2A/Noise plans are rejected before spawning. TypeScript plugin loading, real pre-tool hooks, dynamic notification consumption, correction strategy execution and official export/coverage remain later-stage work."
+  "submissionExport": "manifest-bound-byte-preserving-portable-package-via-pinned-official-ARE-functions",
+  "submissionAuditGates": ["format_valid", "coverage_complete", "evaluation_complete"],
+  "officialExportValidation": "synthetic-controlled-Trace-fixtures-not-real-benchmark-results",
+  "notes": "Phase 1 implements supervised execution, streamed logs, terminal heartbeats, model-only retries and manifest-bound clean-session recovery. Phase 2 exports independent evidence-bound records and full unchanged HF Trace into portable phase/config packages, uses pinned official reconstruction/HF schema/statistics, and audits format, selected-plan coverage and evaluation independently. Valid business failures count as evaluated; technical/missing executions never become score zero. A2A/Noise execution is still rejected before spawning. TypeScript plugin loading, real pre-tool hooks, dynamic notification consumption, correction strategy execution and full real official evaluation remain later-stage work."
 }
