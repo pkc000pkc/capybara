@@ -29,7 +29,7 @@ from are.simulation.environment import Environment, EnvironmentConfig
 from are.simulation.notification_system import Message, MessageType
 from are.simulation.scenarios.scenario import Scenario
 from are.simulation.scenarios.validation_result import ScenarioValidationResult
-from are.simulation.tool_utils import OperationType, app_tool
+from are.simulation.tool_utils import AppTool, OperationType, app_tool
 from are.simulation.types import Event, EventType, EnvironmentState, event_registered
 
 class LedgerApp(App):
@@ -58,6 +58,54 @@ class LedgerApp(App):
         self.reads+=1
         return self.read_result if self.read_result is not None else {'values':list(self.values)}
 
+class ArgumentLedger(App):
+    """Dummy callbacks with genuine ARE defaults and event registration."""
+    def __init__(self):
+        super().__init__()
+        self.values=[]
+    @app_tool()
+    @event_registered(operation_type=OperationType.READ)
+    def read_default(self,value:str='')->dict:
+        """Read a dummy value.
+        :param value: the dummy read key
+        :returns: the dummy observation
+        """
+        return {'value':value}
+    @app_tool()
+    @event_registered(operation_type=OperationType.WRITE)
+    def write_default(self,value:str='')->dict:
+        """Append a dummy value.
+        :param value: the dummy value
+        :returns: the dummy observation
+        """
+        self.values.append(value)
+        return {'value':value}
+    @app_tool()
+    @event_registered(operation_type=OperationType.WRITE)
+    def write_required(self,value:str)->dict:
+        """Append a required dummy value.
+        :param value: the dummy value
+        :returns: the dummy observation
+        """
+        self.values.append(value)
+        return {'value':value}
+    @app_tool()
+    @event_registered(operation_type=OperationType.READ)
+    def optional(self,value:str|None=None)->dict:
+        """Read an optional dummy value.
+        :param value: the optional dummy value
+        :returns: the dummy observation
+        """
+        return {'value':value}
+    @app_tool()
+    @event_registered(operation_type=OperationType.READ)
+    def observe(self,value:dict)->dict:
+        """Read a dummy structured value.
+        :param value: the dummy structured value
+        :returns: the dummy observation
+        """
+        return {'value':value}
+
 class ControlledScenario(Scenario):
     def validate(self,env):
         self.judge_calls+=1
@@ -81,6 +129,98 @@ def setup_scenario(turns=1,success=True):
 def response(name=None,arguments=None,content=None,call_id='call'):
     calls=[] if name is None else [SimpleNamespace(id=call_id,function=SimpleNamespace(name=name,arguments=json.dumps(arguments or {})))]
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content,tool_calls=calls))])
+
+ARGUMENT_PREFLIGHT_CASES=('finish','defaults','unsafe_json','binding')
+
+def run_argument_preflight_case(case):
+    """Same model-free ARE fixture for stub Hooks and the real RuntimeHost."""
+    scenario,env,aui,system,unused=setup_scenario()
+    ledger=ArgumentLedger()
+    scenario.apps.append(ledger);env.register_apps([ledger])
+    finish='AgentUserInterface__send_message_to_user'
+    nonroundtrip='official_argument_not_roundtrippable'
+    steps={
+        'finish':[
+            ('finish-explicit-empty',finish,'{"content":""}',nonroundtrip),
+            ('finish-default-empty',finish,'{}',nonroundtrip),
+            ('finish-valid',finish,'{"content":"Controlled dummy reply"}',None),
+        ],
+        'defaults':[
+            ('default-read','ArgumentLedger__read_default','{}',nonroundtrip),
+            ('default-write','ArgumentLedger__write_default','{}',nonroundtrip),
+            ('defaults-finish',finish,'{"content":"Controlled defaults checked"}',None),
+        ],
+        'unsafe_json':[
+            ('overflow','ArgumentLedger__observe','{"value":{"unsafe":1e400}}','unsafe_json_argument'),
+            ('surrogate','ArgumentLedger__observe','{"value":{"unsafe":"\\ud800"}}','unsafe_json_argument'),
+            ('deep-json','ArgumentLedger__observe','{"value":'+('['*4096)+'0'+(']'*4096)+'}','unsafe_json_argument'),
+            ('none-default','ArgumentLedger__optional','{}',None),
+            ('none-explicit','ArgumentLedger__optional','{"value":null}',None),
+            ('nested-empty','ArgumentLedger__observe','{"value":{"empty":"","items":[null,{},[]]}}',None),
+            ('unsafe-finish',finish,'{"content":"Controlled JSON checked"}',None),
+        ],
+        'binding':[
+            ('missing','ArgumentLedger__write_required','{}','argument_binding_failed'),
+            ('extra','ArgumentLedger__write_required','{"value":"dummy","extra":"dummy"}','argument_binding_failed'),
+            ('bound-write','ArgumentLedger__write_required','{"value":"dummy"}',None),
+            ('binding-finish',finish,'{"content":"Controlled binding checked"}',None),
+        ],
+    }[case]
+    runtime_events=[];actor_inputs=[];callback_counts={}
+    original_emit=bridge._emit_runtime_event
+    original_call=AppTool.__call__
+    def emit(kind,**data):
+        runtime_events.append({'type':kind,**data});original_emit(kind,**data)
+    def counted_call(tool,*args,**kwargs):
+        name=f'{tool.class_name}__{tool.func_name}'
+        callback_counts[name]=callback_counts.get(name,0)+1
+        return original_call(tool,*args,**kwargs)
+    def native_names():
+        return [f'{event.action.app_name}__{event.action.function_name}'
+                for event in env.event_log.list_view() if event.event_type==EventType.AGENT]
+    def model(messages,*unused):
+        assert env.state==EnvironmentState.PAUSED
+        index=len(actor_inputs)
+        assert index<len(steps),'FakeActor unexpectedly continued'
+        actor_inputs.append({'messages':copy.deepcopy(messages),'callbackCounts':dict(callback_counts),
+                             'nativeCompletedEvents':native_names(),
+                             'completedTurns':len([e for e in runtime_events if e['type']=='conversation_turn_completed'])})
+        call_id,name,raw,reason=steps[index]
+        reply=response(name,call_id=call_id)
+        reply.choices[0].message.tool_calls[0].function.arguments=raw
+        return reply
+    with patch.object(bridge,'_emit_runtime_event',emit),patch.object(bridge,'_call_model',model),\
+         patch.object(AppTool,'__call__',counted_call):
+        result=bridge._native_run_with_agent(None,scenario.scenario_id,scenario,env,'default','controlled-no-model')
+    assert result.success and scenario.judge_calls==1
+    assert len(actor_inputs)==len(steps)
+    ended=next(e for e in reversed(runtime_events) if e['type']=='attempt_execution_ended')
+    expected_executed=[name for _,name,_,reason in steps if reason is None]
+    assert native_names()==expected_executed
+    assert sum(callback_counts.values())==len(expected_executed)
+    assert ended['usage']['toolsExecuted']==len(expected_executed)
+    assert ended['usage']['completedTurns']==1
+    assert ended['usage']['unknownMutationOutcomes']==0
+    assert [m.content for m in aui.messages if m.sender==Sender.AGENT]==[json.loads(steps[-1][2])['content']]
+    assert ledger.values==(['dummy'] if case=='binding' else [])
+    rejected=[]
+    for index,(call_id,name,raw,reason) in enumerate(steps):
+        if reason is None:continue
+        event=next(e for e in runtime_events if e['type']=='tool_call_blocked' and e['callId']==call_id)
+        assert event['reason']==reason
+        assert not any(e['type'] in ('tool_call_started','tool_call_completed') and e.get('callId')==call_id for e in runtime_events)
+        before,after=actor_inputs[index:index+2]
+        assert after['callbackCounts']==before['callbackCounts']
+        assert after['nativeCompletedEvents']==before['nativeCompletedEvents']
+        assert after['completedTurns']==before['completedTurns']==0
+        observed=next(json.loads(m['content']) for m in after['messages'] if m.get('tool_call_id')==call_id)
+        assert observed['status']=='blocked' and observed['reason']==reason and observed['executed'] is False
+        rejected.append({'id':call_id,'reason':reason,'observation':observed})
+    assert not external_attempts
+    return {'case':case,'status':'passed','syntheticFixtureOnly':True,'benchmarkExecuted':False,
+            'officialSubmissionReady':False,'realModelCalls':0,'externalNetworkAttempts':len(external_attempts),
+            'callbackCounts':callback_counts,'nativeCompletedEvents':native_names(),'actorInputs':actor_inputs,
+            'events':runtime_events,'rejected':rejected,'usage':ended['usage'],'validationCalls':scenario.judge_calls}
 
 @contextmanager
 def hook_server(policy=None,corrupt=None,after_hook=None):
@@ -706,6 +846,35 @@ class Tests(unittest.TestCase):
         self.assertEqual(caught.exception.code,'initial_actor_has_correction')
         model.assert_not_called();self.assertEqual(ledger.values,[]);self.assertEqual(scenario.judge_calls,0)
 
-completed=unittest.main(argv=['phase3_bridge_test'],verbosity=2,exit=False)
-print('MODEL_PROTOCOL_FAILURE_AUDITS:'+json.dumps(protocol_failure_audits))
-if not completed.result.wasSuccessful():raise SystemExit(1)
+    def check_argument_preflight(self,case):
+        with hook_server() as host:audit=run_argument_preflight_case(case)
+        gates=[r for r in host['requests'] if r['checkpoint']=='before_tool']
+        after=[r for r in host['requests'] if r['checkpoint']=='after_tool']
+        self.assertEqual(len(gates),audit['usage']['toolCalls'])
+        self.assertEqual(len(after),audit['usage']['toolsExecuted'])
+        for rejected in audit['rejected']:
+            gate=next(r for r in gates if r['action']['id']==rejected['id'])
+            self.assertFalse(any(r['action']['id']==rejected['id'] for r in after))
+            if rejected['reason']=='unsafe_json_argument':self.assertEqual(gate['action']['arguments'],{})
+        self.assertEqual(host['requests'][-1]['checkpoint'],'attempt_end')
+        self.assertEqual(host['requests'][-1]['outcome']['usage']['completedTurns'],1)
+
+    def test_36_empty_explicit_and_default_finish_cannot_record_or_end_a_turn(self):
+        self.check_argument_preflight('finish')
+
+    def test_37_non_aui_empty_defaults_are_rejected_before_read_or_write(self):
+        self.check_argument_preflight('defaults')
+
+    def test_38_unsafe_json_is_sanitized_but_none_and_nested_empty_values_execute(self):
+        self.check_argument_preflight('unsafe_json')
+
+    def test_39_binding_errors_do_not_invoke_the_official_tool(self):
+        self.check_argument_preflight('binding')
+
+if len(sys.argv)==3 and sys.argv[1]=='--argument-preflight-fixture':
+    if sys.argv[2] not in ARGUMENT_PREFLIGHT_CASES:raise SystemExit('unknown controlled fixture')
+    print('ARGUMENT_PREFLIGHT_AUDIT:'+json.dumps(run_argument_preflight_case(sys.argv[2])))
+else:
+    completed=unittest.main(argv=['phase3_bridge_test'],verbosity=2,exit=False)
+    print('MODEL_PROTOCOL_FAILURE_AUDITS:'+json.dumps(protocol_failure_audits))
+    if not completed.result.wasSuccessful():raise SystemExit(1)

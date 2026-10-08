@@ -22,6 +22,7 @@ import litellm
 from litellm import completion
 from gaia2_model_retry import install_model_retries
 from gaia2_runtime_hooks import HookProtocolError, RuntimeHookClient
+from gaia2_argument_preflight import safe_json_value, validate_tool_arguments
 
 from are.simulation.notification_system import MessageType
 from are.simulation.scenarios.scenario import ScenarioValidationResult
@@ -491,6 +492,10 @@ def _native_run_with_agent(
                             or not isinstance(name, str) or not name or not isinstance(raw_args, str)):
                         raise ValueError()
                     seen.add(call_id)
+                    # The raw assistant call itself must be encodable for IPC;
+                    # escaped JSON surrogates are handled by the value gate below.
+                    for field in (call_id, name, raw_args):
+                        field.encode("utf-8", errors="strict")
                     calls.append((call_id, name, raw_args))
                 except (AttributeError, TypeError, ValueError):
                     raise HookProtocolError("invalid_model_tool_call") from None
@@ -501,12 +506,29 @@ def _native_run_with_agent(
             for call_id, name, raw_args in calls:
                 usage["toolCalls"] += 1
                 argument_error = False
+                argument_reason = None
                 try:
                     arguments = _strict_arguments(raw_args)
+                except RecursionError:
+                    arguments = {}
+                    argument_error = True
+                    argument_reason = "unsafe_json_argument"
                 except (ValueError, TypeError):
                     arguments = {}
                     argument_error = True
+                if not argument_error and not safe_json_value(arguments):
+                    # Never submit unsafe values to strict JSON/UTF-8 Hook IPC.
+                    # Native parameters are not rewritten: this call is blocked.
+                    arguments = {}
+                    argument_error = True
+                    argument_reason = "unsafe_json_argument"
                 tool = tool_map.get(name)
+                preflight = (validate_tool_arguments(tool, arguments) if not argument_error else {
+                    "schemaVersion": "gaia2-official-argument-preflight-v1", "valid": False,
+                    "reason": argument_reason or "argument_binding_failed", "parameterCount": None,
+                })
+                _emit_runtime_event("official_argument_preflight", turn=iteration, callId=call_id,
+                                    **preflight)
                 action = (_action_for_tool(tool, call_id, arguments) if tool is not None else {
                     "id": call_id, "name": name, "canonicalName": "unknown", "effect": "unknown",
                     "arguments": arguments, "mutationKey": _stable_hash({"tool": name, "arguments": arguments}),
@@ -521,18 +543,24 @@ def _native_run_with_agent(
                 before_tool = _invoke_hook(client, "before_tool", env, messages, revision, iteration, action=action)
                 revision, gate_changed, stopped = _drain_notifications(env, messages, revision)
                 multiple_calls = len(calls) != 1
-                invalid = argument_error or multiple_calls or action["effect"] == "unknown"
+                invalid = argument_error or multiple_calls or action["effect"] == "unknown" or not preflight["valid"]
                 stale = generation_changed or gate_changed or stopped
                 permission = before_tool["decision"]["action"]
                 if invalid or stale or permission != "allow":
                     reason = ("stale_dynamic_context" if stale else "multiple_tool_calls_not_supported" if multiple_calls
-                              else "invalid_action" if invalid
-                              else "authoritative_read_required" if permission == "read_back" else "hook_blocked")
+                              else "authoritative_read_required" if permission == "read_back"
+                              else "hook_blocked" if permission != "allow"
+                              else preflight["reason"] if not preflight["valid"]
+                              else "invalid_action")
                     result = {"status": "blocked", "reason": reason, "executed": False,
                               "requiredAction": "authoritative_read" if permission == "read_back" else "replan"}
                     if multiple_calls:
                         result["feedback"] = ("No tool in this multi-call response was executed. "
                                               "Call exactly one tool per response, inspect its observation, then replan.")
+                    elif not preflight["valid"]:
+                        result["feedback"] = ("This call was not executed: its effective parameters cannot be "
+                                              "safely exported and restored by the locked official tools. "
+                                              "Provide valid explicit parameters; do not assume a default empty string executed.")
                     outcome = {"status": "failed_before_execution", "complete": True, "executed": False, "reason": reason}
                     usage["blockedTools"] += 1
                     _emit_runtime_event("tool_call_blocked", turn=iteration, callId=call_id,
