@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-capability-inventory-v1",
-  "generatedAt": "2026-10-08T02:17:08.442Z",
+  "generatedAt": "2026-10-08T03:04:26.223Z",
   "noModelExecution": true,
   "plugins": [
     {
@@ -282,7 +282,42 @@
     "checks": [
       {
         "path": "scripts/official_e2e_smoke.mjs",
+        "check": "dispatches-e2e-to-frozen-manifest-CLI",
+        "passed": true
+      },
+      {
+        "path": "scripts/official_all_smoke.mjs",
+        "check": "dispatches-all-to-frozen-manifest-CLI",
+        "passed": true
+      },
+      {
+        "path": "scripts/official_batch_smoke.mjs",
+        "check": "dispatches-batch-to-frozen-manifest-CLI",
+        "passed": true
+      },
+      {
+        "path": "scripts/official_integrated_pilot.mjs",
+        "check": "dispatches-pilot-to-frozen-manifest-CLI",
+        "passed": true
+      },
+      {
+        "path": "src/phase1_cli.mjs",
+        "check": "binds-frozen-batch-to-official-task-adapter",
+        "passed": true
+      },
+      {
+        "path": "src/phase1_runner.mjs",
+        "check": "awaits-task-adapter-with-frozen-task-and-session",
+        "passed": true
+      },
+      {
+        "path": "src/phase1_official.mjs",
         "check": "installs-python-bridge-before-ARE-main",
+        "passed": true
+      },
+      {
+        "path": "src/phase1_official.mjs",
+        "check": "binds-official-child-to-streaming-supervisor",
         "passed": true
       },
       {
@@ -296,22 +331,12 @@
         "passed": true
       },
       {
-        "path": "scripts/official_integrated_pilot.mjs",
-        "check": "ingests-event-file-after-runOfficialOnce-returns",
-        "passed": true
-      },
-      {
-        "path": "src/runtime_attempt.mjs",
-        "check": "records-sidecar-events-without-plugin-execution",
-        "passed": true
-      },
-      {
-        "path": "src/pass5_orchestrator.mjs",
-        "check": "local-runtime-before-external-runner",
+        "path": "src/phase1_official.mjs",
+        "check": "reads-lifecycle-sidecar-only-after-official-child-returns",
         "passed": true
       }
     ],
-    "inspectedProjectSourceCount": 37,
+    "inspectedProjectSourceCount": 48,
     "inspectedBackendSourceCount": 37,
     "projectPluginLoader": {
       "status": "not_present_in_inspected_wiring",
@@ -324,7 +349,8 @@
     "limitations": [
       "Static inspection of known runner paths is not a runtime hook load test.",
       "TypeScript plugin hooks do not intercept model/tool execution in the Python bridge.",
-      "RuntimeAttempt events are recorded after the official process returns."
+      "Lifecycle sidecar events are consumed only after the official child returns; they do not invoke TypeScript plugin hooks.",
+      "Legacy Pass5Orchestrator and RuntimeAttempt are not the manifest entrypoints' execution path."
     ]
   },
   "backendCompatibility": {
