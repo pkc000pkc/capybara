@@ -34,6 +34,23 @@ def _stable_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, default=str, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _actor_visible_tool_result(result: Any) -> tuple[Any, str]:
+    """Use the existing Actor's default=str view at the strict JSON IPC edge.
+
+    Do not expose object internals or invent a richer dataclass projection.
+    Serialize once for both Actor and Hook consumers, reject non-finite JSON,
+    and retain the original result hash only when the projection agrees.
+    """
+    try:
+        projected = json.loads(json.dumps(result, default=str, ensure_ascii=False, allow_nan=False))
+        result_hash = _stable_hash(result)
+        if _stable_hash(projected) != result_hash:
+            raise HookProtocolError("tool_result_hash_mismatch")
+    except (TypeError, ValueError, RecursionError, OverflowError):
+        raise HookProtocolError("invalid_tool_result_payload") from None
+    return projected, result_hash
+
+
 def _emit_runtime_event(event_type: str, **payload: Any) -> None:
     """Emit a compact, evaluator-blind lifecycle event for Capybara hooks.
 
@@ -483,12 +500,15 @@ def _native_run_with_agent(
                         if risky:
                             usage["unknownMutationOutcomes"] += 1
                     else:
-                        outcome = {"status": "succeeded", "complete": True, "executed": True, "result": result}
-                    outcome["resultHash"] = _stable_hash(result)
+                        outcome = {"status": "succeeded", "complete": True, "executed": True}
+                    result, result_hash = _actor_visible_tool_result(result)
+                    if outcome["status"] == "succeeded":
+                        outcome["result"] = result
+                    outcome["resultHash"] = result_hash
                     _emit_runtime_event("tool_call_completed", turn=iteration, callId=call_id, function=name,
                                         canonicalName=action["canonicalName"], status=outcome["status"],
-                                        ok=outcome["status"] == "succeeded", resultHash=_stable_hash(result))
-                messages.append(_new_message("tool", json.dumps(result, default=str, ensure_ascii=False),
+                                        ok=outcome["status"] == "succeeded", resultHash=result_hash)
+                messages.append(_new_message("tool", json.dumps(result, default=str, ensure_ascii=False, allow_nan=False),
                                              tool_call_id=call_id, name=name))
                 revision += 1
                 if outcome["executed"]:

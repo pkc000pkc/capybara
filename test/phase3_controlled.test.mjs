@@ -26,6 +26,7 @@ test('real TS plugin host and tracked frozen hooks control real ARE callbacks th
     assert.equal(item.resultHashBindingsChecked, true)
     assert.equal(item.trainingHooksExecuted, false)
     assert.equal(item.hiddenAndFutureInputsAbsent, true)
+    assert.equal(item.officialContactProjectionExercised, item.case !== 'wait')
     for (const artifact of [...item.artifacts, item.capabilities]) assert.equal(fileDigest(resolve(root, artifact.path)), artifact.sha256)
     if (item.trackedPluginProfile) {
       assert.equal(item.productionAttestationVerified, true)

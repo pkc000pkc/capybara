@@ -96,6 +96,13 @@ function inspectCaseEvidence({ root, workspace, output, fixture, capabilities, r
       assert.ok(event, 'after_tool must bind an actual ARE invocation')
       assert.equal(value.input.outcome.resultHash, event.resultHash)
       assert.equal(value.input.outcome.status, event.status)
+      if (value.input.outcome.status === 'succeeded' && ['ControlledLedger__write', 'ControlledLedger__read'].includes(value.input.action.name)) {
+        const result = value.input.outcome.result
+        assert.equal(typeof result.contact, 'string', 'official Contact must reach the strict real Host as Actor-visible text')
+        assert.equal(result.nested[0].contact, result.contact)
+        assert.ok(result.contact.includes('Contact ID: controlled-visible-contact'))
+        assert.equal(pythonEventHash(result), value.input.outcome.resultHash, 'projected IPC result must preserve the original ARE result hash')
+      }
     }
   }
   assert.equal(actors.length, fixture.fakeActorRequests)
@@ -176,6 +183,7 @@ function inspectCaseEvidence({ root, workspace, output, fixture, capabilities, r
     callbackCounts: fixture.callbackCounts, invocationCount: calls.length,
     hookSourceBindingsChecked: true, actorContextBindingsChecked: true, resultHashBindingsChecked: true,
     hiddenAndFutureInputsAbsent: true, trainingHooksExecuted: false,
+    officialContactProjectionExercised: fixture.officialContactProjectionExercised,
     artifacts: [
       { path: normalized(relative(root, join(output, 'fixture-report.json'))), sha256: fileDigest(join(output, 'fixture-report.json')) },
       { path: normalized(relative(root, join(output, 'runtime-events.jsonl'))), sha256: fileDigest(join(output, 'runtime-events.jsonl')) },

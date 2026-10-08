@@ -30,6 +30,7 @@ import capybara_official_bridge as bridge
 from gaia2_runtime_hooks import HookProtocolError, RuntimeHookClient
 from are.simulation.apps.agent_user_interface import AgentUserInterface, Sender
 from are.simulation.apps.app import App
+from are.simulation.apps.contacts import Contact, Contacts
 from are.simulation.apps.system import SystemApp
 from are.simulation.agents.default_agent.app_agent import AppAgent
 from are.simulation.environment import Environment, EnvironmentConfig
@@ -44,6 +45,7 @@ class LedgerApp(App):
         super().__init__()
         self.values=[]
         self.reads=0
+        self.read_result=None
     @app_tool()
     @event_registered(operation_type=OperationType.WRITE)
     def write(self,value:str)->dict:
@@ -62,7 +64,7 @@ class LedgerApp(App):
         :returns: the observed ledger
         """
         self.reads+=1
-        return {'values':list(self.values)}
+        return self.read_result if self.read_result is not None else {'values':list(self.values)}
 
 class ControlledScenario(Scenario):
     def validate(self,env):
@@ -427,6 +429,63 @@ class Tests(unittest.TestCase):
         self.assertEqual(host['requests'][-1]['checkpoint'],'attempt_end')
         self.assertFalse(self.end_event()['evaluationAttempted'])
 
+    def test_22_real_official_contact_result_crosses_strict_http_as_actor_visible_text(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        contact=Contact(first_name='Controlled',last_name='User',contact_id='observed-contact',is_user=True)
+        contacts=Contacts(contacts={contact.contact_id:contact})
+        scenario.apps.append(contacts);env.register_apps([contacts])
+        steps=[response('Contacts__get_current_user_details',call_id='contact-read'),response(content='Contact observed')]
+        actor_inputs=[]
+        def model(messages,*unused):
+            actor_inputs.append(copy.deepcopy(messages))
+            return steps.pop(0)
+        with hook_server() as host:self.run_bridge(scenario,env,model)
+        after=next(r for r in host['requests'] if r['checkpoint']=='after_tool' and r['action']['id']=='contact-read')
+        self.assertEqual(after['outcome']['result'],str(contact))
+        self.assertEqual(after['outcome']['resultHash'],bridge._stable_hash(contact))
+        self.assertEqual(after['outcome']['resultHash'],bridge._stable_hash(after['outcome']['result']))
+        observed=next(m for m in actor_inputs[1] if m.get('tool_call_id')=='contact-read')
+        self.assertEqual(json.loads(observed['content']),after['outcome']['result'])
+        self.assertEqual(scenario.judge_calls,1)
+
+    def test_23_nested_objects_use_exact_default_str_actor_view_and_original_hash(self):
+        class ContactLike:
+            def __str__(self):return 'public controlled contact-like detail'
+        scenario,env,aui,system,ledger=setup_scenario()
+        original={'contacts':[Contact(first_name='Nested',last_name='Contact',contact_id='nested-contact'),
+                              {'custom':ContactLike()}],'tuple':(ContactLike(),None),'finite':1.25}
+        ledger.read_result=original
+        expected=json.loads(json.dumps(original,default=str,ensure_ascii=False,allow_nan=False))
+        steps=[response('LedgerApp__read',call_id='nested-read'),response(content='Nested evidence observed')]
+        actor_inputs=[]
+        def model(messages,*unused):
+            actor_inputs.append(copy.deepcopy(messages));return steps.pop(0)
+        with hook_server() as host:self.run_bridge(scenario,env,model)
+        after=next(r for r in host['requests'] if r['checkpoint']=='after_tool' and r['action']['id']=='nested-read')
+        self.assertEqual(after['outcome']['result'],expected)
+        self.assertEqual(after['outcome']['resultHash'],bridge._stable_hash(original))
+        self.assertEqual(after['outcome']['resultHash'],bridge._stable_hash(expected))
+        observed=next(m for m in actor_inputs[1] if m.get('tool_call_id')=='nested-read')
+        self.assertEqual(json.loads(observed['content']),expected)
+        self.assertEqual(ledger.reads,1)
+
+    def test_24_nonfinite_tool_results_fail_closed_before_ipc_actor_or_judge(self):
+        for value in (float('nan'),float('inf'),float('-inf'),{'nested':[float('nan')]}):
+            with self.subTest(value=type(value).__name__):
+                scenario,env,aui,system,ledger=setup_scenario()
+                ledger.read_result=value
+                model=Mock(return_value=response('LedgerApp__read',call_id='nonfinite-read'))
+                with hook_server() as host:
+                    with self.assertRaises(HookProtocolError) as caught:self.run_bridge(scenario,env,model)
+                self.assertEqual(caught.exception.code,'invalid_tool_result_payload')
+                self.assertEqual(model.call_count,1)
+                self.assertEqual(ledger.reads,1)
+                self.assertEqual(scenario.judge_calls,0)
+                self.assertFalse(any(r['checkpoint']=='after_tool' for r in host['requests']))
+                self.assertEqual(host['requests'][-1]['checkpoint'],'attempt_end')
+                self.assertFalse(self.end_event()['evaluationAttempted'])
+                self.assertEqual(env.state,EnvironmentState.RUNNING)
+
 unittest.main(argv=['phase3_bridge_test'],verbosity=2)
 `], {
     cwd: root,
@@ -434,6 +493,6 @@ unittest.main(argv=['phase3_bridge_test'],verbosity=2)
     encoding: 'utf8', timeout: 120000, maxBuffer: 1024 * 1024,
   })
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
-  assert.match(result.stderr, /Ran 21 tests/)
+  assert.match(result.stderr, /Ran 24 tests/)
   assert.match(result.stderr, /OK/)
 })

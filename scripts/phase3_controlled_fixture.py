@@ -35,6 +35,7 @@ from gaia2_model_retry import wrap_completion  # noqa: E402
 from gaia2_runtime_hooks import HookProtocolError  # noqa: E402
 from are.simulation.apps.agent_user_interface import AgentUserInterface, Sender  # noqa: E402
 from are.simulation.apps.app import App  # noqa: E402
+from are.simulation.apps.contacts import Contact  # noqa: E402
 from are.simulation.apps.system import SystemApp  # noqa: E402
 from are.simulation.environment import Environment, EnvironmentConfig  # noqa: E402
 from are.simulation.scenarios.scenario import Scenario  # noqa: E402
@@ -57,6 +58,15 @@ class ControlledLedger(App):
         super().__init__()
         self.values: list[str] = []
         self.calls = {"write": 0, "read": 0, "failed_read": 0}
+        self.contact = Contact(first_name="Controlled", last_name="Visible",
+                               contact_id="controlled-visible-contact", is_user=True)
+
+    def _observed_result(self):
+        # Exercise ARE's actual non-JSON return class through the real strict
+        # IPC boundary, including nested objects. Only the Actor-visible str
+        # representation may be projected, not private object attributes.
+        return {"values": list(self.values), "contact": self.contact,
+                "nested": [{"contact": self.contact}]}
 
     @app_tool()
     @event_registered(operation_type=OperationType.WRITE)
@@ -69,7 +79,7 @@ class ControlledLedger(App):
         self.values.append(value)
         if value == "uncertain":
             raise RuntimeError("Controlled mutation occurred before its response failed")
-        return {"values": list(self.values)}
+        return self._observed_result()
 
     @app_tool()
     @event_registered(operation_type=OperationType.READ)
@@ -78,7 +88,7 @@ class ControlledLedger(App):
         :returns: the current authoritative ledger
         """
         self.calls["read"] += 1
-        return {"values": list(self.values)}
+        return self._observed_result()
 
     @app_tool()
     @event_registered(operation_type=OperationType.READ)
@@ -226,6 +236,15 @@ def run_fixture(case: str, report_path: Path) -> dict:
         assert validation.success is True and scenario.validation_calls == 1
     assert not _external_attempts
     ended = next(event for event in reversed(runtime_events) if event["type"] == "attempt_execution_ended")
+    observed_result_hashes = [event["resultHash"] for event in runtime_events
+                             if event["type"] == "tool_call_completed" and event.get("status") == "succeeded"
+                             and event.get("function") in ("ControlledLedger__write", "ControlledLedger__read")]
+    for actor in actor_calls:
+        for message in actor["messages"]:
+            if message.get("role") == "tool" and message.get("name") in ("ControlledLedger__write", "ControlledLedger__read"):
+                result = json.loads(message["content"])
+                if "contact" in result:
+                    assert result["contact"] == str(ledger.contact) == result["nested"][0]["contact"]
     report_path.parent.mkdir(parents=True, exist_ok=True)
     actors = _save(report_path.parent / "actor-inputs.json", actor_calls)
     completed = _save(report_path.parent / "are-completed-events.json", env.event_log.to_dict())
@@ -240,6 +259,7 @@ def run_fixture(case: str, report_path: Path) -> dict:
         "validationCalls": scenario.validation_calls, "expectedTechnicalFailure": failure,
         "terminationReason": ended["terminationReason"], "usage": ended["usage"],
         "officialClockAtEnd": env.time_manager.time(), "hiddenAndFutureInputsAbsent": True,
+        "officialContactProjectionExercised": bool(observed_result_hashes),
         "artifacts": [actors, completed], "uploaded": False, "officialSubmissionReady": False,
     }
     _save(report_path, report)
