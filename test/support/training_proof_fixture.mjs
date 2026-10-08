@@ -2,11 +2,11 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { digest, fileDigest, readJson, within, writeJson } from '../../src/phase0_run.mjs'
-import { canonicalScenarioHash } from '../../src/phase0_dataset.mjs'
+import { canonicalScenarioHash, scenarioIdSetSha256 } from '../../src/phase0_dataset.mjs'
 import { runChildProcess } from '../../src/phase1_process.mjs'
 import { collectRuntimeEvidence, pythonEventHash } from '../../src/phase3_runtime_evidence.mjs'
 import { CORRECTION_CONTRACT, parseCorrectionPlan, renderTrustedCorrection } from '../../src/phase4_correction_contract.mjs'
@@ -122,17 +122,60 @@ function writeJsonOrText(path, value) {
   else writeJson(path, value)
 }
 
+/** File-only teardown gate: uncertain replay processes retain the entire fixture. */
+export function cleanupTrainingProofFixture({ runDirectory, fixtureRoot, trainingCleanupSafe }) {
+  const directory = resolve(runDirectory), fixture = resolve(fixtureRoot)
+  assert(within(directory, fixture) && fixture !== directory)
+  if (trainingCleanupSafe !== true) return false
+  try {
+    const rootStat = lstatSync(fixture)
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return false
+    for (const entry of readdirSync(fixture, { withFileTypes: true })) {
+      if (!entry.name.startsWith('replay-')) continue
+      const replay = join(fixture, entry.name), output = join(replay, 'output'), host = join(output, 'hook-host')
+      for (const path of [replay, output, host]) {
+        const stat = lstatSync(path)
+        if (!stat.isDirectory() || stat.isSymbolicLink()) return false
+      }
+      const processDirectories = [host], actor = join(output, 'actor-process')
+      let actorStat
+      try { actorStat = lstatSync(actor) } catch (error) {
+        // Startup can fail before creating Actor output. lstat (not existsSync)
+        // still observes dangling links, which must never count as absent.
+        if (error.code !== 'ENOENT') throw error
+      }
+      if (actorStat) {
+        if (!actorStat.isDirectory() || actorStat.isSymbolicLink()) return false
+        processDirectories.push(actor)
+      }
+      for (const processDirectory of processDirectories) {
+        const resultPath = join(processDirectory, 'process-result.json'), resultStat = lstatSync(resultPath)
+        if (!resultStat.isFile() || resultStat.isSymbolicLink()) return false
+        const result = JSON.parse(readFileSync(resultPath, 'utf8'))
+        if (result?.schemaVersion !== 'gaia2-process-result-v1'
+          || result.childExited !== true || result.childClosed !== true
+          || result.manualInspectionRequired !== false
+          || !Array.isArray(result.terminationErrors) || result.terminationErrors.length !== 0) return false
+      }
+    }
+  } catch {
+    // Missing, damaged, unreadable, or linked evidence never proves cleanup.
+    return false
+  }
+  rmSync(fixture, { recursive: true, force: true })
+  return true
+}
+
 /** Real frozen TS Host -> pinned Python/LiteLLM -> local HTTP control. */
 export async function trainingProofFixture(t, { kind = 'multi_tool_response_rejected', rawResponse = null, fullInitialPlan = false } = {}) {
   const root = PROJECT_ROOT, runDirectory = join(root, 'runs')
   mkdirSync(runDirectory, { recursive: true })
   const fixtureRoot = mkdtempSync(join(runDirectory, 'phase4-training-proof-test-'))
-  let cleanupSafe = true
+  let cleanupSafe = false
   t.after(() => {
-    assert(within(runDirectory, fixtureRoot) && fixtureRoot !== runDirectory)
     // Preserve diagnostics if native cleanup became uncertain; never delete
     // a running/unknown process's workspace or authorize a bare PID kill.
-    if (cleanupSafe) rmSync(fixtureRoot, { recursive: true, force: true })
+    cleanupTrainingProofFixture({ runDirectory, fixtureRoot, trainingCleanupSafe: cleanupSafe })
   })
   const { parent, manifestPath: parentManifestPath, put, scenario, controlledSourceRef } = createControlledParent({ root, fixtureRoot, kind, fullInitialPlan })
   assert.equal(parent.evidence.trainingAllowed, true)
@@ -161,12 +204,43 @@ export async function trainingProofFixture(t, { kind = 'multi_tool_response_reje
   })
   assert.equal(readJson(join(plugins[1].snapshotRoot, 'capybara.plugin.json')).version, '1.2.0')
   const capabilities = { plugins }
-  const capabilitiesRef = put(portable(relative(root, join(fixtureRoot, 'training-capabilities.json'))), capabilities)
+  const baselinePath = path => portable(relative(root, join(fixtureRoot, 'controlled-baseline', path)))
+  const capabilitiesRef = put(baselinePath('locks/capability-inventory.json'), capabilities)
   const codeInputs = SOURCES.project.map(path => ({ path, sha256: fileDigest(join(root, path)) }))
   const backendInputs = SOURCES.backend.map(path => ({ path, sha256: fileDigest(join(protocol.runtime.backendRoot, path)) }))
-  const environmentRef = put(portable(relative(root, join(fixtureRoot, 'training-environment.json'))), { controlledFixtureOnly: true, codeInputs, backend: { codeInputs: backendInputs } })
+  const environmentRef = put(baselinePath('locks/environment-lock.json'), { controlledFixtureOnly: true, codeInputs, backend: { codeInputs: backendInputs } })
+  // Match the real five-lock formats, including a multi-row JSONL index. The
+  // source rows remain explicitly controlled fixtures, not a dataset freeze.
+  const indexRows = [...new Map(parent.manifest.tasks.map(task => [`${task.config}/${task.scenarioId}`, {
+    datasetKind: 'source', config: task.config, id: task.scenarioId, path: task.sourcePath,
+    rowIndex: task.rowIndex, scenarioHash: task.scenarioHash, scenarioVersion: task.scenarioVersion,
+  }])).values()]
+  if (indexRows.length === 1) {
+    const otherScenario = { ...scenario, metadata: { definition: { scenario_id: 'controlled-training-index-extra', run_number: 1 } } }
+    const sourceRef = put(baselinePath('source/controlled-index-extra.json'), otherScenario)
+    indexRows.push({ datasetKind: 'source', config: 'search', id: otherScenario.metadata.definition.scenario_id,
+      path: sourceRef.path, rowIndex: 0, scenarioHash: canonicalScenarioHash(otherScenario), scenarioVersion: otherScenario.version })
+  }
+  assert(indexRows.length >= 2)
+  const scenarioIndexRef = put(baselinePath('data/scenario-index.jsonl'), indexRows.map(row => JSON.stringify(row)).join('\n') + '\n')
+  const protocolRef = put(baselinePath('config/phase0-protocol.json'), { ...protocol, models, controlledFixtureOnly: true })
+  const sourceSpec = protocol.datasets.source
+  const datasetRef = put(baselinePath('locks/dataset-lock.json'), {
+    schemaVersion: 1, controlledFixtureOnly: true,
+    canonicalScenarioHash: 'sha256(canonical JSON; recursively sorted object keys; array order and every field retained)',
+    scenarioIdSetHash: 'sha256(JSON.stringify(sorted unique scenario IDs))',
+    datasets: { source: { id: sourceSpec.id, revision: sourceSpec.revision, split: sourceSpec.split,
+      cacheDir: baselinePath('source'), configs: [...new Set(indexRows.map(row => row.config))], count: indexRows.length,
+      scenarioIdSetSha256: scenarioIdSetSha256(indexRows.map(row => row.id)),
+      files: indexRows.map(row => ({ config: row.config, remotePath: 'controlled-fixture-only', path: row.path,
+        bytes: readFileSync(join(root, row.path)).length, sha256: fileDigest(join(root, row.path)), count: 1,
+        scenarioIdSetSha256: scenarioIdSetSha256([row.id]), scenarioVersions: [row.scenarioVersion] })) } },
+    scenarioIndex: { ...scenarioIndexRef, count: indexRows.length },
+  })
   const trainingBase = { ...Object.fromEntries(Object.entries(parent.manifest).filter(([key]) => key !== 'manifestHash')),
-    runId: 'controlled-training-proof', models, lockRefs: { capabilities: capabilitiesRef, environment: environmentRef }, controlledFixtureOnly: true }
+    runId: 'controlled-training-proof', models,
+    lockRefs: { protocol: protocolRef, environment: environmentRef, capabilities: capabilitiesRef, dataset: datasetRef, scenarioIndex: scenarioIndexRef },
+    controlledFixtureOnly: true }
   const trainingManifest = { ...trainingBase, manifestHash: digest(trainingBase) }
   const trainingManifestPath = join(fixtureRoot, 'training-manifest.json'); writeJson(trainingManifestPath, trainingManifest, { immutable: true })
   const outputDir = join(fixtureRoot, 'training'); mkdirSync(outputDir)
@@ -191,6 +265,7 @@ export async function trainingProofFixture(t, { kind = 'multi_tool_response_reje
     cwd: outputDir, env: { ...filtered, TMP: outputDir, TEMP: outputDir, TMPDIR: outputDir },
     outputDir: join(outputDir, 'host-process'), processTimeoutMs: 60000, heartbeatIntervalMs: 100, secrets: ['controlled-test-key-not-real'] })
   cleanupSafe = processResult.childExited === true && processResult.childClosed === true && !processResult.manualInspectionRequired
+    && Array.isArray(processResult.terminationErrors) && processResult.terminationErrors.length === 0
   const hostResult = existsSync(resultPath) ? readJson(resultPath) : null
   cleanupSafe = cleanupSafe && hostResult?.cleanupCompleted === true && hostResult.manualInspectionRequired === false
     && Array.isArray(hostResult.operationalReceipts) && hostResult.operationalReceipts.every(receipt =>

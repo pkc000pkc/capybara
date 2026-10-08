@@ -114,7 +114,12 @@ export function verifyTrainingProbeEvidence({ trainingReportRef, readEvidence })
   for (const item of baseline.locks) {
     check(!locks.has(item.key) && manifest.lockRefs[item.key]?.path === item.originalPath
       && manifest.lockRefs[item.key]?.sha256 === item.sha256 && sha(bytes(item.path)) === item.sha256, 'training lock binding')
-    locks.set(item.key, json(item.path))
+    // The real five-lock baseline includes a multi-row JSONL scenario index,
+    // not just the two JSON locks used by the earlier controlled fixture.
+    // Every byte is still SHA-bound; parse each row without rewriting it.
+    locks.set(item.key, item.key === 'scenarioIndex'
+      ? bytes(item.path).toString('utf8').split(/\r?\n/).filter(line => line.trim()).map(JSON.parse)
+      : json(item.path))
   }
   check(locks.size === Object.keys(manifest.lockRefs).length, 'missing training locks')
   const capabilities = locks.get('capabilities'), environment = locks.get('environment'), sources = new Map()

@@ -92,6 +92,56 @@ test('sealed proof verifies from an immutable byte reader and a genuinely reloca
   assert.equal(fixture.httpRequests.length, 1)
 })
 
+test('real five-lock baseline verifies a multi-row JSONL scenario index without parsing it as one JSON document', () => {
+  assert.deepEqual(Object.keys(fixture.trainingManifest.lockRefs).sort(), ['capabilities', 'dataset', 'environment', 'protocol', 'scenarioIndex'])
+  const baseline = fixture.report.trainingBaseline
+  assert.deepEqual(baseline.locks.map(lock => lock.key).sort(), Object.keys(fixture.trainingManifest.lockRefs).sort())
+  const indexLock = baseline.locks.find(lock => lock.key === 'scenarioIndex')
+  const indexBytes = originalBundle.readEvidence(indexLock.path)
+  const rows = indexBytes.toString('utf8').split(/\r?\n/).filter(line => line.trim()).map(JSON.parse)
+  assert(rows.length >= 2)
+  assert.equal(rows.length, 5)
+  assert.throws(() => JSON.parse(indexBytes), SyntaxError)
+  for (const row of rows) {
+    assert.deepEqual(Object.keys(row).sort(), ['config', 'datasetKind', 'id', 'path', 'rowIndex', 'scenarioHash', 'scenarioVersion'])
+    assert.equal(row.datasetKind, 'source')
+    assert.match(row.scenarioHash, /^[a-f0-9]{64}$/)
+  }
+  const datasetLock = baseline.locks.find(lock => lock.key === 'dataset')
+  const dataset = JSON.parse(originalBundle.readEvidence(datasetLock.path))
+  assert.deepEqual(dataset.scenarioIndex, { ...fixture.trainingManifest.lockRefs.scenarioIndex, count: rows.length })
+  assert.equal(sha(indexBytes), indexLock.sha256)
+  assert.deepEqual(verifyTrainingProbeEvidence({ trainingReportRef: fixture.trainingReportRef, readEvidence: originalBundle.readEvidence }).plan, fixture.candidate)
+  assert.equal(fixture.httpRequests.length, 1)
+})
+
+test('invalid JSONL index rows fail closed even if outer baseline and manifest hashes are synchronized', () => {
+  reject(({ mapping, report, json, replace }) => {
+    const lock = report.trainingBaseline.locks.find(item => item.key === 'scenarioIndex')
+    const malformed = Buffer.concat([mapping.get(lock.path), Buffer.from('{"invalid-final-row":\n')])
+    replace(lock.path, malformed)
+    const manifest = json(report.trainingManifest.path)
+    manifest.lockRefs.scenarioIndex.sha256 = sha(malformed)
+    const { manifestHash: ignored, ...content } = manifest
+    manifest.manifestHash = digest(content)
+    replace(report.trainingManifest.path, manifest)
+  }, SyntaxError)
+})
+
+test('replaced scenario-index bytes and forged lock hashes cannot bypass the frozen manifest binding', () => {
+  reject(({ mapping, report }) => {
+    const lock = report.trainingBaseline.locks.find(item => item.key === 'scenarioIndex')
+    mapping.set(lock.path, Buffer.concat([mapping.get(lock.path), Buffer.from('\n')]))
+  }, /training evidence SHA/)
+  reject(({ mapping, report, replace }) => {
+    const lock = report.trainingBaseline.locks.find(item => item.key === 'scenarioIndex')
+    replace(lock.path, Buffer.concat([mapping.get(lock.path), Buffer.from('\n')]))
+  }, /training lock binding/)
+  reject(({ report }) => {
+    report.trainingBaseline.locks.find(item => item.key === 'scenarioIndex').sha256 = '0'.repeat(64)
+  }, /training lock binding/)
+})
+
 test('report anchors, child reference hashes, missing files and traversal paths fail closed', () => {
   assert.throws(() => verifyTrainingProbeEvidence({ trainingReportRef: { ...fixture.trainingReportRef, sha256: '0'.repeat(64) }, readEvidence: originalBundle.readEvidence }), /training report SHA/)
   reject(({ report }) => { report.evidence[0].sha256 = '0'.repeat(64) }, /training evidence SHA/)
