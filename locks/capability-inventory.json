@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-capability-inventory-v1",
-  "generatedAt": "2026-10-08T03:04:26.223Z",
+  "generatedAt": "2026-10-08T04:38:50.974Z",
   "noModelExecution": true,
   "plugins": [
     {
@@ -336,7 +336,7 @@
         "passed": true
       }
     ],
-    "inspectedProjectSourceCount": 48,
+    "inspectedProjectSourceCount": 55,
     "inspectedBackendSourceCount": 37,
     "projectPluginLoader": {
       "status": "not_present_in_inspected_wiring",

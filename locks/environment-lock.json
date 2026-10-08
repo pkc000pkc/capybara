@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-environment-lock-v1",
-  "generatedAt": "2026-10-08T03:04:26.223Z",
+  "generatedAt": "2026-10-08T04:38:50.974Z",
   "timeSource": "client-system-clock-new-Date-ISO-not-authoritative-dataset-time",
   "noModelExecution": true,
   "secretConfigRead": false,
@@ -1676,8 +1676,8 @@
     },
     {
       "path": "gaia2-runner-manifest.json",
-      "sha256": "a8d14857e3d561f779ebb74dcb41eb12a5893e423d229a5b1fa6593e0a38287f",
-      "bytes": 2381
+      "sha256": "ac431601e0b650ed663549f0319e2249ce4698de3c92473d1007afd0631bf3de",
+      "bytes": 2878
     },
     {
       "path": "package-lock.json",
@@ -1686,8 +1686,8 @@
     },
     {
       "path": "package.json",
-      "sha256": "e1c070ebcbf13ae20c8d485f9a3cf7451ca8ae29ed8d26ca36a0e7735970bae1",
-      "bytes": 1528
+      "sha256": "151862b4e4d5378a7ae77773f00ab5cf94f3cca711459caffb9a0f34deddd32b",
+      "bytes": 1735
     },
     {
       "path": "requirements-official.txt",
@@ -1708,6 +1708,11 @@
       "path": "scripts/download_dataset.mjs",
       "sha256": "2e62dd2cbc67099471ea5d48a91e342ca79e5e6b121b97852002168f02a0a0b5",
       "bytes": 2394
+    },
+    {
+      "path": "scripts/export_official_submission.mjs",
+      "sha256": "a5c39b9fbd0b91e88011176ac1bfea6451c436a1b54cd2946f0533d471090f88",
+      "bytes": 1846
     },
     {
       "path": "scripts/gaia2_model_retry.py",
@@ -1785,6 +1790,21 @@
       "bytes": 2756
     },
     {
+      "path": "scripts/phase2_acceptance.mjs",
+      "sha256": "492182639f645ca7bb3dfc6671ea1dca07faeb66a5d85e70afbc9f2a53789cf5",
+      "bytes": 7876
+    },
+    {
+      "path": "scripts/phase2_controlled_validation.mjs",
+      "sha256": "9f8f83bea68522de35bc0321a4b286aba81e3f762bc5075e2537483dc32a81df",
+      "bytes": 8725
+    },
+    {
+      "path": "scripts/phase2_official_adapter.py",
+      "sha256": "d96234ba056f632016cf3043011616576d79f7cee3d513ad5c50b64d57ef8847",
+      "bytes": 26227
+    },
+    {
       "path": "scripts/preflight_dataset.mjs",
       "sha256": "944cf0b3f3b7bba65d98879de7d2061dc0c3f34daeeb574eb7cb5b0404fc93e1",
       "bytes": 6340
@@ -1806,8 +1826,8 @@
     },
     {
       "path": "scripts/validate_official_submission.mjs",
-      "sha256": "6068bd6ac2135e20371f7354ae6f6b1332c42ceb1fb813537fbfb74565a71411",
-      "bytes": 4246
+      "sha256": "953b96e29c356797b2b88a8559dc3a13c004c15a87b5e40a1efad531ccb69ba9",
+      "bytes": 240
     },
     {
       "path": "src/a2a_channel.mjs",
@@ -1898,6 +1918,21 @@
       "path": "src/phase1_runner.mjs",
       "sha256": "bd55ae24f32be01e477e3213a501b8995291f796b9b974db173690b2db6f4d51",
       "bytes": 19085
+    },
+    {
+      "path": "src/phase2_audit.mjs",
+      "sha256": "f685a1b5c333d448b0088a5a7bc4ccd8b3cbc5ebd3ce87e31a98ec65fb97b55c",
+      "bytes": 33397
+    },
+    {
+      "path": "src/phase2_cli.mjs",
+      "sha256": "cf895599f77241d6cf9dc7a1834d432fad38c587fb6672640ac02e89233c54f1",
+      "bytes": 2801
+    },
+    {
+      "path": "src/phase2_export.mjs",
+      "sha256": "9f6aa232a09486a826a0102bfa56991cda10116befd0a1e84d2f2dd33e68d9d5",
+      "bytes": 18685
     },
     {
       "path": "src/replan_controller.mjs",
@@ -1995,6 +2030,21 @@
       "bytes": 14722
     },
     {
+      "path": "test/phase2_audit.test.mjs",
+      "sha256": "64c76f8110469513eb159c034e1365703025a1879e5e210b95fa3152c61bcf51",
+      "bytes": 24431
+    },
+    {
+      "path": "test/phase2_export.test.mjs",
+      "sha256": "f6153021f7ff35975f91663c747425a57ab3b9f9791f9a2622ffb0a4019f4114",
+      "bytes": 6620
+    },
+    {
+      "path": "test/phase2_official.test.mjs",
+      "sha256": "59a170446cc0370bb9d1b600a131e3e365632828c3aed87fc7ecd01a662036ae",
+      "bytes": 13993
+    },
+    {
       "path": "test/replan_controller.test.mjs",
       "sha256": "fd81f4a3583a45e7bd35169896cf56c9246989dcf3e58841ffcddef64e28fb61",
       "bytes": 1019
@@ -2015,7 +2065,7 @@
       "bytes": 1443
     }
   ],
-  "contentTreeSha256": "8f811549201bb0c412bf35d1f06b745283edec8a07de73a7e9046a27d3392f49",
+  "contentTreeSha256": "2ff25111eabefda546cf7c4bca97e452caed8e30fd31df9d83ebccf7e88cc195",
   "officialCodeInputs": [
     {
       "path": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.official-python/are/__init__.py",
@@ -4750,8 +4800,8 @@
     "project": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "6be28e24a4ddd8279e78633e80ca13673d2bb8d5",
-      "gitHead": "6be28e24a4ddd8279e78633e80ca13673d2bb8d5",
+      "head": "3c05429edfc676b2ed19fcd4a1826abd69dd0e54",
+      "gitHead": "3c05429edfc676b2ed19fcd4a1826abd69dd0e54",
       "dirty": false,
       "statusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "dirtyEntryCount": 0
