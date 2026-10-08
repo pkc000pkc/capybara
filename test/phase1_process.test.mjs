@@ -1,12 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { resolveRuntimeSettings } from '../src/phase1_config.mjs'
-import { isProcessIdentityAlive, readProcessIdentity, runChildProcess } from '../src/phase1_process.mjs'
+import { createProcessSupervisor, isProcessIdentityAlive, readProcessIdentity, runChildProcess } from '../src/phase1_process.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const temporary = () => mkdtemp(join(tmpdir(), 'gaia2-phase1-process-'))
@@ -16,6 +16,13 @@ async function until(check, ms = 10000) {
   const end = Date.now() + ms
   while (Date.now() < end) { if (await check()) return; await sleep(50) }
   throw new Error('condition did not become true')
+}
+
+async function cleanFixtureGeneration(identity) {
+  if (!identity?.verified || !await isProcessIdentityAlive(identity)) return
+  if (process.platform === 'win32') await execFileAsync('taskkill.exe', ['/PID', String(identity.pid), '/F'], { windowsHide: true, timeout: 10000 })
+  else process.kill(identity.pid, 'SIGTERM')
+  await until(async () => !await isProcessIdentityAlive(identity))
 }
 
 test('all four entries default to an 8000 minute ceiling and original scenarios', () => {
@@ -119,6 +126,131 @@ test('abort records interrupted and terminates a live child', { timeout: 45000 }
   assert.equal(result.interrupted, true)
   assert.equal(result.timedOut, false)
   assert.equal(await readProcessIdentity(result.pid), null)
+})
+
+test('abort during identity capture waits for the actual generation before termination', { timeout: 45000 }, async () => {
+  const controller = new AbortController()
+  let settled = false
+  const supervise = createProcessSupervisor({ identityReader: async pid => {
+    await sleep(400)
+    const identity = await readProcessIdentity(pid)
+    settled = true
+    return identity
+  } })
+  const result = await supervise({ command: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], outputDir: await temporary(), processTimeoutMs: 0, heartbeatIntervalMs: 100, signal: controller.signal, onSpawn: () => {
+    assert.equal(settled, false)
+    controller.abort()
+  } })
+  assert.equal(settled, true)
+  assert.equal(result.processIdentity.verified, true)
+  assert.equal(result.interrupted, true)
+  assert.equal(result.childExited, true)
+  assert.equal(result.childClosed, true)
+  assert.equal(result.manualInspectionRequired, false)
+  assert.equal(result.supervisionDetached, false)
+  assert.deepEqual(result.terminationErrors, [])
+  assert.equal(await isProcessIdentityAlive(result.processIdentity), false)
+})
+
+for (const [mode, identityReader] of [
+  ['rejected', async () => { throw new Error('injected identity lookup failure') }],
+  ['foreign PID', async () => readProcessIdentity(process.pid)],
+  ['never settles', () => new Promise(() => {})],
+]) {
+  test(`unknown child ownership (${mode}) saves unresolved terminal evidence without waiting forever`, { timeout: 45000 }, async () => {
+    const controller = new AbortController(), directory = await temporary()
+    const supervise = createProcessSupervisor({ identityReader })
+    let fixtureIdentity
+    try {
+      const result = await supervise({ command: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], outputDir: directory, processTimeoutMs: 0, heartbeatIntervalMs: 100, signal: controller.signal, onSpawn: async ({ pid }) => {
+        // Independent native capture is only for cleaning this exact fixture
+        // after asserting that the supervisor did NOT kill an unknown PID.
+        fixtureIdentity = await readProcessIdentity(pid)
+        assert.equal(fixtureIdentity.verified, true)
+        controller.abort()
+      } })
+      assert.equal(result.interrupted, true)
+      assert.equal(result.timedOut, false)
+      assert.equal(result.exitCode, null)
+      assert.equal(result.signal, null)
+      assert.equal(result.childExited, false)
+      assert.equal(result.childClosed, false)
+      assert.equal(result.processIdentity.pid, fixtureIdentity.pid)
+      assert.equal(result.processIdentity.verified, false)
+      assert.equal(result.manualInspectionRequired, true)
+      assert.equal(result.supervisionDetached, true)
+      assert.ok(result.terminationErrors.some(message => message.startsWith('unknown_child_alive:')))
+      assert.ok(result.elapsedMs < 18000, 'bounded identity capture and detached supervision must return')
+      assert.equal(await isProcessIdentityAlive(fixtureIdentity), true)
+      assert.deepEqual(await json(result.resultPath), result)
+      const heartbeat = await json(result.heartbeatPath)
+      assert.equal(heartbeat.status, 'termination_unresolved')
+      assert.equal(heartbeat.manualInspectionRequired, true)
+      assert.equal(heartbeat.childExited, false)
+      assert.equal(heartbeat.childClosed, false)
+    } finally { await cleanFixtureGeneration(fixtureIdentity) }
+  })
+}
+
+test('transient EPERM and EBUSY atomic rename errors use bounded retries without corrupting evidence', { timeout: 30000 }, async () => {
+  let failures = 0, attempts = 0
+  const supervise = createProcessSupervisor({ atomicRename: async (from, to) => {
+    if (to.endsWith('heartbeat.json')) {
+      attempts++
+      if (failures < 3) {
+        const error = new Error('injected transient sharing error')
+        error.code = failures++ === 1 ? 'EBUSY' : 'EPERM'
+        throw error
+      }
+    }
+    return rename(from, to)
+  } })
+  const result = await supervise({ command: process.execPath, args: ['-e', "console.log('atomic-healthy')"], outputDir: await temporary(), heartbeatIntervalMs: 100 })
+  assert.equal(failures, 3)
+  assert.ok(attempts >= 4)
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.heartbeatError, null)
+  assert.equal(result.manualInspectionRequired, false)
+  assert.equal((await json(result.heartbeatPath)).status, 'finished')
+  assert.deepEqual(await json(result.resultPath), result)
+})
+
+test('exhausted sharing retries retain a fail-closed heartbeat error and remove only their own temporary files', { timeout: 30000 }, async () => {
+  let attempts = 0
+  const directory = await temporary()
+  const supervise = createProcessSupervisor({ atomicRename: async (from, to) => {
+    if (to.endsWith('heartbeat.json')) {
+      attempts++
+      const error = new Error('injected permanent sharing error')
+      error.code = 'EPERM'
+      throw error
+    }
+    return rename(from, to)
+  } })
+  const result = await supervise({ command: process.execPath, args: ['-e', "console.log('atomic-rejected')"], outputDir: directory, heartbeatIntervalMs: 100 })
+  assert.equal(result.exitCode, 0)
+  assert.ok(attempts >= 5)
+  assert.match(result.heartbeatError, /injected permanent sharing error/)
+  assert.equal((await readdir(directory)).some(name => /^heartbeat\.json\..*\.tmp$/.test(name)), false)
+  assert.deepEqual(await json(result.resultPath), result)
+})
+
+test('non-sharing atomic rename errors are not retried or forgotten after later heartbeats succeed', { timeout: 30000 }, async () => {
+  let injected = 0
+  const supervise = createProcessSupervisor({ atomicRename: async (from, to) => {
+    if (to.endsWith('heartbeat.json') && !injected) {
+      injected++
+      const error = new Error('injected access denial')
+      error.code = 'EACCES'
+      throw error
+    }
+    return rename(from, to)
+  } })
+  const result = await supervise({ command: process.execPath, args: ['-e', "console.log('atomic-access-denied')"], outputDir: await temporary(), heartbeatIntervalMs: 100 })
+  assert.equal(injected, 1)
+  assert.match(result.heartbeatError, /injected access denial/)
+  assert.equal((await json(result.heartbeatPath)).status, 'finished')
+  assert.deepEqual(await json(result.resultPath), result)
 })
 
 test('spawn failure and pre-spawn abort both produce final evidence', { timeout: 30000 }, async () => {

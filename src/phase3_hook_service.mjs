@@ -40,8 +40,9 @@ export async function startRuntimeHookService({ root, manifest, task, session, s
     if (!valid) throw new Error('unsafe hook host ready receipt')
   } catch {
     controller.abort()
-    await processPromise
+    const cleanup = await processPromise
     signal?.removeEventListener('abort', abort)
+    if (!cleanup?.childExited || !cleanup?.childClosed || cleanup.manualInspectionRequired || cleanup.terminationErrors?.length) throw new Error('real plugin host startup failed; supervised cleanup unresolved; manual inspection required')
     throw new Error('real plugin host startup failed; supervised cleanup completed')
   }
   let closed = false

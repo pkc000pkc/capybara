@@ -49,14 +49,25 @@ class RedactingStream extends Transform {
   }
 }
 
-async function atomicJson(path, value, { immutable = false } = {}) {
+async function atomicJson(path, value, { immutable = false, atomicRename = rename } = {}) {
   const temporary = `${path}.${randomUUID()}.tmp`
   const file = await open(temporary, 'wx')
   try { await file.writeFile(`${JSON.stringify(value, null, 2)}\n`); await file.sync() }
   finally { await file.close() }
   try {
     if (immutable) { await link(temporary, path); await unlink(temporary) }
-    else await rename(temporary, path)
+    else {
+      // Antivirus/indexing can briefly hold a Windows destination open. Retry
+      // only transient sharing errors; never delete/overwrite the destination
+      // as a fallback, and preserve a final failure as technical evidence.
+      for (let attempt = 0; ; attempt++) {
+        try { await atomicRename(temporary, path); break }
+        catch (error) {
+          if (!['EPERM', 'EBUSY'].includes(error.code) || attempt >= 4) throw error
+          await delay(20 * 2 ** attempt)
+        }
+      }
+    }
   } catch (error) { await unlink(temporary).catch(() => {}); throw error }
 }
 
@@ -131,9 +142,31 @@ async function taskkill(pid, force) {
 
 function delay(milliseconds) { return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds)) }
 
+const IDENTITY_CAPTURE_TIMEOUT_MS = 11000
+
+async function boundedIdentity(reader, pid) {
+  let timer
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => reader(pid)),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('process identity capture timed out')), IDENTITY_CAPTURE_TIMEOUT_MS) }),
+    ])
+  } finally { clearTimeout(timer) }
+}
+
+// Programmatic dependency injection is for deterministic OS/IO fault tests,
+// never read from environment, manifests or child input. Kill-time identity
+// verification and PID-generation checks always use the native implementation.
+export function createProcessSupervisor({ identityReader = readProcessIdentity, atomicRename = rename } = {}) {
+  if (typeof identityReader !== 'function' || typeof atomicRename !== 'function') throw new Error('invalid supervision operations')
+  return options => superviseChildProcess(options, { identityReader, atomicRename })
+}
+
+export const runChildProcess = createProcessSupervisor()
+
 // Stdout and stderr are streamed to exclusive files, never accumulated in a
 // child-process maxBuffer. The heartbeat is liveness evidence, not task progress.
-export async function runChildProcess({ command, args = [], cwd, env = process.env, outputDir, processTimeoutMs = 480000000, heartbeatIntervalMs = 1000, signal, secrets = [], onSpawn }) {
+async function superviseChildProcess({ command, args = [], cwd, env = process.env, outputDir, processTimeoutMs = 480000000, heartbeatIntervalMs = 1000, signal, secrets = [], onSpawn }, { identityReader, atomicRename }) {
   if (typeof command !== 'string' || !command || !Array.isArray(args) || args.some((arg) => typeof arg !== 'string')) throw new Error('invalid child command or arguments')
   if (!outputDir) throw new Error('outputDir is required')
   if (!Number.isSafeInteger(processTimeoutMs) || processTimeoutMs < 0) throw new Error('processTimeoutMs must be a non-negative safe integer')
@@ -183,7 +216,10 @@ export async function runChildProcess({ command, args = [], cwd, env = process.e
   let exitedPipeTimer
   let processSignal = null
   let processIdentity = null
-  let waitForChild = null
+  let identityCapturePromise = Promise.resolve()
+  let waitForSupervision = null
+  let releaseSupervision = () => {}
+  let supervisionDetached = false
   const commandIdentity = createHash('sha256').update(JSON.stringify([redact(command, protectedValues), args.map((arg) => redact(arg, protectedValues))])).digest('hex')
   const heartbeat = (status, { force = false } = {}) => {
     // Slow disks must not build an unbounded queue of timer closures. Ordinary
@@ -195,17 +231,21 @@ export async function runChildProcess({ command, args = [], cwd, env = process.e
       // the terminal heartbeat (especially after deliberate orphan-pipe detach).
       try { await Promise.all([stdoutFile.sync(), stderrFile.sync()]) }
       catch (error) { heartbeatError = redact(`log fsync: ${error.message}`, protectedValues) }
-      await atomicJson(heartbeatPath, { schemaVersion: 'gaia2-process-heartbeat-v1', status, progress: 'unknown', pid: child?.pid ?? null, parentPid: process.pid, supervisorPid: process.pid, processIdentity, commandIdentity, childExited, childClosed, childExitedAt, manualInspectionRequired, startedAt, updatedAt: new Date().toISOString(), elapsedMs: Date.now() - start, lastOutputAt, stdoutBytes, stderrBytes, timedOut, interrupted })
+      await atomicJson(heartbeatPath, { schemaVersion: 'gaia2-process-heartbeat-v1', status, progress: 'unknown', pid: child?.pid ?? null, parentPid: process.pid, supervisorPid: process.pid, processIdentity, commandIdentity, childExited, childClosed, childExitedAt, manualInspectionRequired, supervisionDetached, startedAt, updatedAt: new Date().toISOString(), elapsedMs: Date.now() - start, lastOutputAt, stdoutBytes, stderrBytes, timedOut, interrupted }, { atomicRename })
     }).catch((error) => { heartbeatError = redact(error.message, protectedValues) }).finally(() => { heartbeatWriting = false })
     return heartbeatChain
   }
   const terminate = () => {
     if (terminationPromise || !child?.pid || childClosed) return terminationPromise ?? Promise.resolve()
     terminationPromise = (async () => {
+      // Abort/deadline can arrive before the initial CIM query finishes. Wait
+      // for that bounded capture before taking a generation-bound tree; an
+      // unverified fallback is never authority to signal a bare PID.
+      await identityCapturePromise
       await heartbeat('terminating', { force: true })
       if (process.platform === 'win32') {
         let tree = []
-        if (!childExited) {
+        if (!childExited && processIdentity?.verified) {
           try { tree = await windowsTree(child.pid) } catch (error) { terminationErrors.push(redact(`PID tree snapshot: ${error.message}`, protectedValues)) }
         }
         const root = tree.find((item) => item.ProcessId === child.pid)
@@ -229,20 +269,35 @@ export async function runChildProcess({ command, args = [], cwd, env = process.e
           for (const identity of owned) await killVerified(identity, true)
         }
       } else {
-        try { process.kill(-child.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') terminationErrors.push(error.message) }
+        // The detached group is rooted in the child generation. An unknown or
+        // exited root cannot authorize signalling a potentially recycled PID.
+        const killOwnedGroup = async (name) => {
+          if (childExited || !processIdentity?.verified) return
+          try { if (await isProcessIdentityAlive(processIdentity) && !childExited) process.kill(-child.pid, name) }
+          catch (error) { if (error.code !== 'ESRCH') terminationErrors.push(redact(error.message, protectedValues)) }
+        }
+        await killOwnedGroup('SIGTERM')
         await delay(300)
-        try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') terminationErrors.push(error.message) }
+        await killOwnedGroup('SIGKILL')
       }
       await delay(300)
       if (!childClosed) {
         manualInspectionRequired = true
         terminationErrors.push(childExited
           ? 'root exited but inherited pipes remain open; descendant ownership is unresolved; manual inspection required'
-          : 'verified process termination did not close child pipes; manual inspection required')
+          : !processIdentity?.verified
+            ? 'unknown_child_alive: process identity is unverified; no PID was signalled; manual inspection required'
+            : 'verified process termination did not close child pipes; manual inspection required')
         // A grandchild holding inherited pipes must not hold the supervisor
         // forever, including when the outer process timeout was disabled.
-        child.stdout.destroy()
-        child.stderr.destroy()
+        child.stdout?.destroy()
+        child.stderr?.destroy()
+        // Destroying pipes does not cause a still-live child's close event.
+        // Preserve the actual exit/close flags, release only our supervision
+        // wait, and leave durable unresolved evidence for recovery to reject.
+        supervisionDetached = true
+        child.unref()
+        releaseSupervision()
       }
     })()
     return terminationPromise
@@ -261,7 +316,12 @@ export async function runChildProcess({ command, args = [], cwd, env = process.e
     if (signal?.aborted) { interrupted = true; spawnError = 'aborted before spawn'; stdoutSink.end(); stderrSink.end(); await Promise.all([streamFinished(stdoutSink), streamFinished(stderrSink)]) }
     else {
       child = spawn(command, args, { cwd, env, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
-      waitForChild = new Promise((resolveFinished) => {
+      processIdentity = child.pid ? { platform: process.platform, pid: child.pid, verified: false } : null
+      identityCapturePromise = child.pid ? boundedIdentity(identityReader, child.pid).then(identity => {
+        if (identity && !childExited && identity.pid === child.pid && identity.platform === process.platform) processIdentity = identity
+      }).catch(error => { terminationErrors.push(redact(`process identity: ${error.message}`, protectedValues)) }) : Promise.resolve()
+      waitForSupervision = new Promise((resolveFinished) => {
+        releaseSupervision = resolveFinished
         child.once('error', (error) => { spawnError = redact(error.message, protectedValues) })
         child.once('exit', (code, name) => {
           childExited = true; childExitedAt = new Date().toISOString(); exitCode = code; exitSignal = name
@@ -276,28 +336,25 @@ export async function runChildProcess({ command, args = [], cwd, env = process.e
         pipeline(child.stderr, new RedactingStream(protectedValues, (bytes) => { stderrBytes += bytes; lastOutputAt = new Date().toISOString() }), stderrSink),
       ].map((promise) => promise.catch((error) => { loggingError = redact(error.message, protectedValues); void terminate() }))
       signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) abort()
       process.on('SIGINT', onSigint)
       process.on('SIGTERM', onSigterm)
       heartbeatTimer = setInterval(() => { void heartbeat(terminationPromise ? 'terminating' : 'running') }, heartbeatIntervalMs)
       armDeadline()
-      processIdentity = child.pid ? { platform: process.platform, pid: child.pid, verified: false } : null
-      await atomicJson(join(directory, 'process-reservation.json'), { schemaVersion: 'gaia2-process-reservation-v1', spawnState: 'spawned', supervisorPid: process.pid, parentPid: process.pid, pid: child.pid ?? null, startedAt, commandIdentity, processIdentity })
+      await atomicJson(join(directory, 'process-reservation.json'), { schemaVersion: 'gaia2-process-reservation-v1', spawnState: 'spawned', supervisorPid: process.pid, parentPid: process.pid, pid: child.pid ?? null, startedAt, commandIdentity, processIdentity }, { atomicRename })
       await heartbeat('running')
       if (onSpawn) await onSpawn({ pid: child.pid ?? null, parentPid: process.pid, startedAt, commandIdentity, processIdentity })
-      if (child.pid) {
-        try { const identity = await readProcessIdentity(child.pid); if (identity && !childExited) processIdentity = identity }
-        catch (error) { processIdentity = { platform: process.platform, pid: child.pid, verified: false }; terminationErrors.push(redact(`process identity: ${error.message}`, protectedValues)) }
-      }
+      await identityCapturePromise
       await heartbeat('running')
-      await waitForChild
+      await waitForSupervision
       await terminationPromise
       await Promise.all(output)
     }
     clearTimeout(deadlineTimer)
     clearInterval(heartbeatTimer)
-    await heartbeat('finished', { force: true })
+    await heartbeat(supervisionDetached && !childClosed ? 'termination_unresolved' : 'finished', { force: true })
     const finishedAt = new Date().toISOString()
-    const result = { schemaVersion: 'gaia2-process-result-v1', exitCode, signal: exitSignal, timedOut, interrupted, processSignal, spawnError, loggingError, heartbeatError, terminationErrors, childExited, childClosed, childExitedAt, manualInspectionRequired, pid: child?.pid ?? null, parentPid: process.pid, processIdentity, commandIdentity, startedAt, finishedAt, elapsedMs: Date.now() - start, stdoutPath, stderrPath, heartbeatPath, resultPath, stdoutBytes, stderrBytes, lastOutputAt }
+    const result = { schemaVersion: 'gaia2-process-result-v1', exitCode, signal: exitSignal, timedOut, interrupted, processSignal, spawnError, loggingError, heartbeatError, terminationErrors, childExited, childClosed, childExitedAt, manualInspectionRequired, supervisionDetached, pid: child?.pid ?? null, parentPid: process.pid, processIdentity, commandIdentity, startedAt, finishedAt, elapsedMs: Date.now() - start, stdoutPath, stderrPath, heartbeatPath, resultPath, stdoutBytes, stderrBytes, lastOutputAt }
     await atomicJson(resultPath, result, { immutable: true })
     return result
   } finally {
@@ -307,7 +364,7 @@ export async function runChildProcess({ command, args = [], cwd, env = process.e
     signal?.removeEventListener('abort', abort)
     process.removeListener('SIGINT', onSigint)
     process.removeListener('SIGTERM', onSigterm)
-    if (child?.pid && !childClosed) { await terminate(); await waitForChild }
+    if (child?.pid && !childClosed) { await terminate(); await waitForSupervision }
     await heartbeatChain
     stdoutSink.destroy()
     stderrSink.destroy()
