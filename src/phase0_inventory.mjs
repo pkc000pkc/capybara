@@ -241,20 +241,32 @@ function pythonMetadata(python, officialPythonPath) {
   return { ...result, executable: normalized(resolve(python)), executableSha256: sha256(readFileSync(python)), officialPythonPath: normalized(officialPythonPath), importPolicy: 'stdlib-metadata-only-isolated-no-site-no-ARE-import' }
 }
 
-/** The current bridge emits events; the Node sidecar consumes them after execution. */
+/** The current bridge emits events; the manifest adapter consumes them after its child exits. */
 export function inspectRuntimeBinding(root, backendRoot) {
-  const paths = [
-    'scripts/official_e2e_smoke.mjs', 'scripts/capybara_official_bridge.py',
-    'scripts/official_integrated_pilot.mjs', 'src/runtime_attempt.mjs', 'src/pass5_orchestrator.mjs',
-  ]
-  const sources = paths.map((path) => readFileSync(join(root, path), 'utf8'))
+  const paths = {
+    e2e: 'scripts/official_e2e_smoke.mjs', all: 'scripts/official_all_smoke.mjs',
+    batch: 'scripts/official_batch_smoke.mjs', pilot: 'scripts/official_integrated_pilot.mjs',
+    cli: 'src/phase1_cli.mjs', runner: 'src/phase1_runner.mjs',
+    adapter: 'src/phase1_official.mjs', process: 'src/phase1_process.mjs',
+    bridge: 'scripts/capybara_official_bridge.py',
+  }
+  const sources = Object.fromEntries(Object.entries(paths).map(([key, path]) => {
+    assert(existsSync(join(root, path)), `unknown runtime binding: missing ${path}`)
+    return [key, readFileSync(join(root, path), 'utf8')]
+  }))
   const checks = [
-    { path: paths[0], check: 'installs-python-bridge-before-ARE-main', passed: /from capybara_official_bridge import install; install\(\); from are\.simulation\.benchmark import main; main\(\)/.test(sources[0]) },
-    { path: paths[1], check: 'patches-ARE-ScenarioRunner-agent-method', passed: /scenario_runner\.ScenarioRunner\._run_with_agent\s*=\s*_native_run_with_agent/.test(sources[1]) },
-    { path: paths[1], check: 'writes-runtime-events-to-sidecar-file', passed: /GAIA2_RUNTIME_EVENT_FILE/.test(sources[1]) && /def _emit_runtime_event\(/.test(sources[1]) },
-    { path: paths[2], check: 'ingests-event-file-after-runOfficialOnce-returns', passed: /const execution = runOfficialOnce\([\s\S]*?ingestHookEventsForReport\(execution\.official\.eventPath\)/.test(sources[2]) && /attempt\.recordHookEvent\(/.test(sources[2]) },
-    { path: paths[3], check: 'records-sidecar-events-without-plugin-execution', passed: /recordHookEvent\(event = \{\}\)/.test(sources[3]) },
-    { path: paths[4], check: 'local-runtime-before-external-runner', passed: /await attempt\.run\([\s\S]*?await runAttempt\(/.test(sources[4]) },
+    ...['e2e', 'all', 'batch', 'pilot'].map(id => ({
+      path: paths[id], check: `dispatches-${id}-to-frozen-manifest-CLI`,
+      passed: /import\s*\{\s*runManifestCli\s*\}\s*from\s*['"]\.\.\/src\/phase1_cli\.mjs['"]/.test(sources[id])
+        && new RegExp(`await\\s+runManifestCli\\(\\{\\s*root,\\s*entrypoint:\\s*['"]${id}['"]\\s*\\}\\)`).test(sources[id]),
+    })),
+    { path: paths.cli, check: 'binds-frozen-batch-to-official-task-adapter', passed: /import\s*\{[^}]*executeOfficialTask[^}]*\}\s*from\s*['"]\.\/phase1_official\.mjs['"]/.test(sources.cli) && /import\s*\{[^}]*runFrozenBatch[^}]*\}\s*from\s*['"]\.\/phase1_runner\.mjs['"]/.test(sources.cli) && /await runFrozenBatch\(\{[^}]*executeTask:\s*executeOfficialTask/.test(sources.cli) },
+    { path: paths.runner, check: 'awaits-task-adapter-with-frozen-task-and-session', passed: /await executeTask\(\{\s*root,\s*manifest,\s*task,\s*session,\s*settings,\s*signal\s*\}\)/.test(sources.runner) },
+    { path: paths.adapter, check: 'installs-python-bridge-before-ARE-main', passed: /from capybara_official_bridge import install; install\(\); from are\.simulation\.benchmark import main; main\(\)/.test(sources.adapter) },
+    { path: paths.adapter, check: 'binds-official-child-to-streaming-supervisor', passed: /import\s*\{\s*runChildProcess\s*\}\s*from\s*['"]\.\/phase1_process\.mjs['"]/.test(sources.adapter) && /await runChildProcess\(\{/.test(sources.adapter) && /child\s*=\s*spawn\(/.test(sources.process) },
+    { path: paths.bridge, check: 'patches-ARE-ScenarioRunner-agent-method', passed: /scenario_runner\.ScenarioRunner\._run_with_agent\s*=\s*_native_run_with_agent/.test(sources.bridge) },
+    { path: paths.bridge, check: 'writes-runtime-events-to-sidecar-file', passed: /GAIA2_RUNTIME_EVENT_FILE/.test(sources.bridge) && /def _emit_runtime_event\(/.test(sources.bridge) },
+    { path: paths.adapter, check: 'reads-lifecycle-sidecar-only-after-official-child-returns', passed: /const processResult = await runChildProcess\([\s\S]*?if \(existsSync\(eventPath\)\) events = readFileSync\(eventPath/.test(sources.adapter) && /readNativeResult\(\{[^}]*events\s*\}\)/.test(sources.adapter) },
   ]
   for (const check of checks) assert(check.passed, `unknown runtime binding: ${check.path}: ${check.check}`)
   const projectSources = collectCodeInputs(root).filter((file) => /^(?:src|scripts)\/.*\.(?:mjs|js|ts|py)$/.test(file.path))
@@ -269,7 +281,7 @@ export function inspectRuntimeBinding(root, backendRoot) {
     checks, inspectedProjectSourceCount: projectSources.length, inspectedBackendSourceCount: backendSources.length,
     projectPluginLoader: { status: 'not_present_in_inspected_wiring', evidence: projectLoaderEvidence },
     backendPluginLoader: { status: 'not_present_in_inspected_wiring', evidence: backendLoaderEvidence },
-    limitations: ['Static inspection of known runner paths is not a runtime hook load test.', 'TypeScript plugin hooks do not intercept model/tool execution in the Python bridge.', 'RuntimeAttempt events are recorded after the official process returns.'],
+    limitations: ['Static inspection of known runner paths is not a runtime hook load test.', 'TypeScript plugin hooks do not intercept model/tool execution in the Python bridge.', 'Lifecycle sidecar events are consumed only after the official child returns; they do not invoke TypeScript plugin hooks.', 'Legacy Pass5Orchestrator and RuntimeAttempt are not the manifest entrypoints\' execution path.'],
   }
 }
 function backendCompatibility(backendRoot, plugins) {

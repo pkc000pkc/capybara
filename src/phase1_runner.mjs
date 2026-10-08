@@ -1,0 +1,242 @@
+import { randomUUID } from 'node:crypto'
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { assertPublicConfig, digest, fileDigest, readJson, within } from './phase0_run.mjs'
+import { classifyExecutionFailure } from './phase1_errors.mjs'
+import { isProcessIdentityAlive, readProcessIdentity } from './phase1_process.mjs'
+
+export function atomicJson(path, value) {
+  mkdirSync(dirname(path), { recursive: true })
+  const temporary = `${path}.${randomUUID()}.tmp`
+  const fd = openSync(temporary, 'wx', 0o600)
+  try { writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`); fsyncSync(fd) }
+  finally { closeSync(fd) }
+  renameSync(temporary, path)
+}
+
+function assert(condition, message) { if (!condition) throw new Error(`Phase 1: ${message}`) }
+function portable(path) { return path.replaceAll('\\', '/') }
+function safePath(root, path, parent = root) {
+  assert(typeof path === 'string' && !isAbsolute(path), 'execution paths must be relative')
+  const target = resolve(root, path)
+  assert(within(parent, target) && target !== resolve(parent), 'execution path escapes its run directory')
+  let current = target
+  while (within(root, current)) {
+    if (existsSync(current)) assert(!lstatSync(current).isSymbolicLink(), 'execution path contains a symbolic link')
+    if (current === resolve(root)) break
+    current = dirname(current)
+  }
+  return target
+}
+
+export function assertSupportedPlan(manifest) {
+  const { manifestHash, ...contents } = manifest
+  assert(manifestHash === digest(contents), 'manifest content hash differs')
+  assert(manifest.tasks?.length && manifest.tasks.every(task => task.phase === 'standard'), 'A2A/Noise execution is not connected until phase 5; entire run rejected before spawning')
+  assert(manifest.policy.maxCorrections === 0, 'real correction execution is not connected until phase 4')
+  assert(new Set(manifest.tasks.map(task => task.executionId)).size === manifest.tasks.length, 'duplicate execution identity')
+}
+
+async function acquireOwner(runRoot) {
+  const path = join(runRoot, 'run-owner.json')
+  const owner = { ownerId: randomUUID(), processIdentity: await readProcessIdentity(process.pid), startedAt: new Date().toISOString() }
+  const claim = () => { const fd = openSync(path, 'wx', 0o600); try { writeFileSync(fd, JSON.stringify(owner)); fsyncSync(fd) } finally { closeSync(fd) } }
+  try { claim() } catch (error) {
+    if (error.code !== 'EEXIST') throw error
+    assert(!await isProcessIdentityAlive(readJson(path).processIdentity), 'another live process owns this run')
+    const takeover = join(runRoot, '.owner-takeover')
+    // A takeover election prevents two recovery processes from renaming a new owner's lease.
+    mkdirSync(takeover)
+    try {
+      assert(!await isProcessIdentityAlive(readJson(path).processIdentity), 'run ownership changed during recovery')
+      renameSync(path, join(runRoot, `abandoned-owner-${randomUUID()}.json`))
+      claim()
+    } finally { rmdirSync(takeover) }
+  }
+  return () => { if (existsSync(path) && readJson(path).ownerId === owner.ownerId) unlinkSync(path) }
+}
+
+function initialState(manifest, runtimeHash) {
+  return { schemaVersion: 'gaia2-run-state-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash, updatedAt: new Date().toISOString(), tasks: manifest.tasks.map(task => ({ executionId: task.executionId, status: 'pending', sessions: [], resultPath: null, resultSha256: null, failure: null })) }
+}
+
+function validateStatePaths(root, manifest, state) {
+  const runRoot = resolve(root, manifest.runRoot)
+  state.tasks.forEach((record, index) => {
+    const task = manifest.tasks[index]
+    assert(Array.isArray(record.sessions), 'invalid session list')
+    assert(record.status !== 'pending' || record.sessions.length === 0, 'pending task has used sessions')
+    assert(record.status === 'pending' || record.sessions.length > 0, 'used task has no session')
+    const seen = new Set()
+    record.sessions.forEach((session, ordinal) => {
+      assert(typeof session.sessionId === 'string' && /^\d{4}-[0-9a-f-]{12}$/.test(session.sessionId) && !seen.has(session.sessionId), 'invalid or duplicate session identity')
+      seen.add(session.sessionId)
+      assert(session.sessionOrdinal === ordinal + 1 && session.parentSessionId === (record.sessions[ordinal - 1]?.sessionId ?? null), 'session lineage changed')
+      for (const key of ['outputDir', 'fixtureDir', 'workspaceDir']) {
+        assert(portable(session[key]) === portable(join(task[key], 'sessions', session.sessionId)), 'session paths differ from frozen task')
+        safePath(root, session[key], runRoot)
+      }
+    })
+    if (record.resultPath) assert(portable(record.resultPath) === portable(join(record.sessions.at(-1).workspaceDir, 'task-result.json')), 'result path differs from current session')
+  })
+}
+
+function validateResult(root, manifest, task, session, record, runtimeHash) {
+  const path = safePath(root, record.resultPath, resolve(root, manifest.runRoot))
+  assert(fileDigest(path) === record.resultSha256, 'completed result content changed')
+  const result = readJson(path)
+  assert(result.manifestHash === manifest.manifestHash && result.runtimeHash === runtimeHash && result.runId === manifest.runId && result.executionId === task.executionId && result.sessionId === session.sessionId, 'result belongs to another execution')
+  assert(result.scenarioId === task.scenarioId && result.runNumber === task.runNumber && result.phase === task.phase && result.config === task.config, 'result task metadata differs')
+  assert(result.evaluationComplete === true && typeof result.businessPassed === 'boolean', 'completed task has no valid judgment')
+  assert(result.businessPassed ? result.failure === null : result.failure?.category === 'business_failure' && result.failure.retryable === false, 'technical failure cannot count as completed')
+  assert(Array.isArray(result.artifacts), 'result artifact list is invalid')
+  for (const file of result.artifacts ?? []) {
+    assert(typeof file?.path === 'string' && /^[0-9a-f]{64}$/.test(file.sha256 ?? ''), 'invalid result artifact reference')
+    const artifact = safePath(root, file.path, resolve(root, session.outputDir))
+    assert(fileDigest(artifact) === file.sha256, 'completed native artifact changed or disappeared')
+  }
+  return result
+}
+
+async function resolveOrphan(root, session) {
+  const output = resolve(root, session.outputDir)
+  const processResult = join(output, 'process-result.json')
+  if (existsSync(processResult)) {
+    const final = readJson(processResult)
+    assert(final.schemaVersion === 'gaia2-process-result-v1' && Number.isFinite(Date.parse(final.finishedAt)) && (Number.isInteger(final.exitCode) || final.spawnError || final.signal), 'invalid final child result')
+    assert(!final.terminationErrors?.length && final.manualInspectionRequired !== true, 'child termination is unresolved; manual inspection required before restart')
+    if (final.processIdentity?.verified) assert(!await isProcessIdentityAlive(final.processIdentity), 'final child result still belongs to a live process')
+    else if (final.processIdentity) assert(final.childExited === true && final.childClosed === true, 'unverified final child has no observed exit/close proof; manual inspection required')
+    return
+  }
+  const heartbeat = join(output, 'heartbeat.json')
+  if (existsSync(heartbeat)) {
+    const snapshot = readJson(heartbeat)
+    assert(snapshot.processIdentity, 'interrupted session has unknown child ownership; manual inspection required')
+    assert(!await isProcessIdentityAlive(snapshot.processIdentity), 'interrupted session still has a live child; duplicate restart refused')
+    return
+  }
+  assert(!existsSync(output) || readdirSync(output).length === 0, 'used session lacks child ownership metadata; manual inspection required')
+}
+
+function createSession(root, manifest, task, record) {
+  const sessionOrdinal = record.sessions.length + 1
+  const sessionId = `${String(sessionOrdinal).padStart(4, '0')}-${randomUUID().slice(0, 12)}`
+  const paths = Object.fromEntries(['outputDir', 'fixtureDir', 'workspaceDir'].map(key => [key, portable(join(task[key], 'sessions', sessionId))]))
+  for (const path of Object.values(paths)) { const absolute = safePath(root, path, resolve(root, manifest.runRoot)); mkdirSync(dirname(absolute), { recursive: true }); mkdirSync(absolute) }
+  return { sessionId, sessionOrdinal, parentSessionId: record.sessions.at(-1)?.sessionId ?? null, recoveryKind: sessionOrdinal > 1 ? 'clean_environment_restart_not_ARE_checkpoint' : 'initial_execution', ...paths, startedAt: new Date().toISOString(), endedAt: null }
+}
+
+async function delayUntil(deadline, signal) {
+  const delay = Math.max(0, Date.parse(deadline) - Date.now())
+  if (!delay || signal?.aborted) return Promise.resolve()
+  await new Promise(resolveDelay => {
+    const finish = () => { clearTimeout(timer); signal?.removeEventListener('abort', finish); resolveDelay() }
+    const timer = setTimeout(finish, Math.min(delay, 2147483647))
+    signal?.addEventListener('abort', finish, { once: true })
+  })
+  if (!signal?.aborted && Date.parse(deadline) > Date.now()) await delayUntil(deadline, signal)
+}
+
+/** Manifest-driven sequential execution. A restart is a new disposable ARE environment, never a tool replay. */
+export async function runFrozenBatch({ root, manifest, settings, executeTask, signal, resume = false, retryInfrastructure = false, maxTasks = Infinity } = {}) {
+  root = resolve(root)
+  assertPublicConfig(settings)
+  assertSupportedPlan(manifest)
+  assert(settings.concurrency === 1 && settings.minimal === false, 'frozen original tasks require concurrency 1 and minimal=false')
+  assert(maxTasks === Infinity || Number.isInteger(maxTasks) && maxTasks > 0, 'maxTasks must be a positive integer')
+  const runRoot = safePath(root, manifest.runRoot, join(root, 'runs'))
+  mkdirSync(runRoot, { recursive: true })
+  const statePath = safePath(root, manifest.stateFile, runRoot)
+  const runtimePath = join(runRoot, 'runtime-settings.json')
+  const runtimeHash = digest(settings)
+  const release = await acquireOwner(runRoot)
+  const saveState = state => { state.updatedAt = new Date().toISOString(); atomicJson(statePath, state) }
+  let state, waitingForRetryAt = null, batchHeartbeatError = false, terminalStatus = null, terminalReason = null, terminalReportPath = null, finishedAt = null
+  const heartbeatPath = join(runRoot, 'batch-heartbeat.json')
+  const heartbeat = () => {
+    try { atomicJson(heartbeatPath, { schemaVersion: 'gaia2-batch-heartbeat-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, supervisorPid: process.pid, status: terminalStatus ?? (signal?.aborted ? 'interrupted' : waitingForRetryAt ? 'waiting_for_retry' : state?.tasks.some(task => task.status === 'running') ? 'running' : 'supervising'), progress: 'unknown', nextRetryAt: terminalStatus ? null : waitingForRetryAt, terminal: terminalStatus !== null, terminationReason: terminalReason, reportPath: terminalReportPath, finishedAt, updatedAt: new Date().toISOString() }) }
+    catch { batchHeartbeatError = true }
+  }
+  heartbeat()
+  const timer = setInterval(heartbeat, settings.heartbeatIntervalMs)
+  try {
+    if (existsSync(runtimePath)) assert(digest(readJson(runtimePath)) === runtimeHash, 'effective runtime/retry settings changed; use a new run_id')
+    else {
+      const fd = openSync(runtimePath, 'wx', 0o600)
+      try { writeFileSync(fd, `${JSON.stringify(settings, null, 2)}\n`); fsyncSync(fd) } finally { closeSync(fd) }
+    }
+    if (existsSync(statePath)) {
+      assert(resume, 'run-state already exists; specify resume to continue')
+      state = readJson(statePath)
+      assert(state.schemaVersion === 'gaia2-run-state-v1' && state.runId === manifest.runId && state.manifestHash === manifest.manifestHash && state.runtimeHash === runtimeHash, 'state is bound to another manifest/runtime')
+      assert(digest(state.tasks.map(task => task.executionId)) === digest(manifest.tasks.map(task => task.executionId)), 'state task set changed')
+    } else { state = initialState(manifest, runtimeHash); saveState(state) }
+    validateStatePaths(root, manifest, state)
+    // Reconcile the report-before-state commit window. A valid completed report is never rerun.
+    for (let index = 0; index < state.tasks.length; index++) {
+      const record = state.tasks[index], task = manifest.tasks[index], session = record.sessions.at(-1)
+      assert(['pending', 'running', 'completed', 'retry_pending'].includes(record.status), 'invalid task state')
+      if (record.status === 'completed') { validateResult(root, manifest, task, session, record, runtimeHash); continue }
+      if (record.status !== 'running') continue
+      assert(session, 'running task has no session')
+      await resolveOrphan(root, session)
+      const resultPath = portable(join(session.workspaceDir, 'task-result.json'))
+      if (existsSync(resolve(root, resultPath))) {
+        const result = readJson(resolve(root, resultPath))
+        if (result.evaluationComplete === true) {
+          record.resultPath = resultPath; record.resultSha256 = fileDigest(resolve(root, resultPath))
+          validateResult(root, manifest, task, session, record, runtimeHash)
+          record.status = 'completed'; session.endedAt = result.finishedAt
+          continue
+        }
+      }
+      record.status = 'retry_pending'; record.failure = { category: 'interrupted', retryable: true, nextRetryAt: null }
+      session.endedAt = new Date().toISOString(); session.terminationReason = 'orphaned_parent'
+    }
+    saveState(state)
+    let executed = 0
+    for (let index = 0; index < state.tasks.length; index++) {
+      const record = state.tasks[index], task = manifest.tasks[index]
+      if (signal?.aborted || executed >= maxTasks) break
+      if (record.status === 'completed') continue
+      if (record.status === 'retry_pending') {
+        if (!record.failure?.retryable || record.failure.category !== 'interrupted' && !retryInfrastructure) break
+        await resolveOrphan(root, record.sessions.at(-1))
+        if (record.failure.nextRetryAt) { waitingForRetryAt = record.failure.nextRetryAt; await delayUntil(record.failure.nextRetryAt, signal); waitingForRetryAt = null }
+        if (signal?.aborted) break
+      }
+      const session = createSession(root, manifest, task, record)
+      record.sessions.push(session); record.status = 'running'; record.failure = null; record.resultPath = null; record.resultSha256 = null; saveState(state)
+      let execution
+      try { execution = await executeTask({ root, manifest, task, session, settings, signal }) }
+      catch (error) { execution = { processResult: { exitCode: null, spawnError: { code: 'ADAPTER_FAILURE' } }, report: { hasException: true, exceptionType: /^[A-Za-z0-9_]+$/.test(error.name ?? '') ? error.name : 'Error' }, events: [] } }
+      const processResult = execution?.processResult ?? { exitCode: null }
+      const report = execution?.report ?? {}
+      const healthy = processResult.exitCode === 0 && !processResult.signal && !processResult.timedOut && !processResult.interrupted && !processResult.spawnError && !processResult.loggingError && !processResult.heartbeatError && !(processResult.terminationErrors?.length)
+      const evaluated = healthy && report.evaluationComplete === true && report.hasException !== true && !report.exceptionType && report.scenarioId === task.scenarioId && report.runNumber === task.runNumber && typeof report.businessPassed === 'boolean'
+      const failure = evaluated ? (report.businessPassed ? null : { category: 'business_failure', retryable: false }) : classifyExecutionFailure({ processResult, report: { ...report, evaluationComplete: false }, events: execution?.events ?? [] })
+      const resultPath = portable(join(session.workspaceDir, 'task-result.json'))
+      const result = { schemaVersion: 'gaia2-task-result-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash, executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, runNumber: task.runNumber, phase: task.phase, config: task.config, evaluationComplete: evaluated, businessPassed: evaluated ? report.businessPassed : null, score: evaluated ? (report.businessPassed ? 1 : 0) : null, failure, process: { exitCode: processResult.exitCode ?? null, signal: processResult.signal ?? null, timedOut: processResult.timedOut === true, interrupted: processResult.interrupted === true, elapsedMs: processResult.elapsedMs ?? null }, artifacts: execution?.artifacts ?? [], finishedAt: new Date().toISOString() }
+      atomicJson(resolve(root, resultPath), result)
+      record.resultPath = resultPath; record.resultSha256 = fileDigest(resolve(root, resultPath))
+      if (evaluated) validateResult(root, manifest, task, session, record, runtimeHash)
+      record.status = evaluated ? 'completed' : 'retry_pending'; record.failure = failure
+      session.endedAt = result.finishedAt; session.terminationReason = evaluated ? 'judged' : failure.category
+      saveState(state)
+      executed++
+      if (!evaluated) break // Never loop whole scenarios as an unbounded hidden retry.
+    }
+    const counts = Object.fromEntries(['pending', 'running', 'completed', 'retry_pending'].map(status => [status, state.tasks.filter(task => task.status === status).length]))
+    const results = state.tasks.filter(task => task.status === 'completed').map((record, index) => readJson(resolve(root, record.resultPath)))
+    const report = { schemaVersion: 'gaia2-batch-progress-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash, status: batchHeartbeatError ? 'infrastructure_error' : counts.completed === manifest.tasks.length ? 'evaluation_complete' : signal?.aborted ? 'interrupted' : 'incomplete', counts, plannedInitialExecutions: manifest.tasks.length, evaluatedInitialExecutions: results.length, businessSuccesses: results.filter(result => result.businessPassed).length, businessFailures: results.filter(result => !result.businessPassed).length, totalSessions: state.tasks.reduce((sum, task) => sum + task.sessions.length, 0), executedThisInvocation: executed, batchHeartbeatError, officialSubmissionReady: false, realHooksReady: false, generatedAt: new Date().toISOString() }
+    terminalStatus = report.status; finishedAt = report.generatedAt; terminalReportPath = portable(relative(root, join(runRoot, 'batch-report.json')))
+    heartbeat()
+    if (batchHeartbeatError) { report.status = 'infrastructure_error'; report.batchHeartbeatError = true; terminalStatus = report.status }
+    atomicJson(join(runRoot, 'batch-report.json'), report)
+    return report
+  } catch (error) {
+    terminalStatus = 'infrastructure_error'; terminalReason = 'validation_or_persistence_error'; terminalReportPath = null; finishedAt = new Date().toISOString(); heartbeat()
+    throw error
+  } finally { clearInterval(timer); release() }
+}

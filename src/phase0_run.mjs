@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { resolveRuntimeSettings } from './phase1_config.mjs'
 
 export function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical)
@@ -37,8 +38,8 @@ export function assertPublicConfig(value, path = '$') {
   }
 }
 
-// Capture the defaults present in the existing entrypoints. These snapshots
-// record current behavior; changing wrapper timeouts belongs to phase 1.
+// Capture the shared Stage 1 defaults used by the known manifest wrappers.
+// Static shape checks make a new entrypoint implementation require re-audit.
 export function inspectEntrypoints(root, env = process.env) {
   const paths = {
     e2e: 'scripts/official_e2e_smoke.mjs',
@@ -46,34 +47,27 @@ export function inspectEntrypoints(root, env = process.env) {
     pilot: 'scripts/official_integrated_pilot.mjs',
     all: 'scripts/official_all_smoke.mjs',
   }
-  const text = Object.fromEntries(Object.entries(paths).map(([key, path]) => [key, readFileSync(join(root, path), 'utf8')]))
-  function literalDefault(key, variable, fallback) {
-    const match = text[key].match(new RegExp(`process\\.env\\.${variable}\\s*\\|\\|\\s*(\\d+)`))
-    if (!match || Number(match[1]) !== fallback) throw new Error(`unrecognized default for ${variable}; audit ${paths[key]} again`)
-    return fallback
+  for (const [id, path] of Object.entries(paths)) {
+    const text = readFileSync(join(root, path), 'utf8')
+    if (!/import\s*\{\s*runManifestCli\s*\}\s*from\s*['"]\.\.\/src\/phase1_cli\.mjs['"]/.test(text)
+      || !new RegExp(`await\\s+runManifestCli\\(\\{\\s*root,\\s*entrypoint:\\s*['"]${id}['"]\\s*\\}\\)`).test(text)) throw new Error(`unrecognized manifest wrapper ${path}; audit entrypoint again`)
   }
-  literalDefault('pilot', 'GAIA2_PILOT_PROCESS_TIMEOUT_MS', 480000)
-  literalDefault('all', 'GAIA2_E2E_ALL_TIMEOUT_MS', 900000)
-  if (!/GAIA2_E2E_PROCESS_TIMEOUT_MS\s*\|\|\s*480000\s*\*\s*1000/.test(text.e2e)) throw new Error('unrecognized e2e process timeout default')
-  if (!/GAIA2_E2E_TIMEOUT_SECONDS\s*\|\|\s*'480000'/.test(text.e2e)) throw new Error('unrecognized e2e scenario timeout default')
-  if (!/GAIA2_BATCH_TIMEOUT_MINUTES\s*\?\?\s*8000/.test(text.batch)) throw new Error('unrecognized batch timeout default')
-  const scenarioTimeoutSeconds = envNumber(env, 'GAIA2_E2E_TIMEOUT_SECONDS', 480000)
-  const modelRequestTimeoutSeconds = envNumber(env, 'GAIA2_E2E_LLM_TIMEOUT_SECONDS', 60)
-  const e2eProcess = envNumber(env, 'GAIA2_E2E_PROCESS_TIMEOUT_MS', 480000000, { zero: true })
-  const batchMinutes = envNumber(env, 'GAIA2_BATCH_TIMEOUT_MINUTES', 8000, { zero: true })
-  const batchProcess = envNumber(env, 'GAIA2_BATCH_PROCESS_TIMEOUT_MS', batchMinutes * 60000, { zero: true })
-  const batchScenario = envNumber(env, 'GAIA2_E2E_TIMEOUT_SECONDS', batchMinutes > 0 ? batchMinutes * 60 : 480000)
-  const maxActions = env.GAIA2_E2E_MAX_ACTIONS === undefined ? null : envNumber(env, 'GAIA2_E2E_MAX_ACTIONS', 24)
-  const minimal = env.GAIA2_E2E_MINIMAL !== '0'
-  const base = { scenarioTimeoutSeconds, modelRequestTimeoutSeconds, concurrency: 1 }
-  const result = {
-    e2e: { ...base, processTimeoutMs: e2eProcess, maxActions: maxActions ?? (minimal ? 1 : 24), minimal, maxCorrections: 0 },
-    batch: { ...base, scenarioTimeoutSeconds: batchScenario, processTimeoutMs: batchProcess, maxActions: maxActions ?? 20, minimal: false, maxCorrections: 0 },
-    pilot: { ...base, processTimeoutMs: envNumber(env, 'GAIA2_PILOT_PROCESS_TIMEOUT_MS', 480000), maxActions: maxActions ?? 32, minimal: false, maxCorrections: envNumber(env, 'GAIA2_PILOT_MAX_CORRECTIONS', 0, { zero: true }) },
-    all: { ...base, processTimeoutMs: envNumber(env, 'GAIA2_E2E_ALL_TIMEOUT_MS', 900000), childProcessTimeoutMs: e2eProcess, maxActions: maxActions ?? (minimal ? 1 : 24), minimal, maxCorrections: 0 },
+  const cli = readFileSync(join(root, 'src/phase1_cli.mjs'), 'utf8')
+  if (!/import\s*\{\s*resolveRuntimeSettings\s*\}\s*from\s*['"]\.\/phase1_config\.mjs['"]/.test(cli)
+    || !/resolveRuntimeSettings\(\{\s*protocol:\s*\{\s*requestedRuntime:\s*manifest\.requestedRuntime\s*\},\s*entrypoint,\s*env\s*\}\)/.test(cli)) throw new Error('unrecognized shared runtime settings binding; audit phase1_cli again')
+  const names = [
+    'GAIA2_PROCESS_TIMEOUT_MS', 'GAIA2_PROCESS_TIMEOUT_MINUTES',
+    'GAIA2_SCENARIO_TIMEOUT_SECONDS', 'GAIA2_MODEL_REQUEST_TIMEOUT_SECONDS',
+    'GAIA2_CONCURRENCY', 'GAIA2_MINIMAL', 'GAIA2_MAX_ACTIONS', 'GAIA2_HEARTBEAT_INTERVAL_MS',
+    'GAIA2_E2E_TIMEOUT_SECONDS', 'GAIA2_E2E_LLM_TIMEOUT_SECONDS', 'GAIA2_E2E_PROCESS_TIMEOUT_MS',
+    'GAIA2_BATCH_TIMEOUT_MINUTES', 'GAIA2_BATCH_PROCESS_TIMEOUT_MINUTES', 'GAIA2_BATCH_PROCESS_TIMEOUT_MS',
+    'GAIA2_PILOT_PROCESS_TIMEOUT_MS', 'GAIA2_E2E_ALL_TIMEOUT_MS', 'GAIA2_E2E_MAX_ACTIONS', 'GAIA2_E2E_MINIMAL',
+    'GAIA2_MODEL_MAX_ATTEMPTS', 'GAIA2_MODEL_BACKOFF_BASE_SECONDS', 'GAIA2_MODEL_BACKOFF_MAX_SECONDS', 'GAIA2_MODEL_MAX_RETRY_WAIT_SECONDS',
+  ]
+  return {
+    entries: Object.entries(paths).map(([id, path]) => ({ id, path, sha256: fileDigest(join(root, path)), settings: { ...resolveRuntimeSettings({ protocol: {}, entrypoint: id, env }), maxCorrections: 0 } })),
+    environmentOverrides: Object.fromEntries(names.filter((name) => env[name] !== undefined).map((name) => [name, env[name]])),
   }
-  const names = ['GAIA2_E2E_TIMEOUT_SECONDS', 'GAIA2_E2E_LLM_TIMEOUT_SECONDS', 'GAIA2_E2E_PROCESS_TIMEOUT_MS', 'GAIA2_BATCH_TIMEOUT_MINUTES', 'GAIA2_BATCH_PROCESS_TIMEOUT_MS', 'GAIA2_PILOT_PROCESS_TIMEOUT_MS', 'GAIA2_E2E_ALL_TIMEOUT_MS', 'GAIA2_E2E_MAX_ACTIONS', 'GAIA2_E2E_MINIMAL', 'GAIA2_PILOT_MAX_CORRECTIONS']
-  return { entries: Object.entries(result).map(([id, settings]) => ({ id, path: paths[id], sha256: fileDigest(join(root, paths[id])), settings })), environmentOverrides: Object.fromEntries(names.filter((name) => env[name] !== undefined).map((name) => [name, env[name]])) }
 }
 
 export function validateProtocol(protocol) {
@@ -161,7 +155,7 @@ export function buildRunManifest({ root, protocol, index, lockRefs, entrypoints,
     rootSeed, requestedRuntime: protocol.requestedRuntime, entrypoints, lockRefs,
     selection: { perCapability: limit, miniLimit: miniLimit ?? null, expectedInitialExecutions: tasks.length, fullOfficialCoverage: fullCoverage },
     runRoot, tasks, stateFile: join(runRoot, 'run-state.json'),
-    executionBinding: 'planning_only_pending_phase1_and_phase3',
+    executionBinding: 'manifest_driven_standard_only_real_hooks_pending_phase3',
   }
 }
 

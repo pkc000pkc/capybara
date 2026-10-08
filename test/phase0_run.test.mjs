@@ -91,15 +91,45 @@ test('phase0 manifest cannot claim submission readiness or carry credentials', (
   assert.throws(() => validateProtocol(incompleteProtocol), /invalid phases/)
 })
 
-test('phase0 captures actual short pilot/all timeouts separately from long e2e/batch', () => {
+test('phase0 captures shared Stage 1 original-task defaults across all four wrappers', () => {
   const snapshots = inspectEntrypoints(root, {}).entries
-  assert.equal(snapshots.find((entry) => entry.id === 'pilot').settings.processTimeoutMs, 480000)
-  assert.equal(snapshots.find((entry) => entry.id === 'all').settings.processTimeoutMs, 900000)
-  assert.equal(snapshots.find((entry) => entry.id === 'batch').settings.processTimeoutMs, 480000000)
-  assert.equal(snapshots.find((entry) => entry.id === 'e2e').settings.maxActions, 1)
-  assert.equal(inspectEntrypoints(root, { GAIA2_E2E_MINIMAL: '0' }).entries.find((entry) => entry.id === 'e2e').settings.maxActions, 24)
+  for (const entry of snapshots) {
+    assert.equal(entry.settings.processTimeoutMs, 480000000)
+    assert.equal(entry.settings.scenarioTimeoutSeconds, 480000)
+    assert.equal(entry.settings.modelRequestTimeoutSeconds, 60)
+    assert.equal(entry.settings.minimal, false)
+    assert.equal(entry.settings.maxCorrections, 0)
+    assert.equal(entry.settings.concurrency, 1)
+    assert.equal(entry.sha256.length, 64)
+  }
+  assert.deepEqual(Object.fromEntries(snapshots.map(entry => [entry.id, entry.settings.maxActions])), { e2e: 24, batch: 20, pilot: 32, all: 24 })
+  assert.equal(inspectEntrypoints(root, { GAIA2_E2E_MINIMAL: '1' }).entries.find((entry) => entry.id === 'e2e').settings.maxActions, 1)
   assert.equal(inspectEntrypoints(root, { GAIA2_BATCH_TIMEOUT_MINUTES: '0' }).entries.find((entry) => entry.id === 'batch').settings.processTimeoutMs, 0)
-  assert.throws(() => inspectEntrypoints(root, { GAIA2_BATCH_TIMEOUT_MINUTES: 'NaN' }), /non-negative/)
+  assert.throws(() => inspectEntrypoints(root, { GAIA2_BATCH_TIMEOUT_MINUTES: 'NaN' }), /strict numeric/)
+})
+
+test('phase0 snapshots canonical and legacy overrides without conflating timeout layers', () => {
+  const env = {
+    GAIA2_PROCESS_TIMEOUT_MS: '0', GAIA2_PILOT_PROCESS_TIMEOUT_MS: '100',
+    GAIA2_SCENARIO_TIMEOUT_SECONDS: '123', GAIA2_E2E_TIMEOUT_SECONDS: '99',
+    GAIA2_MODEL_REQUEST_TIMEOUT_SECONDS: '30', GAIA2_E2E_LLM_TIMEOUT_SECONDS: '10',
+    GAIA2_HEARTBEAT_INTERVAL_MS: '500', GAIA2_MAX_ACTIONS: '17',
+    GAIA2_MODEL_MAX_ATTEMPTS: '6', GAIA2_MODEL_BACKOFF_BASE_SECONDS: '2',
+    GAIA2_MODEL_BACKOFF_MAX_SECONDS: '120', GAIA2_MODEL_MAX_RETRY_WAIT_SECONDS: '3600',
+    UNRELATED_SECRET: 'do-not-capture',
+  }
+  const snapshot = inspectEntrypoints(root, env)
+  const { UNRELATED_SECRET, ...expectedOverrides } = env
+  assert.deepEqual(snapshot.environmentOverrides, expectedOverrides)
+  for (const entry of snapshot.entries) {
+    assert.equal(entry.settings.processTimeoutMs, 0)
+    assert.equal(entry.settings.scenarioTimeoutSeconds, 123)
+    assert.equal(entry.settings.modelRequestTimeoutSeconds, 30)
+    assert.equal(entry.settings.maxActions, 17)
+    assert.equal(entry.settings.heartbeatIntervalMs, 500)
+  }
+  const unlimited = inspectEntrypoints(root, { GAIA2_PROCESS_TIMEOUT_MS: '0' })
+  assert.ok(unlimited.entries.every(entry => entry.settings.scenarioTimeoutSeconds === 480000))
 })
 
 test('phase0 saves immutable plans and validates the schema contract', () => {

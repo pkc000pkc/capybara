@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { collectCodeInputs, freezeInventory, freezePluginSnapshot, hashTree, inspectPluginResources, inspectRuntimeBinding } from '../src/phase0_inventory.mjs'
 
@@ -192,5 +193,28 @@ test('unknown actual runner binding is not silently labeled loaded or sidecar-on
   write(root, 'scripts/official_integrated_pilot.mjs', 'unknown integration')
   write(root, 'src/runtime_attempt.mjs', 'unknown runtime')
   write(root, 'src/pass5_orchestrator.mjs', 'unknown orchestrator')
+  assert.throws(() => inspectRuntimeBinding(root, backend), /unknown runtime binding/)
+})
+
+test('Stage 1 manifest wiring remains sidecar-only and excludes legacy orchestrators', (t) => {
+  const root = fixture(t)
+  const project = dirname(dirname(fileURLToPath(import.meta.url)))
+  const backend = join(root, 'backend')
+  write(backend, 'src/main.ts', 'export {}')
+  const paths = [
+    'scripts/official_e2e_smoke.mjs', 'scripts/official_all_smoke.mjs',
+    'scripts/official_batch_smoke.mjs', 'scripts/official_integrated_pilot.mjs',
+    'scripts/capybara_official_bridge.py', 'src/phase1_cli.mjs',
+    'src/phase1_runner.mjs', 'src/phase1_official.mjs', 'src/phase1_process.mjs',
+  ]
+  for (const path of paths) write(root, path, readFileSync(join(project, path), 'utf8'))
+  const binding = inspectRuntimeBinding(root, backend)
+  assert.equal(binding.pluginLoadStatus, 'not_loaded')
+  assert.equal(binding.runtimeBinding, 'sidecar_only')
+  assert.equal(binding.effectiveHookDecision, false)
+  assert.equal(binding.checks.length, 11)
+  assert.ok(binding.checks.every(check => check.passed))
+  assert.ok(binding.limitations.some(value => value.includes('Legacy Pass5Orchestrator')))
+  write(root, 'scripts/official_integrated_pilot.mjs', 'unknown integration')
   assert.throws(() => inspectRuntimeBinding(root, backend), /unknown runtime binding/)
 })

@@ -6,6 +6,7 @@ scripts/__pycache__/
 data/*.parquet
 data/*.json
 reports/*.json
+reports/phase1-tests.xml
 *.log
 data/source/
 data/submission/

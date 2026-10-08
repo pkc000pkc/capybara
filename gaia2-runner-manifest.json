@@ -1,7 +1,7 @@
 {
-  "runner": "capybara-gaia2-integrated-pilot",
-  "runnerVersion": "0.5.0-phase0",
-  "mode": "official-are-original-scenario-pass5-pilot",
+  "runner": "capybara-gaia2-frozen-manifest-sequential",
+  "runnerVersion": "0.6.0-phase1",
+  "mode": "frozen-original-standard-tasks",
   "dataset": "meta-agents-research-environments/gaia2-cli",
   "datasetRevision": "240ac47bfc62b24c934f95d014ffa5a3cab8b04c",
   "resolvedDatasetRevision": "240ac47bfc62b24c934f95d014ffa5a3cab8b04c",
@@ -27,8 +27,16 @@
   "capabilityInventory": "locks/capability-inventory.json",
   "pluginLoadStatus": "not_loaded",
   "runtimeBinding": "sidecar_only",
-  "entrypointStatus": "legacy-runners-do-not-consume-frozen-run-manifest",
+  "entrypointStatus": "all-four-entrypoints-consume-frozen-run-manifest-validation-only-unless-execute",
   "requestedProcessTimeoutMinutes": 8000,
-  "legacyOuterTimeoutMinutes": { "pilot": 8, "all": 15 },
-  "notes": "Phase 0 freezes the actual runtime boundary and creates immutable plans. Five original scenarios were tried five times in the historical pilot, with no passing attempts. Dynamic TypeScript hooks, correction strategy consumption, unified wrapper timeouts and the official enhancement pipeline remain later-stage work."
+  "processTimeoutMinutesByEntrypoint": { "e2e": 8000, "batch": 8000, "pilot": 8000, "all": 8000 },
+  "processTimeoutZeroBehavior": "disable-outer-process-ceiling-only",
+  "modelRequestTimeoutSeconds": 60,
+  "modelRetry": { "maxAttempts": 6, "backoffBaseSeconds": 2, "backoffMaxSeconds": 120, "maxRetryWaitSeconds": 3600, "scope": "actor-and-judge-model-requests-only" },
+  "recovery": "durable-batch-state-clean-session-restart-not-ARE-checkpoint",
+  "stateStatuses": ["pending", "running", "completed", "retry_pending"],
+  "defaultExecution": false,
+  "officialSubmissionReady": false,
+  "realHooksReady": false,
+  "notes": "Phase 1 implements asynchronous supervised execution, streamed redacted logs, terminal heartbeats, model-only retries and manifest-bound batch recovery. Valid judged business failures are completed and never retried. Frozen scenario content is preserved except explicit run_number metadata. A2A/Noise plans are rejected before spawning. TypeScript plugin loading, real pre-tool hooks, dynamic notification consumption, correction strategy execution and official export/coverage remain later-stage work."
 }

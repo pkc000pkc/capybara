@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from litellm import completion
+from gaia2_model_retry import install_model_retries
 
 from are.simulation.notification_system import MessageType
 from are.simulation.scenarios.scenario import ScenarioValidationResult
@@ -41,6 +42,8 @@ def _emit_runtime_event(event_type: str, **payload: Any) -> None:
     record = {
         "type": event_type,
         "attemptIndex": int(os.environ.get("GAIA2_E2E_ATTEMPT_INDEX", "0") or 0),
+        "executionId": os.environ.get("GAIA2_EXECUTION_ID"),
+        "sessionId": os.environ.get("GAIA2_SESSION_ID"),
         "time": time.time(),
         **payload,
     }
@@ -272,13 +275,17 @@ def _native_run_with_agent(
     _emit_runtime_event(
         "official_validation_completed",
         validationType=type(validation).__name__,
+        validationSuccess=getattr(validation, "success", None),
+        hasException=getattr(validation, "exception", None) is not None,
     )
     return validation
 
 
 def install() -> None:
     """Install the bridge before the official benchmark CLI constructs runners."""
+    global completion
     from are.simulation import scenario_runner
 
+    completion = install_model_retries(_emit_runtime_event, actor_completion=completion)
     scenario_runner.ScenarioRunner._run_with_agent = _native_run_with_agent
     logger.info("Installed Capybara native-tool bridge for official ARE runner")

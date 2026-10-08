@@ -61,7 +61,7 @@ export function validateRunManifest(root, manifest, inputs, env = process.env) {
   let expected
   try {
     expected = buildRunManifest({ root, protocol: inputs.protocol, index: inputs.index, lockRefs: inputs.lockRefs, entrypoints: inspectEntrypoints(root, env), mode: manifest.mode, runId: manifest.runId, perCapability: manifest.selection.perCapability ?? undefined, miniLimit: manifest.selection.miniLimit ?? undefined, rootSeed: manifest.rootSeed })
-    for (const key of ['planFingerprint', 'dataset', 'models', 'policy', 'requestedRuntime', 'entrypoints', 'tasks', 'selection', 'runRoot', 'stateFile']) if (digest(manifest[key]) !== digest(expected[key])) errors.push(`${key} differs from frozen plan`)
+    for (const key of ['planFingerprint', 'dataset', 'models', 'policy', 'requestedRuntime', 'entrypoints', 'tasks', 'selection', 'runRoot', 'stateFile', 'executionBinding']) if (digest(manifest[key]) !== digest(expected[key])) errors.push(`${key} differs from frozen plan`)
   } catch (error) { errors.push(error.message) }
   const taskKeys = new Set(), outputs = new Set()
   const runRoot = resolve(root, 'runs', manifest.runId)
@@ -155,7 +155,7 @@ export async function auditPhase0(root, { manifest = null, deep = true, env = pr
   for (const entry of entrypoints.entries) {
     if (entry.settings.processTimeoutMs !== 0 && entry.settings.processTimeoutMs < inputs.protocol.requestedRuntime.processTimeoutMinutes * 60000) knownGaps.push({ code: 'short_outer_timeout', entrypoint: entry.id, actualMinutes: entry.settings.processTimeoutMs / 60000, requestedMinutes: inputs.protocol.requestedRuntime.processTimeoutMinutes, phase: 1 })
   }
-  knownGaps.push({ code: 'plugin_not_loaded', phase: 3 }, { code: 'real_correction_strategy_not_bound', phase: 4 }, { code: 'official_enhancement_pipeline_not_configured', phase: 5 }, { code: 'manifest_is_a_plan_not_a_runtime_checkpoint', phase: 1 })
+  knownGaps.push({ code: 'plugin_not_loaded', phase: 3 }, { code: 'real_correction_strategy_not_bound', phase: 4 }, { code: 'official_enhancement_pipeline_not_configured', phase: 5 }, { code: 'ARE_checkpoint_resume_unavailable_clean_session_restart_only', phase: null })
   knownGaps.push(...(inputs.capabilities.backendCompatibility?.gaps ?? []).map((gap) => ({ code: gap.id, description: gap.message, phase: 3 })))
   if (manifest) errors.push(...validateRunManifest(root, manifest, inputs, env))
   return { schemaVersion: 'gaia2-phase0-audit-v1', status: errors.length ? 'failed' : 'passed', phase0Passed: errors.length === 0, executionReady: false, officialSubmissionReady: false, errors, knownGaps, checks, entrypoints, runId: manifest?.runId ?? null, expectedInitialExecutions: manifest?.tasks.length ?? null, generatedAt: new Date().toISOString() }
