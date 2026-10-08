@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve, win32 } from 'node:path'
 import { digest, fileDigest, writeJson, within } from './phase0_run.mjs'
 import { auditPhase0 } from './phase0_audit.mjs'
 import { classifyExecutionFailure } from './phase1_errors.mjs'
+import { safeEvidenceGateCode } from './phase1_diagnostics.mjs'
 import { executeOfficialTask, fixtureFromScenario } from './phase1_official.mjs'
 import { validateRuntimeEvidence } from './phase3_runtime_evidence.mjs'
 import { trainingEvidenceReader, verifyTrainingProbe } from './phase4_training.mjs'
@@ -94,7 +95,10 @@ export async function runCorrectionReplay({ root, manifest, parent = null, train
   catch { execution = { processResult: { exitCode: null, spawnError: { code: 'REPLAY_ADAPTER_FAILURE' } }, events: [], report: null } }
   let runtimeReady = false
   try { runtimeReady = validateRuntimeEvidence({ manifest: replayManifest, task, session, events: execution.events,
-    runtimeAttestation: execution.runtimeAttestation, runtimeEvidence: execution.runtimeEvidence, readEvidence: trainingEvidenceReader(root) }).realHooksReady } catch { /* Technical, never a business zero. */ }
+    runtimeAttestation: execution.runtimeAttestation, runtimeEvidence: execution.runtimeEvidence, readEvidence: trainingEvidenceReader(root) }).realHooksReady } catch (error) {
+    if (execution.processResult) execution.processResult.evidenceGateCode ??= safeEvidenceGateCode(error)
+    /* Technical, never a business zero. */
+  }
   const p = execution.processResult, report = execution.report
   let freshGeneration = false
   if (runtimeReady) {

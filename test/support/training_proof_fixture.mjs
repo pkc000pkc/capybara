@@ -19,7 +19,7 @@ const PROJECT_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
 const portable = value => value.replaceAll('\\', '/')
 const sha = value => createHash('sha256').update(value).digest('hex')
 const SOURCES = {
-  project: ['src/phase4_training.mjs', 'src/phase4_training_proof.mjs', 'src/phase4_training_broker.mjs', 'src/phase4_correction_contract.mjs', 'scripts/phase4_training_host.ts', 'scripts/phase4_training_broker.py', 'scripts/gaia2_model_retry.py'],
+  project: ['src/phase4_training.mjs', 'src/phase4_training_proof.mjs', 'src/phase4_training_broker.mjs', 'src/phase4_correction_contract.mjs', 'scripts/phase4_training_host.ts', 'scripts/phase4_training_broker.py', 'scripts/gaia2_model_retry.py', 'scripts/gaia2_model_diagnostics.py'],
   backend: ['src/core/plugins/training-plugin-host.ts', 'src/core/system-variable-values.ts'],
 }
 function files(directory) {

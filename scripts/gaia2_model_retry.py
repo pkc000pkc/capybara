@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Mapping
 
+from gaia2_model_diagnostics import safe_model_diagnostics, safe_request_summary
+
 
 @dataclass(frozen=True)
 class ModelRetryPolicy:
@@ -215,13 +217,15 @@ def wrap_completion(
         waited = 0.0
         # LiteLLM retry and its underlying OpenAI client retry must both be off.
         kwargs.update(num_retries=0, max_retries=0, retry_policy=None, context_window_fallback_dict={}, fallbacks=[], drop_params=False, timeout=active.request_timeout_seconds)
+        request_summary = safe_request_summary(kwargs)
         for attempt in range(1, active.max_attempts + 1):
             operational = {"modelRole": role, "requestId": request_id, "requestAttempt": attempt, "maxRequestAttempts": active.max_attempts, "cumulativeWaitSeconds": waited}
-            emit("model_request_attempt", **operational)
+            emit("model_request_attempt", **operational, requestSummary=request_summary)
             try:
                 result = completion(*args, **kwargs)
             except Exception as error:
                 classification = classify_model_error(error)
+                diagnostic = safe_model_diagnostics(error, request_summary)
                 now = clock()
                 hint, hint_source = retry_delay_hint(error, now)
             else:
@@ -233,7 +237,7 @@ def wrap_completion(
             delay = max(backoff, hint or 0.0)
             next_retry_at = _iso(now + delay) if classification["retryable"] else None
             exhausted = attempt >= active.max_attempts or waited + delay > active.max_retry_wait_seconds
-            metadata = {**operational, **classification, "nextRetryAt": next_retry_at, "retryExhausted": bool(exhausted and classification["retryable"])}
+            metadata = {**operational, **classification, "nextRetryAt": next_retry_at, "retryExhausted": bool(exhausted and classification["retryable"]), "diagnostic": diagnostic}
             emit("model_request_failed", **metadata)
             if not classification["retryable"] or exhausted:
                 raise ModelRequestFailure(metadata) from None

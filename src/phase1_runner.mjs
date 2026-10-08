@@ -3,6 +3,7 @@ import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readF
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertPublicConfig, digest, fileDigest, readJson, within } from './phase0_run.mjs'
 import { classifyExecutionFailure } from './phase1_errors.mjs'
+import { safeEvidenceGateCode } from './phase1_diagnostics.mjs'
 import { isProcessIdentityAlive, readProcessIdentity } from './phase1_process.mjs'
 import { runtimeEvidenceRequired, validateRuntimeEvidence } from './phase3_runtime_evidence.mjs'
 
@@ -248,7 +249,7 @@ export async function runFrozenBatch({ root, manifest, settings, executeTask, si
         try {
           const hooks = validateRuntimeEvidence({ manifest, task, session, events: execution?.events, runtimeAttestation: execution?.runtimeAttestation, runtimeEvidence: execution?.runtimeEvidence, readEvidence: path => readFileSync(safePath(root, path, runRoot)) })
           realHooksReady = hooks.realHooksReady
-        } catch { report = { ...report, evaluationComplete: false, hasException: true, exceptionType: 'RuntimeEvidenceError' } }
+        } catch (error) { report = { ...report, evaluationComplete: false, hasException: true, exceptionType: 'RuntimeEvidenceError', evidenceGateCode: safeEvidenceGateCode(error) } }
       }
       const healthy = processResult.exitCode === 0 && !processResult.signal && !processResult.timedOut && !processResult.interrupted && !processResult.spawnError && !processResult.loggingError && !processResult.heartbeatError && !(processResult.terminationErrors?.length)
       const evaluated = healthy && report.evaluationComplete === true && report.hasException !== true && !report.exceptionType && report.scenarioId === task.scenarioId && report.runNumber === task.runNumber && typeof report.businessPassed === 'boolean'

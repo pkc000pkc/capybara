@@ -14,6 +14,7 @@ const SOURCES = {
     'scripts/phase4_training_host.ts', 'scripts/phase4_training_broker.py', 'scripts/gaia2_model_retry.py'],
   backend: ['src/core/plugins/training-plugin-host.ts', 'src/core/system-variable-values.ts'],
 }
+const DIAGNOSTIC_SOURCES = { ...SOURCES, project: [...SOURCES.project, 'scripts/gaia2_model_diagnostics.py'] }
 function check(condition, code) { if (!condition) throw new Error(`Phase 4 training proof: ${code}`) }
 function path(value) {
   check(typeof value === 'string' && value && !/^[\\/]|^[a-zA-Z]:/.test(value) && !/[\\\0:]/.test(value)
@@ -68,7 +69,7 @@ export function sealTrainingBaseline({ root, outputDir, manifest, manifestPath, 
     return { key, originalPath: ref.path, ...copy(bytes, 'lock.bin') }
   })
   const env = JSON.parse(readEvidence(manifest.lockRefs.environment.path)), caps = JSON.parse(readEvidence(manifest.lockRefs.capabilities.path)), sourceFiles = []
-  for (const [scope, names] of Object.entries(SOURCES)) for (const relativePath of names) {
+  for (const [scope, names] of Object.entries(DIAGNOSTIC_SOURCES)) for (const relativePath of names) {
     const file = resolve(scope === 'project' ? root : protocol.runtime.backendRoot, relativePath); noLinks(file)
     const bytes = readFileSync(file), expected = (scope === 'project' ? env.codeInputs : env.backend.codeInputs).find(item => item.path === relativePath)
     check(expected?.sha256 === sha(bytes), 'training implementation changed while sealing')
@@ -79,7 +80,7 @@ export function sealTrainingBaseline({ root, outputDir, manifest, manifestPath, 
     const bytes = readFileSync(file); check(sha(bytes) === ref.sha256, 'training plugin changed while sealing')
     sourceFiles.push({ scope: `plugin:${plugin.id}`, relativePath: ref.relativePath, ...copy(bytes, 'plugin.bin') })
   }
-  return { manifestRef, baseline: { schemaVersion: 'gaia2-phase4-training-baseline-v1', locks, sourceFiles } }
+  return { manifestRef, baseline: { schemaVersion: 'gaia2-phase4-training-baseline-v2', locks, sourceFiles } }
 }
 
 /** Pure, relocatable verification. The reader may map every path to bundle copies. */
@@ -109,7 +110,8 @@ export function verifyTrainingProbeEvidence({ trainingReportRef, readEvidence })
   check(manifestHash === digest(manifestContent) && manifest.executionBinding === 'phase3_live_plugin_host_required'
     && manifest.mode === 'internal_pass5' && manifest.dataset.kind === 'source' && manifest.syntheticFixtureOnly !== true, 'invalid frozen training manifest')
   const baseline = report.trainingBaseline
-  check(baseline?.schemaVersion === 'gaia2-phase4-training-baseline-v1' && Array.isArray(baseline.locks) && Array.isArray(baseline.sourceFiles), 'missing training baseline')
+  check(['gaia2-phase4-training-baseline-v1', 'gaia2-phase4-training-baseline-v2'].includes(baseline?.schemaVersion)
+    && Array.isArray(baseline.locks) && Array.isArray(baseline.sourceFiles), 'missing training baseline')
   const locks = new Map()
   for (const item of baseline.locks) {
     check(!locks.has(item.key) && manifest.lockRefs[item.key]?.path === item.originalPath
@@ -135,7 +137,14 @@ export function verifyTrainingProbeEvidence({ trainingReportRef, readEvidence })
     }
     sources.set(id, item)
   }
-  for (const [scope, names] of Object.entries(SOURCES)) for (const name of names) check(sources.has(`${scope}/${name}`), 'missing training implementation source')
+  const requiredSources = baseline.schemaVersion === 'gaia2-phase4-training-baseline-v2' ? DIAGNOSTIC_SOURCES : SOURCES
+  for (const [scope, names] of Object.entries(requiredSources)) for (const name of names) check(sources.has(`${scope}/${name}`), 'missing training implementation source')
+  if (baseline.schemaVersion === 'gaia2-phase4-training-baseline-v1') {
+    // Historical v1 proofs remain readable. New diagnostics cannot downgrade
+    // the sealed contract to omit their imported implementation.
+    check(!environment.codeInputs.some(ref => ref.path === 'scripts/gaia2_model_diagnostics.py')
+      && !bytes(sources.get('project/scripts/gaia2_model_retry.py').path).toString('utf8').includes('gaia2_model_diagnostics'), 'diagnostic_dependency_requires_baseline_v2')
+  }
   for (const plugin of capabilities.plugins) for (const ref of plugin.files) check(sources.has(`plugin:${plugin.id}/${ref.relativePath}`), 'missing training plugin source')
   check(report.environmentAudit?.phase0Passed === true && report.finalEnvironmentAudit?.phase0Passed === true, 'training baseline audit failed')
   const input = refJson(report.trainingInput), spec = refJson(report.hostSpec), host = refJson(report.hostResult)

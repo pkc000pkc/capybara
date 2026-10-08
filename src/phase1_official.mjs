@@ -8,6 +8,7 @@ import { runChildProcess } from './phase1_process.mjs'
 import { startRuntimeHookService } from './phase3_hook_service.mjs'
 import { collectRuntimeEvidence } from './phase3_runtime_evidence.mjs'
 import { assertInitialHasNoCorrection } from './phase4_replay_authority.mjs'
+import { safeEvidenceGateCode } from './phase1_diagnostics.mjs'
 
 function assert(condition, message) { if (!condition) throw new Error(`Phase 1 adapter: ${message}`) }
 function portable(path) { return path.replaceAll('\\', '/') }
@@ -137,8 +138,9 @@ export async function executeOfficialTask({ root, manifest, task, session, setti
   try {
     const runtime = collectRuntimeEvidence({ root, manifest, task, session, events, hostProcess })
     return { processResult, events, ...native, runtimeEvidenceRequired: true, ...runtime, ...(freshReplayFixture ? { freshReplayFixture } : {}) }
-  } catch {
+  } catch (error) {
     processResult.loggingError = 'runtime_hook_evidence_invalid'
+    processResult.evidenceGateCode = safeEvidenceGateCode(error)
     return { processResult, events, report: native.report, artifacts: native.artifacts, runtimeEvidenceRequired: true, runtimeAttestation: null, runtimeEvidence: [] }
   }
 }

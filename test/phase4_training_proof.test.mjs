@@ -169,6 +169,20 @@ test('frozen implementation/plugin source hashes are not merely decorative refer
   reject(({ report }) => { report.trainingBaseline.sourceFiles = report.trainingBaseline.sourceFiles.filter(item => item.relativePath !== 'src/core/plugins/training-plugin-host.ts') }, /missing training implementation source/)
 })
 
+test('diagnostic dependency is sealed in baseline v2 and cannot be omitted or downgraded', () => {
+  const baseline = fixture.report.trainingBaseline
+  assert.equal(baseline.schemaVersion, 'gaia2-phase4-training-baseline-v2')
+  assert(baseline.sourceFiles.some(item => item.scope === 'project' && item.relativePath === 'scripts/gaia2_model_diagnostics.py'))
+  reject(({ report }) => {
+    report.trainingBaseline.sourceFiles = report.trainingBaseline.sourceFiles.filter(item => item.relativePath !== 'scripts/gaia2_model_diagnostics.py')
+  }, /missing training implementation source/)
+  reject(({ report }) => { report.trainingBaseline.schemaVersion = 'gaia2-phase4-training-baseline-v1' }, /diagnostic_dependency_requires_baseline_v2/)
+  reject(({ report, replace }) => {
+    const source = report.trainingBaseline.sourceFiles.find(item => item.relativePath === 'scripts/gaia2_model_diagnostics.py')
+    replace(source.path, Buffer.from('tampered diagnostic implementation'))
+  }, /source outside frozen code inventory/)
+})
+
 test('bound proposal cannot invent evidence or carry free-form strategy metadata even when Host result hashes are synchronized', () => {
   reject(({ updateHost }) => updateHost(host => {
     host.result.proposals[0].output.correction.evidenceHash = 'f'.repeat(64)

@@ -1,9 +1,13 @@
+import { buildFailureDiagnostics } from './phase1_diagnostics.mjs'
+
 /** Infrastructure failures are distinct from an actual judged business result.
  * This function deliberately ignores raw exception text and shared old reports.
  * Pass only the current execution's report and evaluator-blind runtime events.
  */
 export function classifyExecutionFailure({ processResult = {}, report = null, events = [] } = {}) {
-  const result = (category, retryable = false, metadata = {}) => ({ category, retryable, ...metadata })
+  const diagnostic = buildFailureDiagnostics({ processResult, report, events })
+  const result = (category, retryable = false, metadata = {}) => ({ category, retryable, ...metadata,
+    ...(diagnostic.causes.length ? { diagnostic } : {}) })
   if (processResult.timedOut || processResult.timeout || processResult.error?.code === 'ETIMEDOUT') return result('process_timeout', true)
   if (processResult.interrupted || processResult.cancelled || ['SIGINT', 'SIGTERM'].includes(processResult.signal)) return result('interrupted', true)
   if (processResult.spawnError || processResult.loggingError || processResult.heartbeatError || processResult.terminationErrors?.length) return result('runtime_error')
