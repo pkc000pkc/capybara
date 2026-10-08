@@ -1,0 +1,183 @@
+{
+  "schemaVersion": 1,
+  "canonicalScenarioHash": "sha256(canonical JSON; recursively sorted object keys; array order and every field retained)",
+  "scenarioIdSetHash": "sha256(JSON.stringify(sorted unique scenario IDs))",
+  "datasets": {
+    "source": {
+      "id": "meta-agents-research-environments/gaia2-cli",
+      "revision": "240ac47bfc62b24c934f95d014ffa5a3cab8b04c",
+      "split": "test",
+      "cacheDir": "data/source",
+      "configs": [
+        "execution",
+        "search",
+        "adaptability",
+        "time",
+        "ambiguity"
+      ],
+      "count": 800,
+      "scenarioIdSetSha256": "9f941c97fcc35938cf02d323e1170678f036555e237014b461a21fe6b46e9e52",
+      "files": [
+        {
+          "config": "execution",
+          "remotePath": "data/execution-test-00000-of-00001.parquet",
+          "path": "data/source/execution-test-00000-of-00001.parquet",
+          "bytes": 98718568,
+          "sha256": "a004f1a6bf7718e5be4d92b30e02ae9b7f7717ecc4723dc85ef1cd3786431c2d",
+          "count": 160,
+          "scenarioIdSetSha256": "dc1987201e1fbf18e3c6707763de35bc54942670c6d7c5110aa86a7d26792f33",
+          "scenarioVersions": [
+            "are_simulation_v1"
+          ]
+        },
+        {
+          "config": "search",
+          "remotePath": "data/search-test-00000-of-00001.parquet",
+          "path": "data/source/search-test-00000-of-00001.parquet",
+          "bytes": 99131074,
+          "sha256": "c8413e9225205ae63a16f179b9c3dd1a02f7b158a1ab92d2a66b0c6ab2b127de",
+          "count": 160,
+          "scenarioIdSetSha256": "42e832bf175e83662007f60e89f6c0845615a0f2bd7b4d96a8ddb69b8135be8e",
+          "scenarioVersions": [
+            "are_simulation_v1"
+          ]
+        },
+        {
+          "config": "adaptability",
+          "remotePath": "data/adaptability-test-00000-of-00001.parquet",
+          "path": "data/source/adaptability-test-00000-of-00001.parquet",
+          "bytes": 98826289,
+          "sha256": "dd1fe8ca41464f8e11853b60782e777a16830a1886b09c93b92d7fe63e19414e",
+          "count": 160,
+          "scenarioIdSetSha256": "0adf97d6e3717d1416c240abb4d80e2afff7d2eb13c340ba7dcb0885ca21d1cd",
+          "scenarioVersions": [
+            "are_simulation_v1"
+          ]
+        },
+        {
+          "config": "time",
+          "remotePath": "data/time-test-00000-of-00001.parquet",
+          "path": "data/source/time-test-00000-of-00001.parquet",
+          "bytes": 99039277,
+          "sha256": "977b9068aeb65ac803ecc58b8fb5bfbb6ae443e6c88b0e0e43095636a0d66fe5",
+          "count": 160,
+          "scenarioIdSetSha256": "7acfdf6501f6b3dd2d1c3b215edceceb4ba4a866e9a3c4d94bfcd39af8cccf05",
+          "scenarioVersions": [
+            "are_simulation_v1"
+          ]
+        },
+        {
+          "config": "ambiguity",
+          "remotePath": "data/ambiguity-test-00000-of-00001.parquet",
+          "path": "data/source/ambiguity-test-00000-of-00001.parquet",
+          "bytes": 98666726,
+          "sha256": "c76c0e5c5b944674b52aa451a72bd54f4866f5be337c2e22aca542288fa8bbfb",
+          "count": 160,
+          "scenarioIdSetSha256": "e943c8d31c0e5a312c863ff1853f60a096bd0183e3923bffdb98e43bdcb030e4",
+          "scenarioVersions": [
+            "are_simulation_v1"
+          ]
+        }
+      ]
+    },
+    "submission": {
+      "id": "meta-agents-research-environments/gaia2",
+      "revision": "78ea3bdbdeec2bdcd6afa5420915d8a22f23ed99",
+      "split": "validation",
+      "cacheDir": "data/submission",
+      "configs": [
+        "execution",
+        "search",
+        "adaptability",
+        "time",
+        "ambiguity",
+        "mini"
+      ],
+      "count": 800,
+      "scenarioIdSetSha256": "9f941c97fcc35938cf02d323e1170678f036555e237014b461a21fe6b46e9e52",
+      "files": [
+        {
+          "config": "execution",
+          "remotePath": "execution/validation-00000-of-00001.parquet",
+          "path": "data/submission/execution/validation-00000-of-00001.parquet",
+          "bytes": 161828579,
+          "sha256": "d6ded47be84b740866ca7617e45d4409f7ecf36f9b94b7beb3f1af6da99d0198",
+          "count": 160,
+          "scenarioIdSetSha256": "dc1987201e1fbf18e3c6707763de35bc54942670c6d7c5110aa86a7d26792f33",
+          "scenarioVersions": [
+            "are_simulation_v1"
+          ]
+        },
+        {
+          "config": "search",
+          "remotePath": "search/validation-00000-of-00001.parquet",
+          "path": "data/submission/search/validation-00000-of-00001.parquet",
+          "bytes": 162553523,
+          "sha256": "a8f2d1a0085a29b1e5de446d42187b0293d309c5e2b6722510c7ce005e625a14",
+          "count": 160,
+          "scenarioIdSetSha256": "42e832bf175e83662007f60e89f6c0845615a0f2bd7b4d96a8ddb69b8135be8e",
+          "scenarioVersions": [
+            "are_simulation_v1"
+          ]
+        },
+        {
+          "config": "adaptability",
+          "remotePath": "adaptability/validation-00000-of-00001.parquet",
+          "path": "data/submission/adaptability/validation-00000-of-00001.parquet",
+          "bytes": 161881336,
+          "sha256": "e449bf40b5dbb26df844c23c62e8ea94ee313ea6dd13d4aedb730fd8c1a6230e",
+          "count": 160,
+          "scenarioIdSetSha256": "0adf97d6e3717d1416c240abb4d80e2afff7d2eb13c340ba7dcb0885ca21d1cd",
+          "scenarioVersions": [
+            "are_simulation_v1"
+          ]
+        },
+        {
+          "config": "time",
+          "remotePath": "time/validation-00000-of-00001.parquet",
+          "path": "data/submission/time/validation-00000-of-00001.parquet",
+          "bytes": 162124379,
+          "sha256": "4642061f6f5e67e3853cec9bf7879eac19e073306131245af84da9a0cf817e16",
+          "count": 160,
+          "scenarioIdSetSha256": "7acfdf6501f6b3dd2d1c3b215edceceb4ba4a866e9a3c4d94bfcd39af8cccf05",
+          "scenarioVersions": [
+            "are_simulation_v1"
+          ]
+        },
+        {
+          "config": "ambiguity",
+          "remotePath": "ambiguity/validation-00000-of-00001.parquet",
+          "path": "data/submission/ambiguity/validation-00000-of-00001.parquet",
+          "bytes": 161630001,
+          "sha256": "e4cd018c58708f2e8b4d08ec868a837e98efd4aafa7afee6b864685ba41f5feb",
+          "count": 160,
+          "scenarioIdSetSha256": "e943c8d31c0e5a312c863ff1853f60a096bd0183e3923bffdb98e43bdcb030e4",
+          "scenarioVersions": [
+            "are_simulation_v1"
+          ]
+        },
+        {
+          "config": "mini",
+          "remotePath": "mini/validation-00000-of-00001.parquet",
+          "path": "data/submission/mini/validation-00000-of-00001.parquet",
+          "bytes": 162426171,
+          "sha256": "88430154e09bb728c666bbbf367bb805c8a84f8bdee427e7d469887022ab71fe",
+          "count": 160,
+          "scenarioIdSetSha256": "2bf12f094d2205bd1f6b53b55dafd7c923b90beff7bb0453d428f2627cc2a78c",
+          "scenarioVersions": [
+            "are_simulation_v1"
+          ]
+        }
+      ]
+    }
+  },
+  "scenarioIndex": {
+    "path": "data/scenario-index.jsonl",
+    "sha256": "9445e82cb00e4dbd123f61f50551b62246afa6a3ff491734a4a698d40e37aaf1",
+    "count": 1760
+  },
+  "mappingReport": {
+    "path": "reports/phase0-dataset-mapping.json",
+    "sha256": "8a9961abb2624b22edf61e90d11dca2ce24a259af9e2fe4e1cdf7256ed7b9254"
+  }
+}

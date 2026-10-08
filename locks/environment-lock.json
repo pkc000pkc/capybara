@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-environment-lock-v1",
-  "generatedAt": "2026-10-08T06:31:19.138Z",
+  "generatedAt": "2026-10-08T08:16:38.704Z",
   "timeSource": "client-system-clock-new-Date-ISO-not-authoritative-dataset-time",
   "noModelExecution": true,
   "secretConfigRead": false,
@@ -1662,7 +1662,7 @@
     ]
   },
   "packageLockSha256": "6f9c567badd221e703988d7e8d1f3190d111b45f9d396dedfb12e4dcddc64788",
-  "bridgeSha256": "b4177c4a6f2277efc7c5da8d353824129e6a91c6877cc745cf5250fe0adad079",
+  "bridgeSha256": "8eca23550f3344e5b1cb3a133c1f026005933d2b9ece71ec31566c2d0b8c59ac",
   "codeInputs": [
     {
       "path": "config/phase0-protocol.json",
@@ -1691,7 +1691,7 @@
     },
     {
       "path": "plugins/gaia2-evaluation/capybara.plugin.json",
-      "sha256": "8311c8396e172609b834d5300c727fb28e158edb75cb26ff72247e695347130e",
+      "sha256": "3a78d825765c2cffb84e99067371aafe6f037afb2efc03c0be991da976da7772",
       "bytes": 401
     },
     {
@@ -1706,13 +1706,13 @@
     },
     {
       "path": "plugins/gaia2-evaluation/hooks/gaia2-attempt-record.ts",
-      "sha256": "51b14c9f49e0b26c0258cbca6635fc09017f2f948d49b1f2795d5ea4bb3a72af",
-      "bytes": 1218
+      "sha256": "7f5f1658b732684de8c5dc6aff559773552111394392c6017562f8e1af3df4f1",
+      "bytes": 915
     },
     {
       "path": "plugins/gaia2-evaluation/training-hooks/gaia2-correction.ts",
-      "sha256": "fbac2f760f70daa90a1bd47e92b73c5f0f39416aa79272f68750c3b974bdeea6",
-      "bytes": 2026
+      "sha256": "f96b79efc1ee479d99f3471218bc70f9432bad800f6140c3b5c15756a2da50bc",
+      "bytes": 3166
     },
     {
       "path": "plugins/gaia2-evaluation/variables.json",
@@ -1791,8 +1791,8 @@
     },
     {
       "path": "scripts/capybara_official_bridge.py",
-      "sha256": "b4177c4a6f2277efc7c5da8d353824129e6a91c6877cc745cf5250fe0adad079",
-      "bytes": 29741
+      "sha256": "8eca23550f3344e5b1cb3a133c1f026005933d2b9ece71ec31566c2d0b8c59ac",
+      "bytes": 32788
     },
     {
       "path": "scripts/download_dataset.mjs",
@@ -1806,8 +1806,8 @@
     },
     {
       "path": "scripts/gaia2_model_retry.py",
-      "sha256": "08fc88c67e7ae139388d160afaa7236e6184bdfd67a62c04659e44be3d22c629",
-      "bytes": 12276
+      "sha256": "3978f9d4b013e7504b821236658f52673e48dc90f9db1da199344cf403f60d45",
+      "bytes": 13286
     },
     {
       "path": "scripts/gaia2_runtime_hooks.py",
@@ -1925,6 +1925,36 @@
       "bytes": 3716
     },
     {
+      "path": "scripts/phase4_correction_replay.mjs",
+      "sha256": "79b8e76758cb273b3860b0b1f9751e1474d4db035d61d09f58ab5bbeba598c49",
+      "bytes": 2888
+    },
+    {
+      "path": "scripts/phase4_metrics.mjs",
+      "sha256": "871c1a08dad456ceb328fd8ecd700a1c5c6c9d7e091eddd8346b89113343c47d",
+      "bytes": 3140
+    },
+    {
+      "path": "scripts/phase4_replay_controlled.py",
+      "sha256": "43adda4573f374af4ddc832de057e8484feae3a6d1d5abfcae580f597a56e5c9",
+      "bytes": 5306
+    },
+    {
+      "path": "scripts/phase4_training_broker.py",
+      "sha256": "275dca3759262af45ea6031e74cb9c599f2d35d34aea9cbe32786b4c39ec0152",
+      "bytes": 3666
+    },
+    {
+      "path": "scripts/phase4_training_host.ts",
+      "sha256": "892536aa0afdf5b2e2ec961749aeb0ea7294cb30a359a37fd3c808868ea23b31",
+      "bytes": 2397
+    },
+    {
+      "path": "scripts/phase4_training_probe.mjs",
+      "sha256": "15d3dadcb95837cace8f1e724cc96cf72638b48f3ee3cf21b182b8554aa0cff5",
+      "bytes": 2025
+    },
+    {
       "path": "scripts/preflight_dataset.mjs",
       "sha256": "944cf0b3f3b7bba65d98879de7d2061dc0c3f34daeeb574eb7cb5b0404fc93e1",
       "bytes": 6340
@@ -2001,8 +2031,8 @@
     },
     {
       "path": "src/phase0_inventory.mjs",
-      "sha256": "3b6f980cfe8f7433e84616a8a61c9054ecf032cdd4f613514da9c2c5d6092979",
-      "bytes": 32342
+      "sha256": "27f7c2b38760b58dab17f1b6cf49c56848b231ba20705d85af1518013209e225",
+      "bytes": 32924
     },
     {
       "path": "src/phase0_run.mjs",
@@ -2026,8 +2056,8 @@
     },
     {
       "path": "src/phase1_official.mjs",
-      "sha256": "55aefc69fb33c3f21d132cd27ab3bf067477ddc6492cf9817bc69ed36146986d",
-      "bytes": 11293
+      "sha256": "6f6d8d7dfe67a0b4cbe087f038057048f73656fc8557945c4d3ac730203739f0",
+      "bytes": 12471
     },
     {
       "path": "src/phase1_process.mjs",
@@ -2036,8 +2066,8 @@
     },
     {
       "path": "src/phase1_runner.mjs",
-      "sha256": "c1dbbf3f915548754adfdf16a48de7e15b6effb67368890330a677b7fa89bd03",
-      "bytes": 23772
+      "sha256": "4d1d7a09003df41278b4fb01f6f7750979e136a8d5432dfeea1e201d1cdfbb66",
+      "bytes": 23796
     },
     {
       "path": "src/phase2_audit.mjs",
@@ -2051,18 +2081,63 @@
     },
     {
       "path": "src/phase2_export.mjs",
-      "sha256": "32b8c547ff63a37292fc7d8e0bdab967aa3832a1e55d087e5db5391deb2d3e8a",
-      "bytes": 19825
+      "sha256": "672c18ab80a3b6e0178c587d4321a786b9cb91eff9e31f57928af8a5128db906",
+      "bytes": 19843
     },
     {
       "path": "src/phase3_hook_service.mjs",
-      "sha256": "1dececea655ce5e73ed12099ff507332eb37305777d1f2dabda090ad6c86c8a5",
-      "bytes": 5280
+      "sha256": "4ea81fed6f68917343bbbf20d16c34b0b171038818b5fe8bc89e052ead810fcd",
+      "bytes": 8044
     },
     {
       "path": "src/phase3_runtime_evidence.mjs",
-      "sha256": "8ec92822ebdf5686bfbf9e3c0a6ba53735d7a86d3abd7cd2809707e6bb66130c",
-      "bytes": 24110
+      "sha256": "0b5220bc484d74dcb46928f289674acfbc4acde7408fe4b907a7658faa54e1d0",
+      "bytes": 27866
+    },
+    {
+      "path": "src/phase4_correction_contract.mjs",
+      "sha256": "a31e746276dd5e16d4267fb43479ebc76664103e5c1572ee75f8b1b74ce841e4",
+      "bytes": 18541
+    },
+    {
+      "path": "src/phase4_cost.mjs",
+      "sha256": "d0498f49ccf40a1f5253eb6cd639f390228f05f3b56ec99b340905f9a446cd1b",
+      "bytes": 4208
+    },
+    {
+      "path": "src/phase4_metrics.mjs",
+      "sha256": "eaa801b70bf0cdf015324fad2bbe1a758170aec591ee6c19edb934e193855b62",
+      "bytes": 13952
+    },
+    {
+      "path": "src/phase4_replay_authority.mjs",
+      "sha256": "7a8d54ee68c69a71d62fb94e9dfca3284313d237a2f2dc11ee6e9c1b0a0efc69",
+      "bytes": 5265
+    },
+    {
+      "path": "src/phase4_replay.mjs",
+      "sha256": "3d0e5a89ce17def1be669fac05c0da64e7d3ca7151104bf4fc9ff068b2fd38bb",
+      "bytes": 21307
+    },
+    {
+      "path": "src/phase4_training_broker.mjs",
+      "sha256": "70e083e51351839f5581767dcba5740c2bd32d498a3d4a6d24b1fa71fc9c2cef",
+      "bytes": 5077
+    },
+    {
+      "path": "src/phase4_training_proof.mjs",
+      "sha256": "2681eecc90d9101da1d7ec914a610c5c55e09ef83b5d68d67cde494aeb9afc29",
+      "bytes": 19270
+    },
+    {
+      "path": "src/phase4_training.mjs",
+      "sha256": "7154313a9f4ac83aab5b1f85abd4898846222c598f4f9f835c86f088e7072da5",
+      "bytes": 13008
+    },
+    {
+      "path": "src/phase4_usage.mjs",
+      "sha256": "1fae8469630baeb106801f2fd2c983a89056f69ee251ebb8507ae975258bc07e",
+      "bytes": 8095
     },
     {
       "path": "src/replan_controller.mjs",
@@ -2136,8 +2211,8 @@
     },
     {
       "path": "test/phase0_inventory.test.mjs",
-      "sha256": "f642591fecb30d1f3e7905868282d1c2152f57c89f5a4a9ece8c51276252947d",
-      "bytes": 13054
+      "sha256": "05064dca605cde991e90756d27d253ed8a7401a654490b3b9526478a951f2d66",
+      "bytes": 16249
     },
     {
       "path": "test/phase0_run.test.mjs",
@@ -2151,8 +2226,8 @@
     },
     {
       "path": "test/phase1_retry.test.mjs",
-      "sha256": "e721ae4210768dca147e58bd2b0ef75e9b7eef3ba2f536f4b53f8e96df1da325",
-      "bytes": 11438
+      "sha256": "bff56cbf3346acb3f9064d01aea8ae24a9637b130e11bb719372012bfbabca10",
+      "bytes": 13656
     },
     {
       "path": "test/phase1_runner.test.mjs",
@@ -2181,8 +2256,8 @@
     },
     {
       "path": "test/phase3_bridge.test.mjs",
-      "sha256": "7aea53fda511ac397dedbb89ad7bf0295be68c3c7b7406ab5ef1b83f173ec4d9",
-      "bytes": 30244
+      "sha256": "7fb268306cb6d11bae901dfe154b51a1f6095c0db8a720766ba54063211de2d7",
+      "bytes": 3348
     },
     {
       "path": "test/phase3_controlled.test.mjs",
@@ -2195,9 +2270,49 @@
       "bytes": 2659
     },
     {
+      "path": "test/phase3_live_bridge_test.py",
+      "sha256": "43419647a076b2732ab15ceb69fd7953847c73061d5e533d4adc3fe7061e45cd",
+      "bytes": 45529
+    },
+    {
       "path": "test/phase3_runtime_evidence.test.mjs",
       "sha256": "7c1cc28236baf213625c0cf237eb9c62f664745ef2acb607224470f6004d8e38",
       "bytes": 15584
+    },
+    {
+      "path": "test/phase4_correction_contract.test.mjs",
+      "sha256": "b15490df64efed1b2e6a0ad6826d2c9d3e9ff92426a942ea7da5558245a0fddc",
+      "bytes": 14504
+    },
+    {
+      "path": "test/phase4_cost.test.mjs",
+      "sha256": "ab69f8177094b4018f1ccc5883cd882cd6fbe7987107d00810778b10956783f4",
+      "bytes": 3202
+    },
+    {
+      "path": "test/phase4_metrics.test.mjs",
+      "sha256": "a5de4478b62b3cecd03ce1e88d4be6ce2cab77433466171b25bf072da3af8abe",
+      "bytes": 19077
+    },
+    {
+      "path": "test/phase4_replay.test.mjs",
+      "sha256": "e85b5f25de6a01b73e66d36c7a9d90736eb4f63ec9051e38b71d7a8994642594",
+      "bytes": 6608
+    },
+    {
+      "path": "test/phase4_training_broker.test.mjs",
+      "sha256": "796cb646c44005f8cfb1ed23a6ad7c995fd3ab13abd4f7e5165cd94bbf2ac6d3",
+      "bytes": 6749
+    },
+    {
+      "path": "test/phase4_training_proof.test.mjs",
+      "sha256": "0bec402af5987b3b748d743e55ac4eaf25e4d6164a5abe4b5fe94575b5156570",
+      "bytes": 14000
+    },
+    {
+      "path": "test/phase4_usage.test.mjs",
+      "sha256": "19b015c5619ab5412438c6d440fc8ae0df2957d1908e531d8f4f48751a68ca4a",
+      "bytes": 6632
     },
     {
       "path": "test/replan_controller.test.mjs",
@@ -2215,9 +2330,19 @@
       "bytes": 1943
     },
     {
+      "path": "test/support/correction_replay_fixture.mjs",
+      "sha256": "ddbdc51532cd7ef3772c5fcb7cf1757bc2b01a363c91ebde76848ad73fbec88c",
+      "bytes": 13397
+    },
+    {
       "path": "test/support/runtime_evidence_fixture.mjs",
       "sha256": "8210da38395d24ba03306ac4a705314c0352909131f252891389b2ff75869189",
       "bytes": 8185
+    },
+    {
+      "path": "test/support/training_proof_fixture.mjs",
+      "sha256": "dfe310ad1740705cc18f4be3413e64715a941199a5960bef886661bd8c8d75fd",
+      "bytes": 21478
     },
     {
       "path": "test/trace_verifier.test.mjs",
@@ -2225,7 +2350,7 @@
       "bytes": 1443
     }
   ],
-  "contentTreeSha256": "0640c69a4a4f12b7624e815c9514a60bba6fae2da40ad7305e5da114ff20444b",
+  "contentTreeSha256": "af42cfd144fe3bb7894ffa6f50555d0bf790f9f1b715f37888f3097422ca7a97",
   "officialCodeInputs": [
     {
       "path": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.official-python/are/__init__.py",
@@ -4113,8 +4238,13 @@
       },
       {
         "path": "src/core/plugins/runtime-plugin-host.ts",
-        "sha256": "a0342bc150e96a491d10af82bbaf189626092fc850f5d4272997e1bee1d055c3",
-        "bytes": 34064
+        "sha256": "d81ccbdb892f9c88a6d125f1d19ba32d82187950e9ea270e4b891d5d8384127b",
+        "bytes": 36237
+      },
+      {
+        "path": "src/core/plugins/training-plugin-host.ts",
+        "sha256": "4a9c3ebfbeec6e7237b9a500060859473ec0565bda34e0bd0924996ae1dd72da",
+        "bytes": 41030
       },
       {
         "path": "src/core/project-git.ts",
@@ -4283,8 +4413,8 @@
       },
       {
         "path": "test/runtime-plugin-host.test.ts",
-        "sha256": "c93f36fd35b456a00657cdcc024ecc0ded32afbf3cc7e883bd94477c2af1f0f7",
-        "bytes": 16927
+        "sha256": "3ae98ce20421090e9bc82e34068dbfaa35af25055f5639ec7d3b99482eb29d1b",
+        "bytes": 20779
       },
       {
         "path": "test/skill-script-runner.test.ts",
@@ -4302,12 +4432,17 @@
         "bytes": 5588
       },
       {
+        "path": "test/training-plugin-host.test.ts",
+        "sha256": "4b581b102e49bc5629f2864dfa084f4850f472ecb0478d1058521ccc00a8f921",
+        "bytes": 34477
+      },
+      {
         "path": "test/web-search.test.ts",
         "sha256": "65df0019be57f697e177682827505d1960dd852f1baf01bc66346799bdbefef0",
         "bytes": 3649
       }
     ],
-    "contentTreeSha256": "32194a09a744bbc438e005c3ad46d6f9c9f94e4794cc0af9beb4110bd77b42c6",
+    "contentTreeSha256": "286204bad4250715bf664156b4c8f593235929cb78f8b220f11ff2da866403a5",
     "dependencyVersions": {
       "packageLockSha256": "465ffed3ad1a262cd4233fabd18231e77492093d42415b1fc3affce76f2d42e6",
       "installedDirect": [
@@ -4985,17 +5120,17 @@
     "project": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "94c40bcee659f04a2330e7fa05d108669c5c05f9",
-      "gitHead": "94c40bcee659f04a2330e7fa05d108669c5c05f9",
-      "dirty": false,
-      "statusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "dirtyEntryCount": 0
+      "head": "1c1cfa2b5d009dca8aec1def4915148d20f9e8e8",
+      "gitHead": "1c1cfa2b5d009dca8aec1def4915148d20f9e8e8",
+      "dirty": true,
+      "statusSha256": "676fb5b6d2548ff1b36189037e88723309bf000fedf369b2b84c2d5b2f0df86b",
+      "dirtyEntryCount": 1
     },
     "backend": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-backend",
-      "head": "bc93a08cdafe7bf4a4c75cbb4d399a40555a5b8a",
-      "gitHead": "bc93a08cdafe7bf4a4c75cbb4d399a40555a5b8a",
+      "head": "7e196d29a56c101db75f0f42432da49d369fa73e",
+      "gitHead": "7e196d29a56c101db75f0f42432da49d369fa73e",
       "dirty": true,
       "statusSha256": "a225a132ffc44b4e600f5f1a3b99881903f5ac73edc3b4f086bf42acbb7ccf79",
       "dirtyEntryCount": 2
@@ -5003,11 +5138,11 @@
     "pluginSource": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "94c40bcee659f04a2330e7fa05d108669c5c05f9",
-      "gitHead": "94c40bcee659f04a2330e7fa05d108669c5c05f9",
-      "dirty": false,
-      "statusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "dirtyEntryCount": 0
+      "head": "1c1cfa2b5d009dca8aec1def4915148d20f9e8e8",
+      "gitHead": "1c1cfa2b5d009dca8aec1def4915148d20f9e8e8",
+      "dirty": true,
+      "statusSha256": "676fb5b6d2548ff1b36189037e88723309bf000fedf369b2b84c2d5b2f0df86b",
+      "dirtyEntryCount": 1
     }
   },
   "hashingPolicy": {

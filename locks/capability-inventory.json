@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-capability-inventory-v1",
-  "generatedAt": "2026-10-08T06:31:19.138Z",
+  "generatedAt": "2026-10-08T08:16:38.704Z",
   "noModelExecution": true,
   "plugins": [
     {
@@ -181,17 +181,19 @@
       "trainingHooks": [],
       "pluginLoadStatus": "configured_requires_execution_receipt",
       "runtimeBinding": "synchronous_pre_action_ipc",
-      "effectiveHookDecision": true
+      "effectiveHookDecision": true,
+      "trainingHooksExecuted": false,
+      "realTrainingReady": false
     },
     {
       "id": "gaia2-evaluation",
       "sourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/plugins/gaia2-evaluation",
-      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-evaluation/051cb0a75dbf18cf39e739e06a6b671adc6d8f02ac30611a428ea83588a2fa3d",
-      "treeSha256": "051cb0a75dbf18cf39e739e06a6b671adc6d8f02ac30611a428ea83588a2fa3d",
+      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-evaluation/5d67c099e9ff2511bd2e41f19f763eaa5461fab96f771d117c916c40f7c7128a",
+      "treeSha256": "5d67c099e9ff2511bd2e41f19f763eaa5461fab96f771d117c916c40f7c7128a",
       "files": [
         {
           "relativePath": "capybara.plugin.json",
-          "sha256": "8311c8396e172609b834d5300c727fb28e158edb75cb26ff72247e695347130e",
+          "sha256": "3a78d825765c2cffb84e99067371aafe6f037afb2efc03c0be991da976da7772",
           "bytes": 401
         },
         {
@@ -206,13 +208,13 @@
         },
         {
           "relativePath": "hooks/gaia2-attempt-record.ts",
-          "sha256": "51b14c9f49e0b26c0258cbca6635fc09017f2f948d49b1f2795d5ea4bb3a72af",
-          "bytes": 1218
+          "sha256": "7f5f1658b732684de8c5dc6aff559773552111394392c6017562f8e1af3df4f1",
+          "bytes": 915
         },
         {
           "relativePath": "training-hooks/gaia2-correction.ts",
-          "sha256": "fbac2f760f70daa90a1bd47e92b73c5f0f39416aa79272f68750c3b974bdeea6",
-          "bytes": 2026
+          "sha256": "f96b79efc1ee479d99f3471218bc70f9432bad800f6140c3b5c15756a2da50bc",
+          "bytes": 3166
         },
         {
           "relativePath": "variables.json",
@@ -221,11 +223,11 @@
         }
       ],
       "immutablePolicy": "content-addressed-readonly-files-never-overwrite-verify-before-use",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "manifest": {
         "schemaVersion": 1,
         "id": "gaia2-evaluation",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "resources": {
           "variables": "variables.json",
           "harnesses": [
@@ -269,7 +271,7 @@
           "name": "gaia2-attempt-record",
           "checkpoint": "after_evaluation",
           "path": "hooks/gaia2-attempt-record.ts",
-          "sha256": "51b14c9f49e0b26c0258cbca6635fc09017f2f948d49b1f2795d5ea4bb3a72af",
+          "sha256": "7f5f1658b732684de8c5dc6aff559773552111394392c6017562f8e1af3df4f1",
           "inspection": "static-resource-shape-only-not-executed"
         }
       ],
@@ -278,13 +280,15 @@
           "name": "gaia2-correction",
           "checkpoint": "after_evaluation",
           "path": "training-hooks/gaia2-correction.ts",
-          "sha256": "fbac2f760f70daa90a1bd47e92b73c5f0f39416aa79272f68750c3b974bdeea6",
+          "sha256": "f96b79efc1ee479d99f3471218bc70f9432bad800f6140c3b5c15756a2da50bc",
           "inspection": "static-resource-shape-only-not-executed"
         }
       ],
       "pluginLoadStatus": "configured_requires_execution_receipt",
       "runtimeBinding": "synchronous_pre_action_ipc",
-      "effectiveHookDecision": true
+      "effectiveHookDecision": true,
+      "trainingHooksExecuted": false,
+      "realTrainingReady": false
     }
   ],
   "runtime": {
@@ -292,6 +296,8 @@
     "runtimeBinding": "synchronous_pre_action_ipc",
     "effectiveHookDecision": true,
     "runtimeAttestationRequired": true,
+    "trainingHooksExecuted": false,
+    "realTrainingReady": false,
     "checks": [
       {
         "path": "scripts/official_e2e_smoke.mjs",
@@ -384,8 +390,8 @@
         "passed": true
       }
     ],
-    "inspectedProjectSourceCount": 63,
-    "inspectedBackendSourceCount": 39,
+    "inspectedProjectSourceCount": 78,
+    "inspectedBackendSourceCount": 40,
     "projectPluginLoader": {
       "status": "session_scoped_real_backend_host",
       "evidence": [
@@ -405,7 +411,7 @@
     "limitations": [
       "Static wiring inspection is not proof that a particular execution loaded hooks; valid session receipts are mandatory.",
       "Integration scope is the GAIA2 ARE adapter, not a claim that every generic backend tool dispatcher has plugin hooks.",
-      "Training hook sources are registered but after_evaluation/after_replay execution remains disabled until stage 4.",
+      "Training hook resources and wiring are static inventory only; stage 4 training execution requires independently verified receipts.",
       "Official A2A delegation permissions and semantic noise/stale/conflict detection remain stage 5 work.",
       "Legacy Pass5Orchestrator and RuntimeAttempt are not the manifest entrypoints execution path."
     ]
@@ -427,7 +433,7 @@
       },
       {
         "path": "D:/gitlocals/kanli8-human/capybara-backend/src/core/plugins/runtime-plugin-host.ts",
-        "sha256": "a0342bc150e96a491d10af82bbaf189626092fc850f5d4272997e1bee1d055c3"
+        "sha256": "d81ccbdb892f9c88a6d125f1d19ba32d82187950e9ea270e4b891d5d8384127b"
       }
     ],
     "gaps": [],
@@ -436,6 +442,8 @@
   "pluginLoadStatus": "configured_requires_execution_receipt",
   "runtimeBinding": "synchronous_pre_action_ipc",
   "effectiveHookDecision": true,
+  "trainingHooksExecuted": false,
+  "realTrainingReady": false,
   "stage0Status": "frozen_live_wiring_requires_session_receipts",
   "resourceIntegrity": "passed",
   "scope": "static-inventory-and-freeze-session-receipts-are-separate-evidence"
