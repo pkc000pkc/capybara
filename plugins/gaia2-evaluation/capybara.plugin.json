@@ -3,7 +3,7 @@
   "id": "gaia2-evaluation",
   "name": "GAIA2 Evaluation",
   "description": "Five-attempt experiment orchestration, sealed verifier boundary, correction records, and pass@5 aggregation.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "resources": {
     "variables": "variables.json",
     "harnesses": ["harnesses/manifest.json"],

@@ -177,3 +177,46 @@ test('execution classifier preserves operational cooldown and ignores recovered 
   assert.equal(classifyExecutionFailure({ processResult: { loggingError: { code: 'ENOSPC' } }, events: [failed] }).category, 'runtime_error')
   assert.equal(classifyExecutionFailure({ report: { evaluationComplete: true, businessPassed: false }, events: [failed, { type: 'model_request_succeeded', requestId: failed.requestId }] }).category, 'business_failure')
 })
+
+test('correction model requests reuse the same observable retry policy with a separate role', () => {
+  const result = spawnSync(python, ['-c', String.raw`
+import sys
+sys.path.insert(0, 'scripts')
+from gaia2_model_retry import wrap_completion, ModelRetryPolicy
+events = []
+call = wrap_completion(lambda **kwargs: 'methods-only', 'correction', lambda kind, **kw: events.append({'type':kind, **kw}), policy=ModelRetryPolicy(max_attempts=1))
+assert call() == 'methods-only'
+assert [e['type'] for e in events] == ['model_request_attempt', 'model_request_succeeded']
+assert all(e['modelRole'] == 'correction' for e in events)
+try:
+    wrap_completion(lambda:None, 'tool', lambda *a, **kw:None)
+except ValueError:
+    pass
+else:
+    raise AssertionError('tool execution may not enter model retry wrapper')
+`], { cwd: root, encoding: 'utf8', timeout: 30_000 })
+  assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message)
+})
+
+test('model success metering admits only integer token counters and never infers absent usage', () => {
+  const result = spawnSync(python, ['-c', String.raw`
+import sys
+from types import SimpleNamespace
+sys.path.insert(0, 'scripts')
+from gaia2_model_retry import wrap_completion, ModelRetryPolicy
+for value, expected in [
+    ({'usage':{'prompt_tokens':7,'completion_tokens':4,'total_tokens':11,'raw':'SECRET_RAW_BODY'}}, {'inputTokens':7,'outputTokens':4,'totalTokens':11}),
+    (SimpleNamespace(usage=SimpleNamespace(input_tokens=9,output_tokens=2,total_tokens=11)), {'inputTokens':9,'outputTokens':2,'totalTokens':11}),
+    ({'usage':{'prompt_tokens':True,'completion_tokens':-1,'total_tokens':float('nan'),'raw':'SECRET_RAW_BODY'}}, None),
+    ('no provider usage', None),
+]:
+    events=[]
+    call=wrap_completion(lambda **kwargs:value,'actor',lambda kind,**kw:events.append({'type':kind,**kw}),policy=ModelRetryPolicy(max_attempts=1))
+    assert call() is value
+    event=events[-1]
+    assert event['usageAvailable'] == bool(expected)
+    assert event.get('usage') == expected
+    assert 'SECRET' not in str(event)
+`], { cwd: root, encoding: 'utf8', timeout: 30_000 })
+  assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message)
+})

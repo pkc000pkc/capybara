@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+import litellm
 from litellm import completion
 from gaia2_model_retry import install_model_retries
 from gaia2_runtime_hooks import HookProtocolError, RuntimeHookClient
@@ -30,8 +31,50 @@ from are.simulation.types import EnvironmentState
 logger = logging.getLogger(__name__)
 
 
+class BridgeModelProtocolError(ValueError):
+    """Sanitized configuration failure, never a tool or evaluated failure."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__("GAIA2 native model protocol rejected: " + code)
+
+
+def _assert_native_model_protocol() -> None:
+    # Pinned LiteLLM ORs the global drop_params with the per-call value;
+    # drop_params=False alone cannot prevent silent removal. Prompt fallback
+    # and parameter rewriting likewise violate this bridge's native contract.
+    for setting in ("drop_params", "modify_params", "add_function_to_prompt"):
+        if getattr(litellm, setting, False):
+            raise BridgeModelProtocolError("unsafe_litellm_" + setting)
+
+
 def _stable_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, default=str, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _correction_consumption(context_text: str) -> dict[str, str]:
+    """Prove the trusted fixed template is in this exact Actor system input.
+
+    Authority is verified by the Node adapter and live readonly Host before
+    spawning this process. These environment values are never accepted from a
+    training Hook or provider, and the strategy cannot be a separate sidecar.
+    """
+    ordinal = os.environ.get("GAIA2_E2E_CORRECTION_ORDINAL", "0")
+    text = os.environ.get("GAIA2_CORRECTION_STRATEGY_TEXT", "")
+    strategy_hash = os.environ.get("GAIA2_CORRECTION_STRATEGY_HASH", "")
+    context_hash = os.environ.get("GAIA2_CORRECTION_CONTEXT_HASH", "")
+    if ordinal == "0":
+        if text or strategy_hash or context_hash:
+            raise HookProtocolError("initial_actor_has_correction")
+        return {}
+    if ordinal != "1" or not text or len(text.encode("utf-8")) > 32768:
+        raise HookProtocolError("invalid_correction_authority")
+    if any(len(value) != 64 or any(char not in "0123456789abcdef" for char in value)
+           for value in (strategy_hash, context_hash)):
+        raise HookProtocolError("invalid_correction_authority")
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != strategy_hash or text not in context_text:
+        raise HookProtocolError("correction_strategy_not_consumed")
+    return {"consumedStrategyHash": strategy_hash, "correctionContextHash": context_hash}
 
 
 def _actor_visible_tool_result(result: Any) -> tuple[Any, str]:
@@ -268,6 +311,7 @@ def _strict_arguments(raw: str) -> dict[str, Any]:
 
 
 def _call_model(messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str, provider: str | None, endpoint: str | None):
+    _assert_native_model_protocol()
     custom_provider = None if provider in (None, "local") else provider
     return completion(
         model=model,
@@ -275,6 +319,10 @@ def _call_model(messages: list[dict[str, Any]], tools: list[dict[str, Any]], mod
         messages=messages,
         tools=tools,
         tool_choice="auto",
+        parallel_tool_calls=False,
+        drop_params=False,
+        additional_drop_params=[],
+        allowed_openai_params=[],
         api_base=endpoint,
         api_key=os.environ.get("OPENAI_API_KEY"),
         timeout=float(os.environ.get("GAIA2_E2E_LLM_TIMEOUT_SECONDS", "60")),
@@ -391,12 +439,14 @@ def _native_run_with_agent(
                 continue
             context = before["context"]
             context_text = context if isinstance(context, str) else json.dumps(context, ensure_ascii=False, sort_keys=True, default=str)
+            correction_consumption = _correction_consumption(context_text)
             dynamic_message = {"role": "system", "content": "Live Capybara dynamic context:\n" + context_text}
             actor_input = [_actor_messages(messages)[0], dynamic_message, *_actor_messages(messages)[1:]]
             _emit_runtime_event("dynamic_context_injected", turn=iteration, contextHash=before["contextHash"],
                                 injectedContextHash=hashlib.sha256(context_text.encode("utf-8")).hexdigest(),
                                 actorInputHash=_stable_hash(actor_input),
-                                hookRevision=before["revision"], clockNow=env.time_manager.time(), revision=revision)
+                                hookRevision=before["revision"], clockNow=env.time_manager.time(), revision=revision,
+                                **correction_consumption)
             _emit_runtime_event("model_request", turn=iteration, toolCount=len(openai_tools))
             usage["modelRequests"] += 1
             # ARE's pinned LiteLLM engine does not return timing metadata.
@@ -470,14 +520,19 @@ def _native_run_with_agent(
                                                           "conversationTurn": usage["completedTurns"]})
                 before_tool = _invoke_hook(client, "before_tool", env, messages, revision, iteration, action=action)
                 revision, gate_changed, stopped = _drain_notifications(env, messages, revision)
-                invalid = argument_error or len(calls) != 1 or action["effect"] == "unknown"
+                multiple_calls = len(calls) != 1
+                invalid = argument_error or multiple_calls or action["effect"] == "unknown"
                 stale = generation_changed or gate_changed or stopped
                 permission = before_tool["decision"]["action"]
                 if invalid or stale or permission != "allow":
-                    reason = ("stale_dynamic_context" if stale else "invalid_action" if invalid
+                    reason = ("stale_dynamic_context" if stale else "multiple_tool_calls_not_supported" if multiple_calls
+                              else "invalid_action" if invalid
                               else "authoritative_read_required" if permission == "read_back" else "hook_blocked")
                     result = {"status": "blocked", "reason": reason, "executed": False,
                               "requiredAction": "authoritative_read" if permission == "read_back" else "replan"}
+                    if multiple_calls:
+                        result["feedback"] = ("No tool in this multi-call response was executed. "
+                                              "Call exactly one tool per response, inspect its observation, then replan.")
                     outcome = {"status": "failed_before_execution", "complete": True, "executed": False, "reason": reason}
                     usage["blockedTools"] += 1
                     _emit_runtime_event("tool_call_blocked", turn=iteration, callId=call_id,
@@ -554,6 +609,9 @@ def install() -> None:
     global completion
     from are.simulation import scenario_runner
 
+    # Do not let install_model_retries silently clear a pre-existing unsafe
+    # global configuration before we have verified the native contract.
+    _assert_native_model_protocol()
     completion = install_model_retries(_emit_runtime_event, actor_completion=completion)
     scenario_runner.ScenarioRunner._run_with_agent = _native_run_with_agent
     logger.info("Installed Capybara native-tool bridge for official ARE runner")

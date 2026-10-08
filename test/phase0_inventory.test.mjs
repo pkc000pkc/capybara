@@ -101,6 +101,9 @@ test('typed variables, templates, hooks, and training hooks are inspected withou
     assert.equal(result.pluginLoadStatus, 'not_loaded')
     assert.equal(result.runtimeBinding, 'sidecar_only')
     assert.equal(result.effectiveHookDecision, false)
+    assert.equal(result.trainingHooksExecuted, false)
+    assert.equal(result.realTrainingReady, false)
+    assert.ok(result.trainingHooks.every(hook => hook.inspection === 'static-resource-shape-only-not-executed'))
   }
 })
 
@@ -221,6 +224,8 @@ test('actual live wiring requires execution receipts and does not claim generic 
   assert.equal(binding.runtimeBinding, 'synchronous_pre_action_ipc')
   assert.equal(binding.effectiveHookDecision, true)
   assert.equal(binding.runtimeAttestationRequired, true)
+  assert.equal(binding.trainingHooksExecuted, false)
+  assert.equal(binding.realTrainingReady, false)
   assert.ok(binding.checks.every(check => check.passed))
   assert.ok(binding.limitations.some(value => value.includes('generic backend tool dispatcher')))
   assert.ok(binding.limitations.some(value => value.includes('Training hook')))
@@ -237,4 +242,39 @@ test('v1.1 plugin resources can be frozen without claiming a particular executio
   manifest.version = '2.0.0'
   writeFileSync(path, JSON.stringify(manifest))
   assert.throws(() => inspectPluginResources(freezePluginSnapshot({ root, id: 'gaia2-runtime', sourceRoot })), /supported version/)
+})
+
+test('evaluation v1.2 freezes artifact-only hook sources without execution claims and preserves archived v1.0/v1.1', (t) => {
+  const root = fixture(t), sourceRoot = plugin(root, 'gaia2-evaluation')
+  const manifestPath = join(sourceRoot, 'capybara.plugin.json'), manifest = JSON.parse(readFileSync(manifestPath, 'utf8')), snapshots = []
+  for (const version of ['1.0.0', '1.1.0', '1.2.0']) {
+    manifest.version = version; writeFileSync(manifestPath, JSON.stringify(manifest))
+    if (version === '1.2.0') write(sourceRoot, 'training-hooks/correction.ts', 'import { defineHook } from "@capybara-agent/sdk";\nexport default defineHook({ name: "test-correction", checkpoint: "after_evaluation", run() { throw new Error("inventory must never execute an artifact hook"); } });\n')
+    const frozen = freezePluginSnapshot({ root, id: 'gaia2-evaluation', sourceRoot })
+    snapshots.push(frozen)
+    const inspected = inspectPluginResources(frozen)
+    assert.equal(inspected.version, version)
+    assert.equal(inspected.resourceIntegrity.status, 'passed')
+    assert.equal(inspected.trainingHooks[0].inspection, 'static-resource-shape-only-not-executed')
+    assert.equal(inspected.trainingHooksExecuted, false); assert.equal(inspected.realTrainingReady, false)
+  }
+  assert.equal(new Set(snapshots.map(snapshot => snapshot.treeSha256)).size, 3)
+  for (const [index, snapshot] of snapshots.entries()) {
+    assert.equal(hashTree(snapshot.snapshotRoot).treeSha256, snapshot.treeSha256)
+    assert.equal(inspectPluginResources(snapshot).version, ['1.0.0', '1.1.0', '1.2.0'][index])
+  }
+  manifest.version = '1.3.0'; writeFileSync(manifestPath, JSON.stringify(manifest))
+  assert.throws(() => inspectPluginResources(freezePluginSnapshot({ root, id: 'gaia2-evaluation', sourceRoot })), /supported version/)
+})
+
+test('evaluation v1.2 does not silently authorize runtime v1.2 or malformed resource code', (t) => {
+  const root = fixture(t), sourceRoot = plugin(root), manifestPath = join(sourceRoot, 'capybara.plugin.json')
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')); manifest.version = '1.2.0'
+  writeFileSync(manifestPath, JSON.stringify(manifest))
+  assert.throws(() => inspectPluginResources(freezePluginSnapshot({ root, id: 'gaia2-runtime', sourceRoot })), /supported version/)
+  const evaluationRoot = plugin(root, 'gaia2-evaluation'), evaluationManifestPath = join(evaluationRoot, 'capybara.plugin.json')
+  const evaluation = JSON.parse(readFileSync(evaluationManifestPath, 'utf8')); evaluation.version = '1.2.0'
+  writeFileSync(evaluationManifestPath, JSON.stringify(evaluation))
+  write(evaluationRoot, 'training-hooks/correction.ts', 'arbitrary unrecognized executable resource')
+  assert.throws(() => inspectPluginResources(freezePluginSnapshot({ root, id: 'gaia2-evaluation', sourceRoot: evaluationRoot })), /expected defineHook resource shape/)
 })

@@ -3,10 +3,11 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { asyncBufferFromFile, parquetReadObjects } from 'hyparquet'
 import { compressors } from 'hyparquet-compressors'
 import { canonicalScenarioHash } from './phase0_dataset.mjs'
-import { assertPublicConfig, fileDigest, readJson, within } from './phase0_run.mjs'
+import { assertPublicConfig, digest, fileDigest, readJson, within } from './phase0_run.mjs'
 import { runChildProcess } from './phase1_process.mjs'
 import { startRuntimeHookService } from './phase3_hook_service.mjs'
 import { collectRuntimeEvidence } from './phase3_runtime_evidence.mjs'
+import { assertInitialHasNoCorrection } from './phase4_replay_authority.mjs'
 
 function assert(condition, message) { if (!condition) throw new Error(`Phase 1 adapter: ${message}`) }
 function portable(path) { return path.replaceAll('\\', '/') }
@@ -87,6 +88,8 @@ export function readNativeResult({ root, outputDir, task, session, events = [] }
 
 export async function executeOfficialTask({ root, manifest, task, session, settings, signal }) {
   assert(task.phase === 'standard' && settings.minimal === false, 'only untouched standard tasks are currently supported')
+  if ((task.correctionOrdinal ?? 0) === 0) assertInitialHasNoCorrection(task)
+  else assert(task.correctionOrdinal === 1 && manifest.mode === 'correction_replay' && task.correctionContext, 'correction requires a separate fresh replay plan')
   assert(!process.env.GAIA2_E2E_TOOL_ALLOWLIST, 'smoke tool allowlist cannot be inherited by original tasks')
   const protocol = readJson(join(root, 'config/phase0-protocol.json'))
   const connection = readModelConnection(root, manifest.models)
@@ -102,12 +105,20 @@ export async function executeOfficialTask({ root, manifest, task, session, setti
   writeFileSync(fixturePath, `${JSON.stringify(fixture)}\n`, { flag: 'wx' })
   const output = resolve(root, session.outputDir)
   const workspace = resolve(root, session.workspaceDir)
+  let freshReplayFixture = null
+  if (task.correctionOrdinal === 1) {
+    const sourcePath = join(workspace, 'fixture-source.json')
+    writeFileSync(sourcePath, JSON.stringify(JSON.parse(row[columns[1]])) + '\n', { flag: 'wx' })
+    const ref = path => ({ path: portable(relative(root, path)), sha256: fileDigest(path) })
+    freshReplayFixture = { schemaVersion: 'gaia2-phase4-fresh-fixture-v1', originalScenarioHash: task.scenarioHash, original: ref(sourcePath), executed: ref(fixturePath) }
+  }
   const eventPath = join(output, 'runtime-events.jsonl')
   const scriptsRoot = join(root, 'scripts')
   const runnerCode = `import sys, signal; signal.SIGALRM = getattr(signal, 'SIGALRM', signal.SIGTERM); signal.alarm = getattr(signal, 'alarm', lambda _seconds: 0); sys.path.insert(0, ${JSON.stringify(scriptsRoot)}); from capybara_official_bridge import install; install(); from are.simulation.benchmark import main; main()`
   const args = ['-c', runnerCode, 'run', '--dataset', datasetRoot, '--config', task.config, '--agent', 'default', '--model', manifest.models.actor.model, '--provider', manifest.models.actor.provider, '--endpoint', connection.baseUrl, '--judge_model', manifest.models.judge.model, '--judge_provider', manifest.models.judge.provider, '--judge_endpoint', connection.baseUrl, '--limit', '1', '--num_runs', '1', '--max_concurrent_scenarios', '1', '--scenario_timeout', String(settings.scenarioTimeoutSeconds), '--output_dir', output, '--trace_dump_format', 'both', '--log-level', 'INFO']
   const hookService = await startRuntimeHookService({ root, manifest, task, session, settings, signal })
-  const childEnv = { ...process.env, ...modelRuntimeEnvironment(settings), PYTHONPATH: resolve(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', OPENAI_API_KEY: connection.apiKey, GAIA2_E2E_MINIMAL: '0', GAIA2_E2E_MAX_ACTIONS: String(settings.maxActions), GAIA2_E2E_TOOL_ALLOWLIST: '', GAIA2_E2E_ATTEMPT_INDEX: String(task.attemptIndex ?? task.runNumber), GAIA2_E2E_CORRECTION_ORDINAL: '0', GAIA2_EXECUTION_ID: task.executionId, GAIA2_SESSION_ID: session.sessionId, GAIA2_RUNTIME_EVENT_FILE: eventPath, GAIA2_HOOK_URL: hookService.endpoint, GAIA2_HOOK_TOKEN: hookService.token, TMP: workspace, TEMP: workspace, TMPDIR: workspace }
+  const authority = hookService.correctionAuthority
+  const childEnv = { ...process.env, ...modelRuntimeEnvironment(settings), PYTHONPATH: resolve(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', OPENAI_API_KEY: connection.apiKey, GAIA2_E2E_MINIMAL: '0', GAIA2_E2E_MAX_ACTIONS: String(settings.maxActions), GAIA2_E2E_TOOL_ALLOWLIST: '', GAIA2_E2E_ATTEMPT_INDEX: String(task.attemptIndex ?? task.runNumber), GAIA2_E2E_CORRECTION_ORDINAL: String(task.correctionOrdinal ?? 0), GAIA2_CORRECTION_STRATEGY_TEXT: authority?.initializer.value ?? '', GAIA2_CORRECTION_STRATEGY_HASH: authority?.context.strategyHash ?? '', GAIA2_CORRECTION_CONTEXT_HASH: authority ? digest(authority.context) : '', GAIA2_EXECUTION_ID: task.executionId, GAIA2_SESSION_ID: session.sessionId, GAIA2_RUNTIME_EVENT_FILE: eventPath, GAIA2_HOOK_URL: hookService.endpoint, GAIA2_HOOK_TOKEN: hookService.token, TMP: workspace, TEMP: workspace, TMPDIR: workspace }
   let processResult, hostProcess
   try { processResult = await runChildProcess({ command: resolve(root, protocol.runtime.python), args, cwd: workspace, env: childEnv, outputDir: output, processTimeoutMs: settings.processTimeoutMs, heartbeatIntervalMs: settings.heartbeatIntervalMs, signal, secrets: [connection.apiKey, hookService.token] }) }
   finally { hostProcess = await hookService.close() }
@@ -125,7 +136,7 @@ export async function executeOfficialTask({ root, manifest, task, session, setti
   catch { return { processResult, events, report: null, artifacts: [], runtimeEvidenceRequired: true, runtimeAttestation: null, runtimeEvidence: [] } }
   try {
     const runtime = collectRuntimeEvidence({ root, manifest, task, session, events, hostProcess })
-    return { processResult, events, ...native, runtimeEvidenceRequired: true, ...runtime }
+    return { processResult, events, ...native, runtimeEvidenceRequired: true, ...runtime, ...(freshReplayFixture ? { freshReplayFixture } : {}) }
   } catch {
     processResult.loggingError = 'runtime_hook_evidence_invalid'
     return { processResult, events, report: native.report, artifacts: native.artifacts, runtimeEvidenceRequired: true, runtimeAttestation: null, runtimeEvidence: [] }

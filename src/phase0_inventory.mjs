@@ -111,7 +111,10 @@ export function freezePluginSnapshot({ root, id, sourceRoot }) {
 export function inspectPluginResources(snapshot) {
   const root = snapshot.snapshotRoot
   const manifest = readJson(safePath(root, 'capybara.plugin.json', 'plugin manifest'))
-  assert(manifest.schemaVersion === 1 && manifest.id === snapshot.id && ['1.0.0', '1.1.0'].includes(manifest.version), `${snapshot.id} manifest must declare schemaVersion 1 and a supported version (1.0.0/1.1.0)`)
+  // Version 1.2 is the evaluation plugin's enum-only, artifact-only correction
+  // contract. Historical 1.0/1.1 snapshots remain readable, never upgraded.
+  const supportedVersions = snapshot.id === 'gaia2-evaluation' ? ['1.0.0', '1.1.0', '1.2.0'] : ['1.0.0', '1.1.0']
+  assert(PLUGINS.includes(snapshot.id) && manifest.schemaVersion === 1 && manifest.id === snapshot.id && supportedVersions.includes(manifest.version), `${snapshot.id} manifest must declare schemaVersion 1 and a supported version (${supportedVersions.join('/')})`)
   const resources = manifest.resources
   assert(isObject(resources), `${snapshot.id} resources declaration missing`)
   assert(Object.keys(resources).every((key) => ['variables', 'harnesses', 'hooks', 'trainingHooks'].includes(key)), `${snapshot.id} unknown resource declaration`)
@@ -166,6 +169,7 @@ export function inspectPluginResources(snapshot) {
     variables: { path: resources.variables, count: variables.variables.length, keys: [...variableKeys], typedObjectCount: variables.variables.filter((variable) => variable.type === 'object').length },
     harnesses, ...hookResources,
     pluginLoadStatus: 'not_loaded', runtimeBinding: 'sidecar_only', effectiveHookDecision: false,
+    trainingHooksExecuted: false, realTrainingReady: false,
   }
 }
 
@@ -292,10 +296,11 @@ export function inspectRuntimeBinding(root, backendRoot) {
     for (const check of checks) assert(check.passed, `unknown runtime binding: ${check.path}: ${check.check}`)
     return {
       pluginLoadStatus: 'configured_requires_execution_receipt', runtimeBinding: 'synchronous_pre_action_ipc', effectiveHookDecision: true, runtimeAttestationRequired: true,
+      trainingHooksExecuted: false, realTrainingReady: false,
       checks, inspectedProjectSourceCount: projectSources.length, inspectedBackendSourceCount: backendSources.length,
       projectPluginLoader: { status: 'session_scoped_real_backend_host', evidence: [paths.adapter, ...Object.values(livePaths), paths.bridge] },
       backendPluginLoader: { status: 'real_typescript_worker_and_persistent_harness', evidence: [hostPath] },
-      limitations: ['Static wiring inspection is not proof that a particular execution loaded hooks; valid session receipts are mandatory.', 'Integration scope is the GAIA2 ARE adapter, not a claim that every generic backend tool dispatcher has plugin hooks.', 'Training hook sources are registered but after_evaluation/after_replay execution remains disabled until stage 4.', 'Official A2A delegation permissions and semantic noise/stale/conflict detection remain stage 5 work.', 'Legacy Pass5Orchestrator and RuntimeAttempt are not the manifest entrypoints execution path.'],
+      limitations: ['Static wiring inspection is not proof that a particular execution loaded hooks; valid session receipts are mandatory.', 'Integration scope is the GAIA2 ARE adapter, not a claim that every generic backend tool dispatcher has plugin hooks.', 'Training hook resources and wiring are static inventory only; stage 4 training execution requires independently verified receipts.', 'Official A2A delegation permissions and semantic noise/stale/conflict detection remain stage 5 work.', 'Legacy Pass5Orchestrator and RuntimeAttempt are not the manifest entrypoints execution path.'],
     }
   }
   // Search executable import/load/registration syntax, not arbitrary mention strings.
@@ -305,6 +310,7 @@ export function inspectRuntimeBinding(root, backendRoot) {
   assert(projectLoaderEvidence.length === 0 && backendLoaderEvidence.length === 0, 'plugin loader wiring changed; manual boundary review required, not assumed loaded')
   return {
     pluginLoadStatus: 'not_loaded', runtimeBinding: 'sidecar_only', effectiveHookDecision: false,
+    trainingHooksExecuted: false, realTrainingReady: false,
     checks, inspectedProjectSourceCount: projectSources.length, inspectedBackendSourceCount: backendSources.length,
     projectPluginLoader: { status: 'not_present_in_inspected_wiring', evidence: projectLoaderEvidence },
     backendPluginLoader: { status: 'not_present_in_inspected_wiring', evidence: backendLoaderEvidence },
@@ -383,6 +389,7 @@ export function freezeInventory({ root, protocol } = {}) {
     plugins, runtime: binding, backendCompatibility: compatibility,
     pluginLoadStatus: binding.pluginLoadStatus, runtimeBinding: binding.runtimeBinding,
     effectiveHookDecision: binding.effectiveHookDecision,
+    trainingHooksExecuted: false, realTrainingReady: false,
     stage0Status: binding.effectiveHookDecision ? 'frozen_live_wiring_requires_session_receipts' : 'frozen_with_known_runtime_gaps', resourceIntegrity: 'passed',
     scope: 'static-inventory-and-freeze-session-receipts-are-separate-evidence',
   }

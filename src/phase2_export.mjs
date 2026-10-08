@@ -47,7 +47,7 @@ export function validateExportPlan(root, manifest, { allowSynthetic = false } = 
     keys.add(key); ids.add(task.executionId)
     check(['standard', 'agent2agent', 'noise'].includes(task.phase) && /^[a-z][a-z0-9_-]*$/.test(task.config) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(task.executionId), 'unsafe execution identity/layout')
     check(Number.isInteger(task.runNumber) && task.runNumber >= 1 && task.runNumber <= (manifest.mode === 'official_submission' ? 3 : 5), 'invalid run numbering')
-    check(task.correctionOrdinal === 0 && manifest.policy.maxCorrections === 0, 'correction export is not connected until phase 4')
+    check(task.correctionOrdinal === 0 && manifest.policy.maxCorrections === 0, 'correction replay cannot be exported as an initial official result')
   }
   const frozenSources = {}
   if (!synthetic) {

@@ -34,7 +34,7 @@ export function assertSupportedPlan(manifest) {
   const { manifestHash, ...contents } = manifest
   assert(manifestHash === digest(contents), 'manifest content hash differs')
   assert(manifest.tasks?.length && manifest.tasks.every(task => task.phase === 'standard'), 'A2A/Noise execution is not connected until phase 5; entire run rejected before spawning')
-  assert(manifest.policy.maxCorrections === 0, 'real correction execution is not connected until phase 4')
+  assert(manifest.policy.maxCorrections === 0, 'initial batches cannot run corrections; use a separate phase 4 fresh replay plan')
   assert(new Set(manifest.tasks.map(task => task.executionId)).size === manifest.tasks.length, 'duplicate execution identity')
 }
 

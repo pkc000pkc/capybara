@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, isAbsolute, join, posix, relative, resolve, win32 } from 'node:path'
 import { digest, fileDigest, readJson, within } from './phase0_run.mjs'
+import { assertInitialHasNoCorrection, verifyCorrectionReplayAuthority } from './phase4_replay_authority.mjs'
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const hash = value => createHash('sha256').update(value).digest('hex')
@@ -116,6 +117,29 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
   check(harnesses.length > 0 && digest(harnesses) === digest(initialization.harnesses) && hooks.size === initialization.runtimeHooks?.length, 'harness_or_hook_inventory')
   if (object(values.gaia2_scenario_state)) values.gaia2_scenario_state = { ...values.gaia2_scenario_state, scenario_id: task.scenarioId }
   if (object(values.gaia2_attempt_state)) values.gaia2_attempt_state = { ...values.gaia2_attempt_state, attempt_id: task.executionId, attempt_index: task.attemptIndex ?? 0, status: 'running' }
+  let correctionAuthority = null
+  if ((task.correctionOrdinal ?? 0) === 0) {
+    assertInitialHasNoCorrection(task)
+    check(!Object.hasOwn(initialization, 'readonlySessionInitializations') && !Object.hasOwn(attestation, 'correctionContext') && !Object.hasOwn(attestation, 'correctionAuthorityPath'), 'initial_has_correction_receipt')
+  } else {
+    const authorityReceipt = json(attestation.correctionAuthorityPath)
+    check(authorityReceipt.schemaVersion === 'gaia2-phase4-runtime-authority-v1' && Array.isArray(authorityReceipt.files) && authorityReceipt.files.length, 'missing_correction_authority')
+    const originals = new Map()
+    for (const ref of authorityReceipt.files) {
+      check(pathSyntax(ref.originalPath) && pathSyntax(ref.path) && HASH.test(ref.sha256 ?? '') && !originals.has(ref.originalPath) && hash(bytes(ref.path)) === ref.sha256, 'correction_authority_reference')
+      originals.set(ref.originalPath, ref)
+    }
+    correctionAuthority = verifyCorrectionReplayAuthority({ manifest, task, readEvidence: originalPath => {
+      check(originals.has(originalPath), 'unsealed_correction_authority')
+      return bytes(originals.get(originalPath).path)
+    } })
+    check(correctionAuthority.consumed.size === originals.size && digest(authorityReceipt.context) === digest(correctionAuthority.context)
+      && digest(attestation.correctionContext) === digest(correctionAuthority.context) && digest(authorityReceipt.initializer) === digest(correctionAuthority.initializer), 'correction_authority_changed')
+    const definition = definitions.get('gaia2_experiment_context'), initializer = correctionAuthority.initializer
+    check(definition?.type === 'text' && definition.scope === 'session' && definition.readonly === true, 'correction_variable_not_readonly_session')
+    check(digest(initialization.readonlySessionInitializations) === digest([{ ...initializer, pluginId: definition.pluginId, type: 'text', scope: 'session', readonly: true, valueHash: jsonHash(initializer.value) }]), 'readonly_initialization_not_trusted')
+    values.gaia2_experiment_context = initializer.value
+  }
   check(jsonHash(values) === initialization.variablesHash, 'initial_variables_hash')
   let priorHash = initialization.variablesHash, previousValues = values, revision = 1
   check(Array.isArray(attestation.invocationPaths) && attestation.invocationPaths.length, 'missing_invocations')
@@ -154,6 +178,10 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
   for (let i = 0; i < models.length; i++) {
     const item = injected[i], model = models[i], before = bound.findLast(entry => entry.index < item.index)
     check(before?.receipt.input.checkpoint === 'before_model' && !modelBindings.has(before.index) && before.receipt.decision.action === 'allow' && item.index < model.index && model.event.turn === i && item.event.turn === model.event.turn && before.receipt.input.loop?.iteration === item.event.turn && item.event.contextHash === before.receipt.contextHash && item.event.injectedContextHash === hash(before.receipt.context) && item.event.hookRevision === before.receipt.revision && HASH.test(item.event.actorInputHash ?? ''), 'actor_context_injection_mismatch')
+    if (correctionAuthority) check(before.receipt.variables.gaia2_experiment_context === correctionAuthority.initializer.value
+      && before.receipt.context.includes(correctionAuthority.initializer.value) && item.event.consumedStrategyHash === correctionAuthority.context.strategyHash
+      && item.event.correctionContextHash === digest(correctionAuthority.context), 'correction_strategy_not_consumed')
+    else check(!Object.hasOwn(item.event, 'consumedStrategyHash') && !Object.hasOwn(item.event, 'correctionContextHash'), 'initial_actor_has_correction')
     modelBindings.add(before.index)
   }
   const toolEvents = events.map((event, index) => ({ event, index })).filter(item => ['tool_call_started', 'tool_call_blocked'].includes(item.event.type)), usedCalls = new Set()
@@ -174,6 +202,7 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
   check(bound.at(-1).receipt.input.checkpoint === 'attempt_end' && bound.at(-1).receipt.input.loop?.terminal === true && events.some(event => event.type === 'attempt_execution_ended'), 'missing_attempt_end')
   check(used.size === files.size, 'unconsumed_evidence')
   const summary = { invocationCount: invocations.length, modelRequestCount: models.length, toolGateCount: toolEvents.length, typedVariableCount: definitions.size, persistentHarnessCount: harnesses.length, actorInputHashReconstructed: false, trainingHooksExecuted: false }
+  if (correctionAuthority) Object.assign(summary, { correctionOrdinal: 1, readonlyInitializationVerified: true, strategyConsumedModelRequests: models.length, consumedStrategyHash: correctionAuthority.context.strategyHash })
   check(digest(attestation.summary) === digest(summary), 'attestation_summary_mismatch')
   return { ...summary, realHooksReady: manifest.syntheticFixtureOnly !== true }
 }
@@ -212,6 +241,13 @@ export function collectRuntimeEvidence({ root, manifest, task, session, events, 
   const runtimeEvidence = [...receipts, hostProcessPath, readyPath, portable(relative(root, capturedCapabilities)), ...sourceFiles.map(file => file.path)].map(path => ref(localFile(root, path)))
   const invocations = receipts.slice(1).map(path => readJson(resolve(root, path)))
   const runtimeAttestation = { schemaVersion: 'gaia2-runtime-attestation-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, runNumber: task.runNumber, phase: task.phase, config: task.config, capabilitiesSha256: capabilityRef.sha256, capabilitiesPath: portable(relative(root, capturedCapabilities)), initializationPath: initial[0], invocationPaths: receipts.slice(1), hostProcessPath, readyPath, sourceFiles, evidenceHash: digest(runtimeEvidence), eventsHash: digest(events), summary: { invocationCount: invocations.length, modelRequestCount: events.filter(event => event.type === 'model_request').length, toolGateCount: events.filter(event => ['tool_call_started', 'tool_call_blocked'].includes(event.type)).length, typedVariableCount: Object.keys(invocations[0]?.variables ?? {}).length, persistentHarnessCount: readJson(resolve(root, initial[0])).harnesses.length, actorInputHashReconstructed: false, trainingHooksExecuted: false } }
+  if ((task.correctionOrdinal ?? 0) === 1) {
+    const correctionAuthorityPath = portable(join(session.workspaceDir, 'correction-authority/index.json'))
+    const authority = readJson(localFile(root, correctionAuthorityPath))
+    runtimeEvidence.push(...[correctionAuthorityPath, ...authority.files.map(file => file.path)].map(path => ref(localFile(root, path))))
+    Object.assign(runtimeAttestation, { correctionAuthorityPath, correctionContext: authority.context, evidenceHash: digest(runtimeEvidence) })
+    Object.assign(runtimeAttestation.summary, { correctionOrdinal: 1, readonlyInitializationVerified: true, strategyConsumedModelRequests: runtimeAttestation.summary.modelRequestCount, consumedStrategyHash: authority.context.strategyHash })
+  }
   validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation, runtimeEvidence, readEvidence: path => readFileSync(localFile(root, path)) })
   return { runtimeAttestation, runtimeEvidence }
 }

@@ -11,6 +11,7 @@ reports/phase2-tests.xml
 reports/phase2-recheck-tests*.xml
 reports/phase2-tools-*/
 reports/phase3-*.xml
+reports/phase4-*.xml
 *.log
 data/source/
 data/submission/

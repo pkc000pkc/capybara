@@ -175,6 +175,24 @@ def classify_model_error(error: Exception) -> dict[str, Any]:
     return {"category": category, "retryable": retryable, "httpStatus": status}
 
 
+def _safe_usage(result: Any) -> dict[str, Any]:
+    """Token counters only; absent/invalid usage is unknown, never inferred."""
+    try:
+        usage = result.get("usage") if isinstance(result, Mapping) else getattr(result, "usage", None)
+        safe = {}
+        for target, aliases in (("inputTokens", ("prompt_tokens", "input_tokens")),
+                                ("outputTokens", ("completion_tokens", "output_tokens")),
+                                ("totalTokens", ("total_tokens",))):
+            for name in aliases:
+                value = usage.get(name) if isinstance(usage, Mapping) else getattr(usage, name, None)
+                if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 9007199254740991:
+                    safe[target] = value
+                    break
+        return {"usageAvailable": bool(safe), **({"usage": safe} if safe else {})}
+    except Exception:
+        return {"usageAvailable": False}
+
+
 def wrap_completion(
     completion: Callable[..., Any],
     role: str,
@@ -185,8 +203,8 @@ def wrap_completion(
     sleep: Callable[[float], None] = time.sleep,
 ) -> Callable[..., Any]:
     """Wrap one model request; caller-side tool execution is never in scope."""
-    if role not in ("actor", "judge"):
-        raise ValueError("model retry role must be actor or judge")
+    if role not in ("actor", "judge", "correction"):
+        raise ValueError("model retry role must be actor, judge or correction")
     if getattr(completion, "_gaia2_model_retry", False):
         return completion
 
@@ -207,7 +225,7 @@ def wrap_completion(
                 now = clock()
                 hint, hint_source = retry_delay_hint(error, now)
             else:
-                emit("model_request_succeeded", **operational)
+                emit("model_request_succeeded", **operational, **_safe_usage(result))
                 return result
             # Leave the SDK exception handler before waiting: cancellation or a
             # logging failure must not inherit a raw credential-bearing cause.
