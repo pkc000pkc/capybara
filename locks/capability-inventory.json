@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-capability-inventory-v1",
-  "generatedAt": "2026-10-08T15:26:15.559Z",
+  "generatedAt": "2026-10-08T15:59:03.621Z",
   "noModelExecution": true,
   "plugins": [
     {
@@ -390,7 +390,7 @@
         "passed": true
       }
     ],
-    "inspectedProjectSourceCount": 80,
+    "inspectedProjectSourceCount": 81,
     "inspectedBackendSourceCount": 40,
     "projectPluginLoader": {
       "status": "session_scoped_real_backend_host",
