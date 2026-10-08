@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-environment-lock-v1",
-  "generatedAt": "2026-10-08T05:34:40.473Z",
+  "generatedAt": "2026-10-08T05:51:21.289Z",
   "timeSource": "client-system-clock-new-Date-ISO-not-authoritative-dataset-time",
   "noModelExecution": true,
   "secretConfigRead": false,
@@ -1662,7 +1662,7 @@
     ]
   },
   "packageLockSha256": "6f9c567badd221e703988d7e8d1f3190d111b45f9d396dedfb12e4dcddc64788",
-  "bridgeSha256": "fc8214863402c4cd54df016a23d88358441e71eb0987ce5e88f74e87dbf8f44d",
+  "bridgeSha256": "b4177c4a6f2277efc7c5da8d353824129e6a91c6877cc745cf5250fe0adad079",
   "codeInputs": [
     {
       "path": "config/phase0-protocol.json",
@@ -1791,8 +1791,8 @@
     },
     {
       "path": "scripts/capybara_official_bridge.py",
-      "sha256": "fc8214863402c4cd54df016a23d88358441e71eb0987ce5e88f74e87dbf8f44d",
-      "bytes": 28752
+      "sha256": "b4177c4a6f2277efc7c5da8d353824129e6a91c6877cc745cf5250fe0adad079",
+      "bytes": 29741
     },
     {
       "path": "scripts/download_dataset.mjs",
@@ -1905,14 +1905,19 @@
       "bytes": 26227
     },
     {
+      "path": "scripts/phase3_acceptance.mjs",
+      "sha256": "3ff40f65ba5962370bc875180e2dc9fb7351283ba0805bb4361d934431dd8098",
+      "bytes": 29496
+    },
+    {
       "path": "scripts/phase3_controlled_fixture.py",
-      "sha256": "9f8ebab1af6c72d2b35121c0b5f4d60fe533850bd20c98fec46eed6ae87649d5",
-      "bytes": 12925
+      "sha256": "c77399c8ca7d21a9c7ce1ba5fe4fb432e76974c0024125a1b8a0be290b4f54be",
+      "bytes": 14300
     },
     {
       "path": "scripts/phase3_controlled_validation.mjs",
-      "sha256": "9c689a2cbe8e7488a9a28ded40d49f596cadd1879b478d838f4001fcb406c90a",
-      "bytes": 20250
+      "sha256": "c8a4ef932f05b70a0560d9d450d9a01bc10578a309b780f18d133fbab74e7a25",
+      "bytes": 20960
     },
     {
       "path": "scripts/phase3_hook_server.ts",
@@ -2170,14 +2175,19 @@
       "bytes": 13993
     },
     {
+      "path": "test/phase3_acceptance.test.mjs",
+      "sha256": "ca7bcd10841c5f6b6c9c20e8d72d13228e20a53696515fc8d632df681bb9536f",
+      "bytes": 7393
+    },
+    {
       "path": "test/phase3_bridge.test.mjs",
-      "sha256": "ebc33d16155f06479022eae99ce88d7a853221e1c80d63f611b75655947b9f5e",
-      "bytes": 26148
+      "sha256": "7aea53fda511ac397dedbb89ad7bf0295be68c3c7b7406ab5ef1b83f173ec4d9",
+      "bytes": 30244
     },
     {
       "path": "test/phase3_controlled.test.mjs",
-      "sha256": "cfcc2332ac4de56280ec08611c436933056d2c45e4749a07226716a6e6b6e2ec",
-      "bytes": 2537
+      "sha256": "55f0258bbe7bd6a58a1c61719fa9a11ae3af7e8744b69368d5d4cff75d4820a2",
+      "bytes": 2617
     },
     {
       "path": "test/phase3_hook_service.test.mjs",
@@ -2215,7 +2225,7 @@
       "bytes": 1443
     }
   ],
-  "contentTreeSha256": "a882142c7254b08df55e4bf39fbb03bcd609fe3eec7a12bc8215141c058b4990",
+  "contentTreeSha256": "522a1c1f218aa74f1d3e3ca01dc3f454bfddd85ce27ca30d81014e38ce61305f",
   "officialCodeInputs": [
     {
       "path": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.official-python/are/__init__.py",
@@ -4975,8 +4985,8 @@
     "project": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "3eadf813d2f97789f95eae6ed3926509cbd24cef",
-      "gitHead": "3eadf813d2f97789f95eae6ed3926509cbd24cef",
+      "head": "7367679b121b530a7c9f2327df2f0c242c666795",
+      "gitHead": "7367679b121b530a7c9f2327df2f0c242c666795",
       "dirty": false,
       "statusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "dirtyEntryCount": 0
@@ -4993,8 +5003,8 @@
     "pluginSource": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "3eadf813d2f97789f95eae6ed3926509cbd24cef",
-      "gitHead": "3eadf813d2f97789f95eae6ed3926509cbd24cef",
+      "head": "7367679b121b530a7c9f2327df2f0c242c666795",
+      "gitHead": "7367679b121b530a7c9f2327df2f0c242c666795",
       "dirty": false,
       "statusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "dirtyEntryCount": 0
