@@ -1,17 +1,17 @@
 {
   "schemaVersion": "gaia2-capability-inventory-v1",
-  "generatedAt": "2026-10-08T04:38:50.974Z",
+  "generatedAt": "2026-10-08T05:34:40.473Z",
   "noModelExecution": true,
   "plugins": [
     {
       "id": "gaia2-runtime",
-      "sourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia-project/workspace/plugins/gaia2-runtime",
-      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/580ddb587a935e140e75c1d17715aa0048e00683abf4ef486707a25eface06be",
-      "treeSha256": "580ddb587a935e140e75c1d17715aa0048e00683abf4ef486707a25eface06be",
+      "sourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/plugins/gaia2-runtime",
+      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/426678ce73f28982db7704f289f9393a840603b6708e816855d036dfebc79d56",
+      "treeSha256": "426678ce73f28982db7704f289f9393a840603b6708e816855d036dfebc79d56",
       "files": [
         {
           "relativePath": "capybara.plugin.json",
-          "sha256": "7c508d61a7656845420d55201dc11aecfe88fab92d1ecb52ff77f1f2979f8a4f",
+          "sha256": "c5183d7efb02522e14e13c40042017d65f41854bfb0c29807fd85adc469ca1e9",
           "bytes": 366
         },
         {
@@ -21,56 +21,61 @@
         },
         {
           "relativePath": "harnesses/runtime-contract.j2",
-          "sha256": "50d91265e7b65168d756e24ac77e06d32374826c8874bbe286d2ff4b9e793f57",
-          "bytes": 941
+          "sha256": "ff24c8629a820760015caa540fa8e7aa4601698a7a15744a0c19bba897bb4cdd",
+          "bytes": 1516
         },
         {
           "relativePath": "hooks/gaia2-a2a-guard.ts",
-          "sha256": "95b68fa80f0192c2600528f33b74e338dd71f466266c5a7a32e84014be64cd7c",
-          "bytes": 2046
+          "sha256": "f4f03f6edcf479255ff97c276a63a78374a2c40bf63ebe0aec2aea0e0f92e627",
+          "bytes": 1541
         },
         {
           "relativePath": "hooks/gaia2-attempt-finalize.ts",
-          "sha256": "ea2df535614dd3793de734f2cc60d32ae0c14b0af8a9ed9e6b43812440d1ac04",
-          "bytes": 1137
+          "sha256": "9c82c412ed18c20ad2934286206e663b6e3cd0752821e7da302c70db8b774874",
+          "bytes": 811
         },
         {
           "relativePath": "hooks/gaia2-conflict-gate.ts",
-          "sha256": "1b03762b9cabd30eff2480b5a1f899f4a7d51b406092944cbb3a7aefad8ccbcc",
-          "bytes": 1661
+          "sha256": "02f2021b9ae894eaf3f4f44f7a7e35c95460af40b304d97cc8c451b8e28f10d2",
+          "bytes": 1400
         },
         {
           "relativePath": "hooks/gaia2-event-sync.ts",
-          "sha256": "8df67c4261787e341965b9c306518b91cc8970662b2856ed384827e980079e30",
-          "bytes": 1867
+          "sha256": "60430be683e3456d1fecbdf39f43623442db01069fffd22a77e580339039b42d",
+          "bytes": 1585
         },
         {
           "relativePath": "hooks/gaia2-noise-classifier.ts",
-          "sha256": "23680bde77b511f0409fb9be314ed6f2ca81647cc3a22d0e3558dbc77f3a3ef9",
-          "bytes": 3787
+          "sha256": "11e4f36858fee89925a7c35386824709f56935874c2133755c11a5679c228f29",
+          "bytes": 2346
         },
         {
           "relativePath": "hooks/gaia2-replan.ts",
-          "sha256": "be51bf2767dc27dd8683aa1971dcea054e9d0a1cdaff4e507ecb9f2fed8e8b96",
-          "bytes": 1421
+          "sha256": "98f4e74054051ea4c8d46c6a35e220a422a2d1758b0db28dc5b43c2c2aa749a2",
+          "bytes": 1386
         },
         {
           "relativePath": "hooks/gaia2-write-guard.ts",
-          "sha256": "e85af1c4af9ad7a3f3977d5e75fc57d067eef5ffe6a392cb2aeeb52b189311bc",
-          "bytes": 1801
+          "sha256": "1b183840e43f71ef659d8977d2ff644d51ae8c421eac3938592a0b6ac1d1f97f",
+          "bytes": 2178
+        },
+        {
+          "relativePath": "hooks/gaia2-write-outcome.ts",
+          "sha256": "6a2529306736e2059575ce66d5b17a214642b787ac5d87976ea651eb342bb9aa",
+          "bytes": 1807
         },
         {
           "relativePath": "variables.json",
-          "sha256": "c8db3ff5386a7ae6362e5611774e330af4416ac9f769bdb7d2772dc9d6cca991",
-          "bytes": 4859
+          "sha256": "70cf7cd640f0ff384867b3b6ecdef58bfaa7dad87184f85ff59c939f019acd92",
+          "bytes": 4891
         }
       ],
       "immutablePolicy": "content-addressed-readonly-files-never-overwrite-verify-before-use",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "manifest": {
         "schemaVersion": 1,
         "id": "gaia2-runtime",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "resources": {
           "variables": "variables.json",
           "harnesses": [
@@ -112,74 +117,81 @@
           "type": "persistent",
           "manifestPath": "harnesses/manifest.json",
           "entryPath": "harnesses/runtime-contract.j2",
-          "sha256": "50d91265e7b65168d756e24ac77e06d32374826c8874bbe286d2ff4b9e793f57"
+          "sha256": "ff24c8629a820760015caa540fa8e7aa4601698a7a15744a0c19bba897bb4cdd"
         }
       ],
       "hooks": [
         {
           "name": "gaia2-a2a-guard",
-          "checkpoint": "after_loop",
+          "checkpoint": "before_tool",
           "path": "hooks/gaia2-a2a-guard.ts",
-          "sha256": "95b68fa80f0192c2600528f33b74e338dd71f466266c5a7a32e84014be64cd7c",
+          "sha256": "f4f03f6edcf479255ff97c276a63a78374a2c40bf63ebe0aec2aea0e0f92e627",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-attempt-finalize",
-          "checkpoint": "after_loop",
+          "checkpoint": "attempt_end",
           "path": "hooks/gaia2-attempt-finalize.ts",
-          "sha256": "ea2df535614dd3793de734f2cc60d32ae0c14b0af8a9ed9e6b43812440d1ac04",
+          "sha256": "9c82c412ed18c20ad2934286206e663b6e3cd0752821e7da302c70db8b774874",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-conflict-gate",
-          "checkpoint": "after_loop",
+          "checkpoint": "before_tool",
           "path": "hooks/gaia2-conflict-gate.ts",
-          "sha256": "1b03762b9cabd30eff2480b5a1f899f4a7d51b406092944cbb3a7aefad8ccbcc",
+          "sha256": "02f2021b9ae894eaf3f4f44f7a7e35c95460af40b304d97cc8c451b8e28f10d2",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-event-sync",
-          "checkpoint": "after_loop",
+          "checkpoint": "before_model",
           "path": "hooks/gaia2-event-sync.ts",
-          "sha256": "8df67c4261787e341965b9c306518b91cc8970662b2856ed384827e980079e30",
+          "sha256": "60430be683e3456d1fecbdf39f43623442db01069fffd22a77e580339039b42d",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-noise-classifier",
-          "checkpoint": "after_loop",
+          "checkpoint": "after_tool",
           "path": "hooks/gaia2-noise-classifier.ts",
-          "sha256": "23680bde77b511f0409fb9be314ed6f2ca81647cc3a22d0e3558dbc77f3a3ef9",
+          "sha256": "11e4f36858fee89925a7c35386824709f56935874c2133755c11a5679c228f29",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-replan",
-          "checkpoint": "after_loop",
+          "checkpoint": "before_model",
           "path": "hooks/gaia2-replan.ts",
-          "sha256": "be51bf2767dc27dd8683aa1971dcea054e9d0a1cdaff4e507ecb9f2fed8e8b96",
+          "sha256": "98f4e74054051ea4c8d46c6a35e220a422a2d1758b0db28dc5b43c2c2aa749a2",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-write-guard",
-          "checkpoint": "after_loop",
+          "checkpoint": "before_tool",
           "path": "hooks/gaia2-write-guard.ts",
-          "sha256": "e85af1c4af9ad7a3f3977d5e75fc57d067eef5ffe6a392cb2aeeb52b189311bc",
+          "sha256": "1b183840e43f71ef659d8977d2ff644d51ae8c421eac3938592a0b6ac1d1f97f",
+          "inspection": "static-resource-shape-only-not-executed"
+        },
+        {
+          "name": "gaia2-write-outcome",
+          "checkpoint": "after_tool",
+          "path": "hooks/gaia2-write-outcome.ts",
+          "sha256": "6a2529306736e2059575ce66d5b17a214642b787ac5d87976ea651eb342bb9aa",
           "inspection": "static-resource-shape-only-not-executed"
         }
       ],
       "trainingHooks": [],
-      "pluginLoadStatus": "not_loaded",
-      "runtimeBinding": "sidecar_only",
-      "effectiveHookDecision": false
+      "pluginLoadStatus": "configured_requires_execution_receipt",
+      "runtimeBinding": "synchronous_pre_action_ipc",
+      "effectiveHookDecision": true
     },
     {
       "id": "gaia2-evaluation",
-      "sourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia-project/workspace/plugins/gaia2-evaluation",
-      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-evaluation/cd83947bfc6ff606f5db91ac079093a47ea94fa4243551f8fb3511fb8b30b66b",
-      "treeSha256": "cd83947bfc6ff606f5db91ac079093a47ea94fa4243551f8fb3511fb8b30b66b",
+      "sourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/plugins/gaia2-evaluation",
+      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-evaluation/051cb0a75dbf18cf39e739e06a6b671adc6d8f02ac30611a428ea83588a2fa3d",
+      "treeSha256": "051cb0a75dbf18cf39e739e06a6b671adc6d8f02ac30611a428ea83588a2fa3d",
       "files": [
         {
           "relativePath": "capybara.plugin.json",
-          "sha256": "94cc0bfaefdd64dfb048c5e473c17e7b529aafe3a7212c58dbe066609f3275fb",
+          "sha256": "8311c8396e172609b834d5300c727fb28e158edb75cb26ff72247e695347130e",
           "bytes": 401
         },
         {
@@ -209,11 +221,11 @@
         }
       ],
       "immutablePolicy": "content-addressed-readonly-files-never-overwrite-verify-before-use",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "manifest": {
         "schemaVersion": 1,
         "id": "gaia2-evaluation",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "resources": {
           "variables": "variables.json",
           "harnesses": [
@@ -270,15 +282,16 @@
           "inspection": "static-resource-shape-only-not-executed"
         }
       ],
-      "pluginLoadStatus": "not_loaded",
-      "runtimeBinding": "sidecar_only",
-      "effectiveHookDecision": false
+      "pluginLoadStatus": "configured_requires_execution_receipt",
+      "runtimeBinding": "synchronous_pre_action_ipc",
+      "effectiveHookDecision": true
     }
   ],
   "runtime": {
-    "pluginLoadStatus": "not_loaded",
-    "runtimeBinding": "sidecar_only",
-    "effectiveHookDecision": false,
+    "pluginLoadStatus": "configured_requires_execution_receipt",
+    "runtimeBinding": "synchronous_pre_action_ipc",
+    "effectiveHookDecision": true,
+    "runtimeAttestationRequired": true,
     "checks": [
       {
         "path": "scripts/official_e2e_smoke.mjs",
@@ -332,71 +345,98 @@
       },
       {
         "path": "src/phase1_official.mjs",
-        "check": "reads-lifecycle-sidecar-only-after-official-child-returns",
+        "check": "collects-lifecycle-events-after-supervised-child-returns",
+        "passed": true
+      },
+      {
+        "path": "src/phase1_official.mjs",
+        "check": "starts-session-host-before-official-child-and-closes-in-finally",
+        "passed": true
+      },
+      {
+        "path": "src/phase3_hook_service.mjs",
+        "check": "supervises-real-typescript-host-with-frozen-files-and-session-capability",
+        "passed": true
+      },
+      {
+        "path": "scripts/phase3_hook_server.ts",
+        "check": "authenticates-loopback-and-invokes-real-backend-host",
+        "passed": true
+      },
+      {
+        "path": "scripts/gaia2_runtime_hooks.py",
+        "check": "synchronous-loopback-client-validates-raw-context-sha",
+        "passed": true
+      },
+      {
+        "path": "scripts/capybara_official_bridge.py",
+        "check": "tool-execution-waits-for-before-tool-allow-and-after-tool-must-pass",
+        "passed": true
+      },
+      {
+        "path": "scripts/capybara_official_bridge.py",
+        "check": "official-arrived-notifications-drive-live-harness-context",
+        "passed": true
+      },
+      {
+        "path": "D:/gitlocals/kanli8-human/capybara-backend/src/core/plugins/runtime-plugin-host.ts",
+        "check": "isolated-ts-hooks-use-typed-values-and-real-harness-registry",
         "passed": true
       }
     ],
-    "inspectedProjectSourceCount": 55,
-    "inspectedBackendSourceCount": 37,
+    "inspectedProjectSourceCount": 62,
+    "inspectedBackendSourceCount": 39,
     "projectPluginLoader": {
-      "status": "not_present_in_inspected_wiring",
-      "evidence": []
+      "status": "session_scoped_real_backend_host",
+      "evidence": [
+        "src/phase1_official.mjs",
+        "src/phase3_hook_service.mjs",
+        "scripts/phase3_hook_server.ts",
+        "scripts/gaia2_runtime_hooks.py",
+        "scripts/capybara_official_bridge.py"
+      ]
     },
     "backendPluginLoader": {
-      "status": "not_present_in_inspected_wiring",
-      "evidence": []
+      "status": "real_typescript_worker_and_persistent_harness",
+      "evidence": [
+        "src/core/plugins/runtime-plugin-host.ts"
+      ]
     },
     "limitations": [
-      "Static inspection of known runner paths is not a runtime hook load test.",
-      "TypeScript plugin hooks do not intercept model/tool execution in the Python bridge.",
-      "Lifecycle sidecar events are consumed only after the official child returns; they do not invoke TypeScript plugin hooks.",
-      "Legacy Pass5Orchestrator and RuntimeAttempt are not the manifest entrypoints' execution path."
+      "Static wiring inspection is not proof that a particular execution loaded hooks; valid session receipts are mandatory.",
+      "Integration scope is the GAIA2 ARE adapter, not a claim that every generic backend tool dispatcher has plugin hooks.",
+      "Training hook sources are registered but after_evaluation/after_replay execution remains disabled until stage 4.",
+      "Official A2A delegation permissions and semantic noise/stale/conflict detection remain stage 5 work.",
+      "Legacy Pass5Orchestrator and RuntimeAttempt are not the manifest entrypoints execution path."
     ]
   },
   "backendCompatibility": {
-    "status": "known_gaps",
+    "status": "resource_compatible",
     "resourceIntegrityFailure": false,
+    "typedObjectVariables": true,
+    "persistentHarness": true,
+    "sessionScopedPluginHost": true,
     "schemaEvidence": [
       {
         "path": "D:/gitlocals/kanli8-human/capybara-backend/src/core/project-resources.ts",
-        "sha256": "fc7f5f4a3c7f9f7473b5bfd419322f5e9435a37956135524b6eb758619e6322e"
+        "sha256": "5ceadb80a8efaa4f371452a8609939a690e0112b98b6ba9dada72fb65a869132"
       },
       {
         "path": "D:/gitlocals/kanli8-human/capybara-backend/src/core/harnesses/harness-registry.ts",
-        "sha256": "9ebd91efeb103efb4ebe85193af2a634a05268c830e8ed558db2ba3676196ec9"
+        "sha256": "92534baa8cb206b0afbd574a0696f0e80247701d5d141371be797bf4c5daddf0"
+      },
+      {
+        "path": "D:/gitlocals/kanli8-human/capybara-backend/src/core/plugins/runtime-plugin-host.ts",
+        "sha256": "a0342bc150e96a491d10af82bbaf189626092fc850f5d4272997e1bee1d055c3"
       }
     ],
-    "gaps": [
-      {
-        "id": "typed-variable-values",
-        "message": "Backend SystemVariableDefinition requires string values; GAIA2 resources intentionally contain typed object values.",
-        "affectedPlugins": [
-          "gaia2-runtime",
-          "gaia2-evaluation"
-        ]
-      },
-      {
-        "id": "persistent-harness-type",
-        "message": "Backend HarnessRegistry accepts model/tool/experience, not the declared persistent harness type.",
-        "affectedPlugins": [
-          "gaia2-runtime",
-          "gaia2-evaluation"
-        ]
-      },
-      {
-        "id": "no-plugin-loader",
-        "message": "The inspected main runner/backend do not load these plugin manifests or execute their TypeScript hooks.",
-        "affectedPlugins": [
-          "gaia2-runtime",
-          "gaia2-evaluation"
-        ]
-      }
-    ]
+    "gaps": [],
+    "scope": "typed-session-resources-and-gaia2-are-plugin-host-not-generic-runtime-tool-interception"
   },
-  "pluginLoadStatus": "not_loaded",
-  "runtimeBinding": "sidecar_only",
-  "effectiveHookDecision": false,
-  "stage0Status": "frozen_with_known_runtime_gaps",
+  "pluginLoadStatus": "configured_requires_execution_receipt",
+  "runtimeBinding": "synchronous_pre_action_ipc",
+  "effectiveHookDecision": true,
+  "stage0Status": "frozen_live_wiring_requires_session_receipts",
   "resourceIntegrity": "passed",
-  "scope": "inventory-and-freeze-only-not-stage3-real-hook-integration"
+  "scope": "static-inventory-and-freeze-session-receipts-are-separate-evidence"
 }

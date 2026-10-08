@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-environment-lock-v1",
-  "generatedAt": "2026-10-08T04:38:50.974Z",
+  "generatedAt": "2026-10-08T05:34:40.473Z",
   "timeSource": "client-system-clock-new-Date-ISO-not-authoritative-dataset-time",
   "noModelExecution": true,
   "secretConfigRead": false,
@@ -1662,12 +1662,12 @@
     ]
   },
   "packageLockSha256": "6f9c567badd221e703988d7e8d1f3190d111b45f9d396dedfb12e4dcddc64788",
-  "bridgeSha256": "934df674c0df3a1ecb3d2f1016c4d69375baa6b35509f1b6770b0b1ea82c7da2",
+  "bridgeSha256": "fc8214863402c4cd54df016a23d88358441e71eb0987ce5e88f74e87dbf8f44d",
   "codeInputs": [
     {
       "path": "config/phase0-protocol.json",
-      "sha256": "5f7c06af07f672b39d377c96559324f946c154ac6a2aebeac4f5a70d3a2a2440",
-      "bytes": 2507
+      "sha256": "39d6c3a95707d280669cec8adcccf2fd088511c3e4fa0001dba94b07e241551c",
+      "bytes": 2558
     },
     {
       "path": "gaia2-model-config.json",
@@ -1686,8 +1686,98 @@
     },
     {
       "path": "package.json",
-      "sha256": "151862b4e4d5378a7ae77773f00ab5cf94f3cca711459caffb9a0f34deddd32b",
-      "bytes": 1735
+      "sha256": "0eadeff4de398320d51b148f059859e83c8da873f3e4dc3c84bf44c9d9bb4290",
+      "bytes": 1888
+    },
+    {
+      "path": "plugins/gaia2-evaluation/capybara.plugin.json",
+      "sha256": "8311c8396e172609b834d5300c727fb28e158edb75cb26ff72247e695347130e",
+      "bytes": 401
+    },
+    {
+      "path": "plugins/gaia2-evaluation/harnesses/evaluation-contract.j2",
+      "sha256": "7ad7defdf46f5fb89e8471c1df2701445f58b9392a7032eb462b251f9222eb12",
+      "bytes": 775
+    },
+    {
+      "path": "plugins/gaia2-evaluation/harnesses/manifest.json",
+      "sha256": "551e200db45bbb6a030e28ba6c03bfa28679e33491093d2007dfd18c18bed81f",
+      "bytes": 479
+    },
+    {
+      "path": "plugins/gaia2-evaluation/hooks/gaia2-attempt-record.ts",
+      "sha256": "51b14c9f49e0b26c0258cbca6635fc09017f2f948d49b1f2795d5ea4bb3a72af",
+      "bytes": 1218
+    },
+    {
+      "path": "plugins/gaia2-evaluation/training-hooks/gaia2-correction.ts",
+      "sha256": "fbac2f760f70daa90a1bd47e92b73c5f0f39416aa79272f68750c3b974bdeea6",
+      "bytes": 2026
+    },
+    {
+      "path": "plugins/gaia2-evaluation/variables.json",
+      "sha256": "ada8ac8176503fb06a2097d54ec81b3543b08a95a08c4a0d11d79802d2856792",
+      "bytes": 951
+    },
+    {
+      "path": "plugins/gaia2-runtime/capybara.plugin.json",
+      "sha256": "c5183d7efb02522e14e13c40042017d65f41854bfb0c29807fd85adc469ca1e9",
+      "bytes": 366
+    },
+    {
+      "path": "plugins/gaia2-runtime/harnesses/manifest.json",
+      "sha256": "ee74877e77881744a54c3ea12618947efd9638da130d4f486070d20a963f1def",
+      "bytes": 523
+    },
+    {
+      "path": "plugins/gaia2-runtime/harnesses/runtime-contract.j2",
+      "sha256": "ff24c8629a820760015caa540fa8e7aa4601698a7a15744a0c19bba897bb4cdd",
+      "bytes": 1516
+    },
+    {
+      "path": "plugins/gaia2-runtime/hooks/gaia2-a2a-guard.ts",
+      "sha256": "f4f03f6edcf479255ff97c276a63a78374a2c40bf63ebe0aec2aea0e0f92e627",
+      "bytes": 1541
+    },
+    {
+      "path": "plugins/gaia2-runtime/hooks/gaia2-attempt-finalize.ts",
+      "sha256": "9c82c412ed18c20ad2934286206e663b6e3cd0752821e7da302c70db8b774874",
+      "bytes": 811
+    },
+    {
+      "path": "plugins/gaia2-runtime/hooks/gaia2-conflict-gate.ts",
+      "sha256": "02f2021b9ae894eaf3f4f44f7a7e35c95460af40b304d97cc8c451b8e28f10d2",
+      "bytes": 1400
+    },
+    {
+      "path": "plugins/gaia2-runtime/hooks/gaia2-event-sync.ts",
+      "sha256": "60430be683e3456d1fecbdf39f43623442db01069fffd22a77e580339039b42d",
+      "bytes": 1585
+    },
+    {
+      "path": "plugins/gaia2-runtime/hooks/gaia2-noise-classifier.ts",
+      "sha256": "11e4f36858fee89925a7c35386824709f56935874c2133755c11a5679c228f29",
+      "bytes": 2346
+    },
+    {
+      "path": "plugins/gaia2-runtime/hooks/gaia2-replan.ts",
+      "sha256": "98f4e74054051ea4c8d46c6a35e220a422a2d1758b0db28dc5b43c2c2aa749a2",
+      "bytes": 1386
+    },
+    {
+      "path": "plugins/gaia2-runtime/hooks/gaia2-write-guard.ts",
+      "sha256": "1b183840e43f71ef659d8977d2ff644d51ae8c421eac3938592a0b6ac1d1f97f",
+      "bytes": 2178
+    },
+    {
+      "path": "plugins/gaia2-runtime/hooks/gaia2-write-outcome.ts",
+      "sha256": "6a2529306736e2059575ce66d5b17a214642b787ac5d87976ea651eb342bb9aa",
+      "bytes": 1807
+    },
+    {
+      "path": "plugins/gaia2-runtime/variables.json",
+      "sha256": "70cf7cd640f0ff384867b3b6ecdef58bfaa7dad87184f85ff59c939f019acd92",
+      "bytes": 4891
     },
     {
       "path": "requirements-official.txt",
@@ -1696,13 +1786,13 @@
     },
     {
       "path": "schemas/run-manifest.schema.json",
-      "sha256": "35c4c438762d391c1f59084843bc250ef0a32c755d0807156e9aed7b5e14b653",
-      "bytes": 4122
+      "sha256": "701838f1796bf6c384f4ffcc3684461a1310c459a8897d1372cccb1618dfee51",
+      "bytes": 4158
     },
     {
       "path": "scripts/capybara_official_bridge.py",
-      "sha256": "934df674c0df3a1ecb3d2f1016c4d69375baa6b35509f1b6770b0b1ea82c7da2",
-      "bytes": 11406
+      "sha256": "fc8214863402c4cd54df016a23d88358441e71eb0987ce5e88f74e87dbf8f44d",
+      "bytes": 28752
     },
     {
       "path": "scripts/download_dataset.mjs",
@@ -1718,6 +1808,11 @@
       "path": "scripts/gaia2_model_retry.py",
       "sha256": "08fc88c67e7ae139388d160afaa7236e6184bdfd67a62c04659e44be3d22c629",
       "bytes": 12276
+    },
+    {
+      "path": "scripts/gaia2_runtime_hooks.py",
+      "sha256": "cafa739afcf01bfe19d5e5812db578a28938d00896838960593f964a11353cd4",
+      "bytes": 6236
     },
     {
       "path": "scripts/gate1_smoke.mjs",
@@ -1800,9 +1895,29 @@
       "bytes": 8725
     },
     {
+      "path": "scripts/phase2_historical_recheck.mjs",
+      "sha256": "a3113f404711476895860fba5f68945bbfef97e17f71e57209e601982bf52298",
+      "bytes": 6445
+    },
+    {
       "path": "scripts/phase2_official_adapter.py",
       "sha256": "d96234ba056f632016cf3043011616576d79f7cee3d513ad5c50b64d57ef8847",
       "bytes": 26227
+    },
+    {
+      "path": "scripts/phase3_controlled_fixture.py",
+      "sha256": "9f8ebab1af6c72d2b35121c0b5f4d60fe533850bd20c98fec46eed6ae87649d5",
+      "bytes": 12925
+    },
+    {
+      "path": "scripts/phase3_controlled_validation.mjs",
+      "sha256": "9c689a2cbe8e7488a9a28ded40d49f596cadd1879b478d838f4001fcb406c90a",
+      "bytes": 20250
+    },
+    {
+      "path": "scripts/phase3_hook_server.ts",
+      "sha256": "d5476a7ea8ac5cbf73943d159dc5ea590d807eb678064f1bfcb0ab5ca9645459",
+      "bytes": 3716
     },
     {
       "path": "scripts/preflight_dataset.mjs",
@@ -1871,8 +1986,8 @@
     },
     {
       "path": "src/phase0_audit.mjs",
-      "sha256": "07e2056990740e4fb8b0b6ce9c73de980e84ce2ae1e6e6f48083397cbfee2c25",
-      "bytes": 14660
+      "sha256": "5d817c93fec6253244129da1723337e7f211174e2b7ce9ac7abd8f7a181d4110",
+      "bytes": 15001
     },
     {
       "path": "src/phase0_dataset.mjs",
@@ -1881,23 +1996,23 @@
     },
     {
       "path": "src/phase0_inventory.mjs",
-      "sha256": "d628e5f5103287333d2e3881c09625a9306a889188e82d371359adc871dfd40c",
-      "bytes": 26931
+      "sha256": "3b6f980cfe8f7433e84616a8a61c9054ecf032cdd4f613514da9c2c5d6092979",
+      "bytes": 32342
     },
     {
       "path": "src/phase0_run.mjs",
-      "sha256": "15e93ea629d2f1f190b1f18b113349735fb4cf760d57b818d8eeb3fa6c89a026",
-      "bytes": 13478
+      "sha256": "239eeaf20948f546752add766d3f6950aa54678c018de8a05c83d781ec87d45b",
+      "bytes": 13707
     },
     {
       "path": "src/phase1_cli.mjs",
-      "sha256": "51909870d1aa9a9abcd0521318122cbc76b03c0a288796b7078e7039f5074971",
-      "bytes": 3362
+      "sha256": "d0fd5f955ff4f06f131d43643de497362ba251c50eff901aa97aace3e27a4aef",
+      "bytes": 3858
     },
     {
       "path": "src/phase1_config.mjs",
-      "sha256": "70004a5a1d4cdc559fafc5493a56861161114dc36e9e02c6fdd580723d04d62a",
-      "bytes": 4205
+      "sha256": "2bb76ec59abba31b42fadc4c68d4d5e7ca3685f066b4f40b94667730a87b2a7b",
+      "bytes": 4146
     },
     {
       "path": "src/phase1_errors.mjs",
@@ -1906,8 +2021,8 @@
     },
     {
       "path": "src/phase1_official.mjs",
-      "sha256": "0627244e76799b70aa764aca8615a2105896586b2f5b8de79d8105b4c0076aee",
-      "bytes": 9966
+      "sha256": "55aefc69fb33c3f21d132cd27ab3bf067477ddc6492cf9817bc69ed36146986d",
+      "bytes": 11293
     },
     {
       "path": "src/phase1_process.mjs",
@@ -1916,13 +2031,13 @@
     },
     {
       "path": "src/phase1_runner.mjs",
-      "sha256": "bd55ae24f32be01e477e3213a501b8995291f796b9b974db173690b2db6f4d51",
-      "bytes": 19085
+      "sha256": "c1dbbf3f915548754adfdf16a48de7e15b6effb67368890330a677b7fa89bd03",
+      "bytes": 23772
     },
     {
       "path": "src/phase2_audit.mjs",
-      "sha256": "f685a1b5c333d448b0088a5a7bc4ccd8b3cbc5ebd3ce87e31a98ec65fb97b55c",
-      "bytes": 33397
+      "sha256": "6ae7774cde96af17e45245b8d2ec541ea6e53f700d446ca5bbf221d7d2849090",
+      "bytes": 35353
     },
     {
       "path": "src/phase2_cli.mjs",
@@ -1931,8 +2046,18 @@
     },
     {
       "path": "src/phase2_export.mjs",
-      "sha256": "9f6aa232a09486a826a0102bfa56991cda10116befd0a1e84d2f2dd33e68d9d5",
-      "bytes": 18685
+      "sha256": "32b8c547ff63a37292fc7d8e0bdab967aa3832a1e55d087e5db5391deb2d3e8a",
+      "bytes": 19825
+    },
+    {
+      "path": "src/phase3_hook_service.mjs",
+      "sha256": "e4af0fba0d5a519c6f2dc021a5ef998d799f457b8387690b8f1ccfa2e33dbf38",
+      "bytes": 5025
+    },
+    {
+      "path": "src/phase3_runtime_evidence.mjs",
+      "sha256": "8ec92822ebdf5686bfbf9e3c0a6ba53735d7a86d3abd7cd2809707e6bb66130c",
+      "bytes": 24110
     },
     {
       "path": "src/replan_controller.mjs",
@@ -2006,18 +2131,18 @@
     },
     {
       "path": "test/phase0_inventory.test.mjs",
-      "sha256": "1a08892a76f03f7fd16d22cd5387d593c094b619447c98995f8602aa8edccff3",
-      "bytes": 11752
+      "sha256": "f642591fecb30d1f3e7905868282d1c2152f57c89f5a4a9ece8c51276252947d",
+      "bytes": 13054
     },
     {
       "path": "test/phase0_run.test.mjs",
-      "sha256": "c8af3a5f7430fc7e0dfe4bf62d7f568be75ad202be937597898119d8edb14969",
-      "bytes": 9239
+      "sha256": "dd5a95e528ebc1e181183fe513ac549bab711e189dda43e09e35e8345e3da6d9",
+      "bytes": 9243
     },
     {
       "path": "test/phase1_process.test.mjs",
-      "sha256": "d9b7a2aea6879e8c3ee7ee8a8f96a29d12f3074c7e2b58d0584fd1bcb19e7415",
-      "bytes": 13982
+      "sha256": "7bdb0b9f0c8e569e6c05c5b88e345e54fd1ce022772ea19fc747eea7ef671643",
+      "bytes": 13943
     },
     {
       "path": "test/phase1_retry.test.mjs",
@@ -2026,8 +2151,8 @@
     },
     {
       "path": "test/phase1_runner.test.mjs",
-      "sha256": "d12d8af91c22d5aac80c7365756e0497d68bb6ef248372ee6ebbb09b349f55c4",
-      "bytes": 14722
+      "sha256": "ae2902092ccb36aec7d6738729ce1a945b6ef00763a0c1bd7e500e0e74b921bb",
+      "bytes": 19678
     },
     {
       "path": "test/phase2_audit.test.mjs",
@@ -2036,13 +2161,33 @@
     },
     {
       "path": "test/phase2_export.test.mjs",
-      "sha256": "f6153021f7ff35975f91663c747425a57ab3b9f9791f9a2622ffb0a4019f4114",
-      "bytes": 6620
+      "sha256": "14669bc964a9ef177c013866dfbfedd18d6e69e0c0bbbfb2152460347a775d14",
+      "bytes": 9543
     },
     {
       "path": "test/phase2_official.test.mjs",
       "sha256": "59a170446cc0370bb9d1b600a131e3e365632828c3aed87fc7ecd01a662036ae",
       "bytes": 13993
+    },
+    {
+      "path": "test/phase3_bridge.test.mjs",
+      "sha256": "ebc33d16155f06479022eae99ce88d7a853221e1c80d63f611b75655947b9f5e",
+      "bytes": 26148
+    },
+    {
+      "path": "test/phase3_controlled.test.mjs",
+      "sha256": "cfcc2332ac4de56280ec08611c436933056d2c45e4749a07226716a6e6b6e2ec",
+      "bytes": 2537
+    },
+    {
+      "path": "test/phase3_hook_service.test.mjs",
+      "sha256": "121e17061d8095bec1dba6c11ee07fce298ae404705ee44a844788236ea50f65",
+      "bytes": 2659
+    },
+    {
+      "path": "test/phase3_runtime_evidence.test.mjs",
+      "sha256": "7c1cc28236baf213625c0cf237eb9c62f664745ef2acb607224470f6004d8e38",
+      "bytes": 15584
     },
     {
       "path": "test/replan_controller.test.mjs",
@@ -2060,12 +2205,17 @@
       "bytes": 1943
     },
     {
+      "path": "test/support/runtime_evidence_fixture.mjs",
+      "sha256": "8210da38395d24ba03306ac4a705314c0352909131f252891389b2ff75869189",
+      "bytes": 8185
+    },
+    {
       "path": "test/trace_verifier.test.mjs",
       "sha256": "719ef350474d439ba815b90f2f64324a776b237225047b66a0f74347dc33604b",
       "bytes": 1443
     }
   ],
-  "contentTreeSha256": "2ff25111eabefda546cf7c4bca97e452caed8e30fd31df9d83ebccf7e88cc195",
+  "contentTreeSha256": "a882142c7254b08df55e4bf39fbb03bcd609fe3eec7a12bc8215141c058b4990",
   "officialCodeInputs": [
     {
       "path": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.official-python/are/__init__.py",
@@ -3873,13 +4023,13 @@
     "codeInputs": [
       {
         "path": "package-lock.json",
-        "sha256": "d6774d8e7725594b8d904a79c7654e3426eef9742ade9d0dfa81c191a073df00",
-        "bytes": 61687
+        "sha256": "465ffed3ad1a262cd4233fabd18231e77492093d42415b1fc3affce76f2d42e6",
+        "bytes": 61203
       },
       {
         "path": "package.json",
-        "sha256": "166ae05abc6828b684aa6789c5f461c36b6929489e86ff69f74b43f2de1a270d",
-        "bytes": 1629
+        "sha256": "44a5c6e0d73b78f670145c7e1207b84a7b0eaed2b985cf67c794ac9f90024282",
+        "bytes": 1654
       },
       {
         "path": "src/app.ts",
@@ -3938,18 +4088,23 @@
       },
       {
         "path": "src/core/harnesses/harness-registry.ts",
-        "sha256": "9ebd91efeb103efb4ebe85193af2a634a05268c830e8ed558db2ba3676196ec9",
-        "bytes": 7644
+        "sha256": "92534baa8cb206b0afbd574a0696f0e80247701d5d141371be797bf4c5daddf0",
+        "bytes": 7821
       },
       {
         "path": "src/core/harnesses/types.ts",
-        "sha256": "18df0bab07631b1feddf796bc7979bc226c9231ec7a330fc9bdda84ff4a29edd",
-        "bytes": 984
+        "sha256": "ccd03148e46fa82b9657782fb9aa742d5b8bb89ba15124637834ca33daf18ce6",
+        "bytes": 1096
       },
       {
         "path": "src/core/loop.ts",
         "sha256": "4c30325bfa5418045d8147777c0407eef40db48b1390757f5b9619d841dc6e53",
         "bytes": 884
+      },
+      {
+        "path": "src/core/plugins/runtime-plugin-host.ts",
+        "sha256": "a0342bc150e96a491d10af82bbaf189626092fc850f5d4272997e1bee1d055c3",
+        "bytes": 34064
       },
       {
         "path": "src/core/project-git.ts",
@@ -3958,8 +4113,8 @@
       },
       {
         "path": "src/core/project-resources.ts",
-        "sha256": "fc7f5f4a3c7f9f7473b5bfd419322f5e9435a37956135524b6eb758619e6322e",
-        "bytes": 20605
+        "sha256": "5ceadb80a8efaa4f371452a8609939a690e0112b98b6ba9dada72fb65a869132",
+        "bytes": 21993
       },
       {
         "path": "src/core/resources/harness-catalog.ts",
@@ -3968,8 +4123,8 @@
       },
       {
         "path": "src/core/resources/resource-registry.ts",
-        "sha256": "85d4407b6ef3d933f83a1c62e85dfe0ab3bf7ec22ba31d6ac14302666ba20f01",
-        "bytes": 15333
+        "sha256": "a2e80f3d02f38496463e742e303fb03339c12f7c0466dfafcb0a0f27640997bc",
+        "bytes": 15372
       },
       {
         "path": "src/core/resources/types.ts",
@@ -3978,8 +4133,8 @@
       },
       {
         "path": "src/core/runtime-loop.ts",
-        "sha256": "1384f1451444f6d0bbc206db3a4e3b489489cf5718b755bc6b577ef6e58060e7",
-        "bytes": 198785
+        "sha256": "e14a0e4d89264f8ae6e54742346ccf038be9b1ffb1b55153a297aa3cbce34fa0",
+        "bytes": 202730
       },
       {
         "path": "src/core/search/web-search.ts",
@@ -4005,6 +4160,11 @@
         "path": "src/core/skills/types.ts",
         "sha256": "47f615fa47f6f6d35311684db368f44a382cc3765dd6b24c1fb3126b6681a249",
         "bytes": 389
+      },
+      {
+        "path": "src/core/system-variable-values.ts",
+        "sha256": "2a1d423604bc4aa53f01a407bad0e7c10a242ab51bc328af75a91094a5f4e4c9",
+        "bytes": 2508
       },
       {
         "path": "src/core/tools/tool-dispatcher.ts",
@@ -4033,8 +4193,8 @@
       },
       {
         "path": "src/protocol/runtime-protocol.ts",
-        "sha256": "62e5145ba1726ec77b479dc4a4dd342bf9f0d1599441f6d13d59eb976dbae7d0",
-        "bytes": 32311
+        "sha256": "7361a3c70629fe7e345e66f1b7275293cf3df64a2b9d38ba7ef6629000bc5a03",
+        "bytes": 32547
       },
       {
         "path": "src/server.ts",
@@ -4112,9 +4272,19 @@
         "bytes": 7861
       },
       {
+        "path": "test/runtime-plugin-host.test.ts",
+        "sha256": "c93f36fd35b456a00657cdcc024ecc0ded32afbf3cc7e883bd94477c2af1f0f7",
+        "bytes": 16927
+      },
+      {
         "path": "test/skill-script-runner.test.ts",
         "sha256": "2b68215b51f8802e852c963fbf7ce9f7645fc01fd2df4ba56498f8c95bb4439e",
         "bytes": 1176
+      },
+      {
+        "path": "test/system-variable-harness.test.ts",
+        "sha256": "e18c98acc04e9cc49d09fb9fc1094ad338d236cc4a69a154cea0bfb3e78e0ffd",
+        "bytes": 13252
       },
       {
         "path": "test/tool-framework.test.ts",
@@ -4127,9 +4297,9 @@
         "bytes": 3649
       }
     ],
-    "contentTreeSha256": "4c54e401a75f6a8cc0b67d197af036fb7b01fd689d0f6b861191ed26bfd70dbc",
+    "contentTreeSha256": "32194a09a744bbc438e005c3ad46d6f9c9f94e4794cc0af9beb4110bd77b42c6",
     "dependencyVersions": {
-      "packageLockSha256": "d6774d8e7725594b8d904a79c7654e3426eef9742ade9d0dfa81c191a073df00",
+      "packageLockSha256": "465ffed3ad1a262cd4233fabd18231e77492093d42415b1fc3affce76f2d42e6",
       "installedDirect": [
         {
           "name": "@fastify/websocket",
@@ -4145,6 +4315,11 @@
           "name": "dotenv",
           "version": "17.4.2",
           "packageJsonSha256": "7e57c7c7b3c5fe5dd127091aeacadec3e144fd290988c61c184876c1b8bda819"
+        },
+        {
+          "name": "esbuild",
+          "version": "0.28.1",
+          "packageJsonSha256": "d55d1d19fcc5b6079e4a71dd4111340c79c682bc36835ac7058a0c364c7db58a"
         },
         {
           "name": "fastify",
@@ -4800,8 +4975,8 @@
     "project": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "3c05429edfc676b2ed19fcd4a1826abd69dd0e54",
-      "gitHead": "3c05429edfc676b2ed19fcd4a1826abd69dd0e54",
+      "head": "3eadf813d2f97789f95eae6ed3926509cbd24cef",
+      "gitHead": "3eadf813d2f97789f95eae6ed3926509cbd24cef",
       "dirty": false,
       "statusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "dirtyEntryCount": 0
@@ -4809,20 +4984,20 @@
     "backend": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-backend",
-      "head": "e2725603546004bdcc75f114b7b5241da861e1bd",
-      "gitHead": "e2725603546004bdcc75f114b7b5241da861e1bd",
+      "head": "bc93a08cdafe7bf4a4c75cbb4d399a40555a5b8a",
+      "gitHead": "bc93a08cdafe7bf4a4c75cbb4d399a40555a5b8a",
       "dirty": true,
       "statusSha256": "a225a132ffc44b4e600f5f1a3b99881903f5ac73edc3b4f086bf42acbb7ccf79",
       "dirtyEntryCount": 2
     },
     "pluginSource": {
       "status": "captured",
-      "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia-project/workspace",
-      "head": "ede567e73aa17f8a7d63d4f2232582ae7b03aa51",
-      "gitHead": "ede567e73aa17f8a7d63d4f2232582ae7b03aa51",
-      "dirty": true,
-      "statusSha256": "56d259019b007918de7234ea63e8e55376a8e3466b95ceae7d5df0b98db0e802",
-      "dirtyEntryCount": 8
+      "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
+      "head": "3eadf813d2f97789f95eae6ed3926509cbd24cef",
+      "gitHead": "3eadf813d2f97789f95eae6ed3926509cbd24cef",
+      "dirty": false,
+      "statusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "dirtyEntryCount": 0
     }
   },
   "hashingPolicy": {
@@ -4841,7 +5016,8 @@
       "scripts",
       "test",
       "schemas",
-      "config"
+      "config",
+      "plugins"
     ],
     "generatedArtifactsExcluded": [
       "locks",
