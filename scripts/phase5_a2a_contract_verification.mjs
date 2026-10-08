@@ -9,8 +9,16 @@ import { runChildProcess, readProcessIdentity, isProcessIdentityAlive } from '..
 // Model-free contract regression, NOT a benchmark run or a production A2A permit.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
-assert.ok(args.length === 0 || (args.length === 2 && args[0] === '--output-dir'), 'invalid verification arguments')
-const output = resolve(root, args[1] ?? `reports/phase5-1a-contract-${Date.now()}`)
+const cli = Object.create(null)
+assert.equal(args.length % 2, 0, 'invalid verification arguments')
+for (let index = 0; index < args.length; index += 2) {
+  assert.ok(['--output-dir', '--scope'].includes(args[index]) && !Object.hasOwn(cli, args[index]) && args[index + 1], 'invalid verification arguments')
+  cli[args[index]] = args[index + 1]
+}
+const pipeScope = cli['--scope'] === 'private-pipe'
+assert.ok(cli['--scope'] === undefined || pipeScope, 'invalid verification scope')
+const label = pipeScope ? 'phase5-1b-pipe' : 'phase5-1a-contract'
+const output = resolve(root, cli['--output-dir'] ?? `reports/${label}-${Date.now()}`)
 assert.ok(within(join(root, 'reports'), output) && output !== join(root, 'reports'), 'output must be a new reports child')
 assert.ok(!existsSync(output), 'verification output already exists')
 const protocol = readJson(join(root, 'config/phase0-protocol.json'))
@@ -49,10 +57,10 @@ const inventory = sourceFilePaths().map(ref)
 const sourceHash = digest(inventory)
 const gitHead = directory => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: directory, windowsHide: true, encoding: 'utf8' }).trim()
 mkdirSync(output)
-writeJson(join(output, 'source-inventory.json'), { schemaVersion: 'gaia2-phase5-1a-controlled-source-v1', sourceHash,
+writeJson(join(output, 'source-inventory.json'), { schemaVersion: pipeScope ? 'gaia2-phase5-1b-pipe-controlled-source-v1' : 'gaia2-phase5-1a-controlled-source-v1', sourceHash,
   backendCommit: gitHead(backend), projectCommit: gitHead(root), files: inventory,
   historicalStage4Acceptance: ref(join(root, 'reports/phase4-v3-mechanism-acceptance-20261009-v1.json')),
-  scope: 'controlled_contract_only_not_phase4_lock_replacement' }, { immutable: true })
+  scope: pipeScope ? 'controlled_private_pipe_only_not_official_app_binding' : 'controlled_contract_only_not_phase4_lock_replacement' }, { immutable: true })
 
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/(?:API_KEY|ACCESS_TOKEN|AUTHORIZATION|HF_TOKEN|HUGGINGFACE_TOKEN|PASSWORD|SECRET|GAIA2_HOOK_|BASE_URL|ENDPOINT)/i.test(key)))
 Object.assign(env, { PYTHONPATH: join(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', PYTHONDONTWRITEBYTECODE: '1',
@@ -111,11 +119,16 @@ const unchanged = sourceSetClosed && inventory.every(item => fileDigest(regular(
 const evidence = [ref(join(output, 'source-inventory.json')), ...results.flatMap(check => check.evidence)]
 for (const item of evidence) assert.equal(fileDigest(regular(item.path)), item.sha256)
 const accepted = unchanged && results.every(check => check.passed)
-const report = { schemaVersion: 'gaia2-phase5-1a-controlled-verification-v1', status: accepted ? 'passed' : 'failed',
+const report = { schemaVersion: pipeScope ? 'gaia2-phase5-1b-pipe-controlled-verification-v1' : 'gaia2-phase5-1a-controlled-verification-v1', status: accepted ? 'passed' : 'failed',
   sourceHash, sourceFiles: inventory.length, sourceSetClosed, sourceUnchanged: unchanged, checks: results, evidence,
-  phase51aControlledContractAccepted: accepted, stage5Complete: false, productionA2aEnabled: false, tsPythonIpcConnected: false,
+  ...(pipeScope ? { privatePipeControlledAccepted: accepted, phase51b1Complete: false, nativeAppBindingComplete: false,
+    officialAppAgentIntegrated: false, tsPythonPrivatePipeRoundTripPassed: accepted, tsPythonOfficialAppBound: false }
+    : { phase51aControlledContractAccepted: accepted, tsPythonIpcConnected: false }),
+  stage5Complete: false, productionA2aEnabled: false,
   officialScenarioExecuted: false, modelCalls: 0, officialSubmissionUploaded: false,
-  limits: ['TS native driver constructor is trusted; Python local gates are controlled doubles, not owned TS receipts.',
+  limits: [...(pipeScope ? ['Real TS/Python inherited pipes are tested; no official App/native collector binding or AppAgent integration is claimed.',
+    'Host timeout/EOF revocation is tested with a controlled pending native callback, not an official business operation.',
+    'wireHash is separate from historical Host/Python hashes; actual raw/effective argument and App manifest mapping is not yet implemented.'] : ['TS native driver constructor is trusted; Python local gates are controlled doubles, not owned TS receipts.']),
     'OS birth identity is independently verified at the test wrapper admission, not for each short inner compiler/test process.',
     'No real cross-process Host/native binding or official AppAgent benchmark integration is claimed.',
     'Existing production expert_agent guard remains blocked; stage 5.1b admission is still required.'],
