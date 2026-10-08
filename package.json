@@ -22,6 +22,7 @@
     "phase1-acceptance": "node scripts/phase1_acceptance.mjs",
     "phase2-controlled": "node scripts/phase2_controlled_validation.mjs",
     "phase2-acceptance": "node scripts/phase2_acceptance.mjs",
+    "phase2-historical-recheck": "node scripts/phase2_historical_recheck.mjs",
     "pass5-smoke": "node scripts/pass5_smoke.mjs",
     "install-official": "powershell -ExecutionPolicy Bypass -File scripts/install_official_requirements.ps1",
     "smoke": "node scripts/smoke_dataset.mjs",

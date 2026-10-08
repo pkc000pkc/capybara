@@ -1,9 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { digest } from '../src/phase0_run.mjs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { buildRunManifest, digest, fileDigest, readJson } from '../src/phase0_run.mjs'
 import { exportSubmissionPackage, packagePath, validateExportPlan } from '../src/phase2_export.mjs'
 import { runSubmissionAuditCli } from '../src/phase2_cli.mjs'
 
@@ -26,6 +27,38 @@ test('fixture exports require explicit opt-in and an intact manifest hash', () =
   assert.throws(() => validateExportPlan(root, manifest), /explicit fixture/)
   assert.equal(validateExportPlan(root, manifest, { allowSynthetic: true }).synthetic, true)
   assert.throws(() => validateExportPlan(root, { ...manifest, runId: 'changed' }, { allowSynthetic: true }), /manifest hash/)
+})
+test('historical export uses the exact archived protocol after current configuration changes and rejects a missing snapshot', () => {
+  const root = mkdtempSync(join(tmpdir(), 'gaia2-phase2-historical-protocol-'))
+  const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)))
+  const protocol = readJson(join(projectRoot, 'config/phase0-protocol.json'))
+  const index = protocol.datasets.source.configs.map(config => ({ datasetKind: 'source', config, id: `${config}-scenario`, path: `data/source/${config}.parquet`, rowIndex: 0, scenarioHash: digest(config), scenarioVersion: 'are_simulation_v1' }))
+  const entrypoints = { entries: [{ id: 'old-entry', path: 'scripts/old.mjs', sha256: digest('old-entry') }], environmentOverrides: {} }
+  const captured = { protocol, environment: { codeInputs: entrypoints.entries.map(({ path, sha256 }) => ({ path, sha256 })) }, capabilities: {}, dataset: {}, scenarioIndex: `${index.map(row => JSON.stringify(row)).join('\n')}\n` }
+  const paths = { protocol: 'config/phase0-protocol.json', environment: 'locks/environment-lock.json', capabilities: 'locks/capability-inventory.json', dataset: 'locks/dataset-lock.json', scenarioIndex: '.phase0-cache/scenario-index.jsonl' }
+  const lockRefs = {}
+  for (const [name, value] of Object.entries(captured)) {
+    const snapshot = join(root, 'locks/archive/previous', paths[name].split('/').at(-1))
+    mkdirSync(dirname(snapshot), { recursive: true })
+    writeFileSync(snapshot, typeof value === 'string' ? value : `${JSON.stringify(value, null, 2)}\n`)
+    lockRefs[name] = { path: paths[name], sha256: fileDigest(snapshot) }
+  }
+  mkdirSync(join(root, 'schemas'), { recursive: true })
+  writeFileSync(join(root, 'schemas/run-manifest.schema.json'), readFileSync(join(projectRoot, 'schemas/run-manifest.schema.json')))
+  mkdirSync(join(root, 'config'))
+  const changed = structuredClone(protocol)
+  changed.models.actor.model = 'different-current-model'
+  writeFileSync(join(root, paths.protocol), JSON.stringify(changed))
+  const contents = buildRunManifest({ root, protocol, index, lockRefs, entrypoints, runId: 'historical-protocol' })
+  const manifest = { ...contents, manifestHash: digest(contents) }
+  const archivedProtocol = join(root, 'locks/archive/previous/phase0-protocol.json')
+  assert.equal(validateExportPlan(root, manifest).frozenSources.protocol, archivedProtocol)
+  const missingPath = `${archivedProtocol}.unavailable`
+  renameSync(archivedProtocol, missingPath)
+  assert.throws(() => validateExportPlan(root, manifest), /frozen protocol snapshot missing; do not substitute current locks/)
+  renameSync(missingPath, archivedProtocol)
+  assert.equal(fileDigest(archivedProtocol), manifest.lockRefs.protocol.sha256)
+  assert.equal(validateExportPlan(root, manifest).frozenSources.protocol, archivedProtocol)
 })
 test('duplicate identities, unsafe layout, invalid run numbers and unconnected corrections fail closed', () => {
   const { root, manifest } = fixture()

@@ -8,6 +8,8 @@ data/*.json
 reports/*.json
 reports/phase1-tests.xml
 reports/phase2-tests.xml
+reports/phase2-recheck-tests*.xml
+reports/phase2-tools-*/
 *.log
 data/source/
 data/submission/
