@@ -1,4 +1,4 @@
-import copy, hashlib, json, os, socket, sys, threading, unittest
+import copy, hashlib, json, os, socket, sys, tempfile, threading, unittest
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -24,6 +24,7 @@ from are.simulation.apps.agent_user_interface import AgentUserInterface, Sender
 from are.simulation.apps.app import App
 from are.simulation.apps.contacts import Contact, Contacts
 from are.simulation.apps.system import SystemApp
+from are.simulation.apps.sandbox_file_system import SandboxLocalFileSystem
 from are.simulation.agents.default_agent.app_agent import AppAgent
 from are.simulation.environment import Environment, EnvironmentConfig
 from are.simulation.notification_system import Message, MessageType
@@ -402,6 +403,26 @@ class Tests(unittest.TestCase):
         ):
             self.assertIn(phrase, system_text)
         self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='after_tool']),1)
+
+    def test_01c_windows_fallback_hydrates_and_open_results_close(self):
+        if os.name != 'nt':
+            self.skipTest('Windows fallback compatibility is host-specific')
+        bridge._install_windows_fallback_compatibility()
+        state={'files':{'name':'','type':'directory','children':[
+            {'name':'Documents','type':'directory','children':[
+                {'name':'news','type':'directory','children':[
+                    {'name':'target.txt','type':'file'}]}]}]}}
+        with tempfile.TemporaryDirectory() as fallback, tempfile.TemporaryDirectory() as sandbox:
+            target=Path(fallback)/'Documents'/'news'/'target.txt'
+            target.parent.mkdir(parents=True)
+            target.write_text('Copa America 2024', encoding='utf-8')
+            fs=SandboxLocalFileSystem(sandbox_dir=sandbox, state_directory=Path(fallback).as_uri())
+            fs.load_state(state)
+            bridge._official_filesystem_health_check(SimpleNamespace(apps={'Files': SimpleNamespace(sandbox_fs=fs)}))
+            self.assertEqual(fs.cat('/Documents/news/target.txt'), b'Copa America 2024')
+            handle=fs.open('/Documents/news/target.txt', 'r')
+            bridge._actor_visible_tool_result(handle)
+            self.assertTrue(handle.closed)
 
     def test_02_unknown_write_is_not_retried_and_requires_read_back(self):
         scenario,env,aui,system,ledger=setup_scenario()

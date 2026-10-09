@@ -16,6 +16,7 @@ import hashlib
 import math
 import uuid
 import re
+import posixpath
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -334,11 +335,145 @@ def _actor_visible_tool_result(result: Any) -> tuple[Any, str]:
     try:
         projected = json.loads(json.dumps(result, default=str, ensure_ascii=False, allow_nan=False))
         result_hash = _stable_hash(result)
+        _close_tool_result_resources(result)
         if _stable_hash(projected) != result_hash:
             raise HookProtocolError("tool_result_hash_mismatch")
     except (TypeError, ValueError, RecursionError, OverflowError):
         raise HookProtocolError("invalid_tool_result_payload") from None
     return projected, result_hash
+
+
+def _close_tool_result_resources(result: Any) -> None:
+    """Close file-like native results before the next official tool call.
+
+    ``SandboxLocalFileSystem.open`` returns a live fsspec handle.  The Actor
+    only receives its strict ``default=str`` projection, so retaining that
+    handle after projection provides no useful capability and, on Windows,
+    can lock the file against a subsequent ``mv``/``rm``.  Close recursively
+    for container-shaped results while leaving ordinary ARE objects alone.
+    """
+    seen: set[int] = set()
+
+    def visit(value: Any) -> None:
+        if value is None or isinstance(value, (str, bytes, int, float, bool)):
+            return
+        identity = id(value)
+        if identity in seen:
+            return
+        seen.add(identity)
+        if isinstance(value, dict):
+            for child in value.values():
+                visit(child)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for child in value:
+                visit(child)
+            return
+        close = getattr(value, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as error:
+                raise HookProtocolError("tool_result_resource_close_failed") from error
+
+    visit(result)
+
+
+def _install_windows_fallback_compatibility() -> None:
+    """Normalize lazy fallback paths for Windows without changing frozen ARE.
+
+    ARE's official ``FallbackFileSystem`` stores relative paths using the host
+    separator.  Its remote Hugging Face filesystem requires POSIX separators,
+    so the unmodified official implementation creates empty placeholders but
+    never hydrates their bytes on Windows.  The bridge owns this narrow
+    compatibility seam; the frozen ``.official-python`` tree remains intact.
+    """
+    if os.name != "nt":
+        return
+    from are.simulation.apps.utils.fallback_file_system import FallbackFileSystem
+
+    if getattr(FallbackFileSystem, "_gaia2_windows_fallback_compat", False):
+        return
+
+    def normalize(value: str) -> str:
+        return str(value).replace("\\", "/")
+
+    def ensure_file_loaded(self, path: str) -> None:
+        if (not self.fallback_root or not self.fallback_fs
+                or not self.fallback_fs.exists(self.fallback_root) or path == "."):
+            return
+        raw_rel = self._rel_path(path)
+        rel_path = normalize(raw_rel)
+        key = raw_rel if raw_rel in self.fallback_stats else rel_path
+        if key not in self.fallback_stats:
+            return
+        if not self.fs.exists(path) or self.fs.info(path)["size"] != 0:
+            return
+        fallback_path = posixpath.join(self.fallback_root, rel_path.lstrip("/"))
+        if not self.fallback_fs.exists(fallback_path) or not self.fallback_fs.isfile(fallback_path):
+            return
+        self.fs.makedirs(os.path.dirname(path), exist_ok=True)
+        with self.fallback_fs.open(fallback_path, "rb") as stream:
+            self.fs.write_bytes(path, stream.read())
+        self.fallback_stats.pop(raw_rel, None)
+        self.fallback_stats.pop(rel_path, None)
+
+    def fallback_stats_for_item(self, path: str, item: dict[str, Any]) -> dict[str, Any]:
+        raw_rel = self._rel_path(path)
+        rel_path = normalize(raw_rel)
+        key = raw_rel if raw_rel in self.fallback_stats else rel_path
+        if (self.fs.exists(path) and self.fs.isfile(path) and item["size"] == 0
+                and key in self.fallback_stats):
+            entry = self.fallback_stats[key]
+            if "loaded" in entry and not entry["loaded"]:
+                fallback_path = posixpath.join(self.fallback_root, rel_path.lstrip("/"))
+                if self.fallback_fs.exists(fallback_path) and self.fallback_fs.isfile(fallback_path):
+                    info = self.fallback_fs.info(fallback_path)
+                    self.fallback_stats[key] = {"size": info["size"], "mode": info.get("mode", 0o644), "loaded": True}
+                    entry = self.fallback_stats[key]
+                else:
+                    self.fallback_stats.pop(key, None)
+                    return item
+            if "size" in entry and "mode" in entry:
+                item["size"] = entry["size"]
+                item["mode"] = entry["mode"]
+        return item
+
+    FallbackFileSystem._ensure_file_loaded = ensure_file_loaded
+    FallbackFileSystem._get_fallback_stats_for_item = fallback_stats_for_item
+    FallbackFileSystem._gaia2_windows_fallback_compat = True
+
+
+def _official_filesystem_health_check(env) -> None:
+    """Fail closed when the official lazy filesystem has empty placeholders.
+
+    Scenario JSON intentionally stores only a file tree and a remote
+    ``real_path``.  A missing/unreadable fallback dataset otherwise looks like
+    a valid empty file and turns every content-dependent task into a misleading
+    business failure.  Check one declared text/binary file internally before
+    the Actor sees tools; the bytes and path never enter Actor context.
+    """
+    apps = getattr(env, "apps", {})
+    files = apps.get("Files") if hasattr(apps, "get") else None
+    if files is None:
+        return
+    sandbox = getattr(files, "sandbox_fs", files)
+    local = getattr(sandbox, "local_fs", None)
+    stats = getattr(local, "fallback_stats", {}) if local is not None else {}
+    candidates = [str(path) for path in stats
+                  if str(path).lower().endswith((".txt", ".json", ".csv", ".md", ".pdf", ".xlsx"))]
+    if not candidates:
+        return
+    path = candidates[0].replace("\\", "/")
+    try:
+        value = sandbox.cat(path)
+        size = len(value) if isinstance(value, (bytes, str)) else 0
+    except Exception as error:
+        raise HookProtocolError("official_filesystem_unready") from error
+    _emit_runtime_event("official_filesystem_health", samplePathHash=hashlib.sha256(path.encode("utf-8")).hexdigest(),
+                        sampleBytes=size, fallbackEntryCount=len(stats))
+    if size <= 0:
+        raise HookProtocolError("official_filesystem_unready")
 
 
 def _emit_runtime_event(event_type: str, **payload: Any) -> None:
@@ -425,6 +560,12 @@ def _native_openai_tool(tool) -> dict[str, Any]:
 
 class BridgeBudgetExceeded(RuntimeError):
     """The action budget is a technical stop, not a successful completion."""
+
+
+def _is_deterministic_tool_rejection(error: BaseException) -> bool:
+    """Classify failures that prove a tool call had no external effect."""
+    return isinstance(error, (PermissionError, FileNotFoundError, NotADirectoryError,
+                              IsADirectoryError, ValueError, TypeError))
 
 
 def _canonical(tool) -> tuple[str, str]:
@@ -664,6 +805,7 @@ def _native_run_with_agent(
     if turn_limit is not None and (isinstance(turn_limit, bool) or not isinstance(turn_limit, int) or turn_limit < 1):
         raise HookProtocolError("invalid_turn_limit")
     notification_binding = _notification_binding_for_run(env, scenario_id)
+    _official_filesystem_health_check(env)
 
     all_tools = scenario.get_tools()
     # Match the official agent: notifications deliver user messages; AUI never
@@ -1043,14 +1185,25 @@ def _native_run_with_agent(
                     try:
                         result = tool(**arguments)
                     except Exception as error:
-                        # Once a write was invoked, even an exception cannot
-                        # prove that its external effect did not happen.
+                        # Deterministic argument/path rejection is safe to
+                        # repair: the native tool raised before it could make
+                        # the requested external mutation.  Preserve the
+                        # after-tool observation, but do not poison unknown
+                        # write replay state.  All other risky exceptions
+                        # remain fail-closed unknown outcomes.
                         risky = action["effect"] in ("write", "finish", "unknown")
-                        status = "unknown" if risky else "failed_before_execution"
+                        deterministic = _is_deterministic_tool_rejection(error)
+                        status = "failed_before_execution" if (not risky or deterministic) else "unknown"
                         result = {"status": status, "errorType": type(error).__name__}
-                        outcome = {"status": status, "complete": not risky, "executed": True,
+                        if deterministic:
+                            result["feedback"] = (
+                                "The native tool rejected these parameters before execution. "
+                                "No external mutation was made. Replan with sandbox-relative "
+                                "paths and exact native identifiers; do not replay an unknown write."
+                            )
+                        outcome = {"status": status, "complete": deterministic or not risky, "executed": True,
                                    "errorType": type(error).__name__}
-                        if risky:
+                        if risky and not deterministic:
                             usage["unknownMutationOutcomes"] += 1
                     else:
                         outcome = {"status": "succeeded", "complete": True, "executed": True}
@@ -1132,6 +1285,7 @@ def install() -> None:
     global completion
     from are.simulation import scenario_runner
 
+    _install_windows_fallback_compatibility()
     # Do not let install_model_retries silently clear a pre-existing unsafe
     # global configuration before we have verified the native contract.
     _assert_native_model_protocol()
