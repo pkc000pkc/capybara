@@ -1050,34 +1050,24 @@ class Tests(unittest.TestCase):
             build_scoped_app_agent(app=app, owner=owner, env=env, scope=scope, llm_engine=engine,
                 dispatch=dispatch, generation_ledger_factory=generation_ledger_factory)
 
-    def test_54_generation_time_opt_in_binds_owner_factory_but_keeps_official_simulation_disabled(self):
+    def test_54_generation_time_opt_in_requires_real_scoped_retry_engine(self):
         old, owner, app, env, scope, _, dispatch = self.fixture()
         def generation_owner_factory():
             return ScopedAREGenerationTimeOwner(env=env, app=app, trusted_source_files=(ROOT / "scripts/gaia2_scoped_app_agent.py", __file__))
         engine = ControlledAppAgentEngine([action("final_answer", {"answer": "opted in"})])
-        runner = build_scoped_app_agent(app=app, owner=owner, env=env, scope=scope, llm_engine=engine,
-            dispatch=dispatch, generation_time_owner_factory=generation_owner_factory,
-            generation_ledger_factory=generation_ledger_factory)
-        self.runners.append(runner)
-        snapshot = runner.snapshot()
-        self.assertTrue(snapshot["generationTimeOptIn"])
-        self.assertTrue(snapshot["generationTimeOwnerFactoryBound"])
-        self.assertTrue(snapshot["generationLedgerFactoryBound"])
-        self.assertIsNone(runner.base_agent.simulated_generation_time_config)
-        self.assertEqual(runner.run(), "opted in")
-        self.assertEqual(engine.calls, 1)
-        self.assertEqual(env.state.name, "SETUP")
+        with self.assertRaisesRegex(ScopedAppAgentFatal, "GENERATION_INTEGRATION_INVALID"):
+            build_scoped_app_agent(app=app, owner=owner, env=env, scope=scope, llm_engine=engine,
+                dispatch=dispatch, generation_time_owner_factory=generation_owner_factory,
+                generation_ledger_factory=generation_ledger_factory)
 
     def test_55_generation_time_factory_identity_is_sticky(self):
         old, owner, app, env, scope, engine, dispatch = self.fixture()
         def generation_owner_factory():
             return ScopedAREGenerationTimeOwner(env=env, app=app, trusted_source_files=(ROOT / "scripts/gaia2_scoped_app_agent.py", __file__))
-        runner = build_scoped_app_agent(app=app, owner=owner, env=env, scope=scope, llm_engine=engine,
-            dispatch=dispatch, generation_time_owner_factory=generation_owner_factory,
-            generation_ledger_factory=generation_ledger_factory)
-        self.runners.append(runner)
-        runner._ScopedAppAgentRunner__generation_time_owner_factory = generation_ledger_factory
-        self.failed(runner)
+        with self.assertRaisesRegex(ScopedAppAgentFatal, "GENERATION_INTEGRATION_INVALID"):
+            build_scoped_app_agent(app=app, owner=owner, env=env, scope=scope, llm_engine=engine,
+                dispatch=dispatch, generation_time_owner_factory=generation_owner_factory,
+                generation_ledger_factory=generation_ledger_factory)
 
 
 if __name__ == "__main__":

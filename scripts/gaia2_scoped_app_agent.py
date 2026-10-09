@@ -43,6 +43,7 @@ from are.simulation.environment import Environment
 from are.simulation.exceptions import FatalError
 from gaia2_generation_time import ScopedAREGenerationTimeOwner
 from gaia2_generation_time_ledger import ScopedGenerationTimeLedger
+from gaia2_scoped_model_broker import ScopedRetryModelEngine
 
 _SCOPE_KEYS = frozenset(("parentExecutionId", "parentSessionId", "environmentGeneration",
     "appId", "parentCanonicalName", "taskArgumentKey", "toolInventoryHash", "taskHash",
@@ -248,10 +249,8 @@ class ScopedAppAgentRunner:
         self.__manifest_hash = wire.value_hash(manifest)
         self.__scope = _clone(scope)
         self.__scope_hash = wire.value_hash(scope)
-        # Generation-time integration is an explicit opt-in surface.  The
-        # first runner slice only binds and audits the trusted objects; it
-        # intentionally leaves the official BaseAgent simulation config at
-        # None and does not alter model-call timing yet.
+        # This integration acquires its lease after the model gate, not at
+        # BaseAgent's pre-gate simulation hook. Default behavior stays None.
         if (generation_time_owner_factory is None) != (generation_ledger_factory is None):
             _fatal("SCOPED_AGENT_GENERATION_INTEGRATION_INVALID")
         if generation_time_owner_factory is not None:
@@ -263,6 +262,10 @@ class ScopedAppAgentRunner:
         self.__generation_ledger_factory = generation_ledger_factory
         self.__generation_owner_factory_identity = None if generation_time_owner_factory is None else _callable_identity(generation_time_owner_factory)
         self.__generation_ledger_factory_identity = None if generation_ledger_factory is None else _callable_identity(generation_ledger_factory)
+        self.__generation_owners: list[ScopedAREGenerationTimeOwner] = []
+        self.__generation_ledgers: list[ScopedGenerationTimeLedger] = []
+        self.__generation_source_manifest_hash = None
+        self.__generation_active = None
         supplied = (model_binding, model_gate, model_attempt, model_finish)
         self.__gated = any(item is not None for item in supplied)
         if self.__gated:
@@ -291,6 +294,10 @@ class ScopedAppAgentRunner:
             self.__logical_budget = scope["maxNativeActions"] if max_logical_requests is None else max_logical_requests
             if not _safe_uint(self.__logical_budget, 1) or self.__logical_budget > 100000:
                 _fatal("SCOPED_AGENT_MODEL_BINDING_INVALID")
+        if (generation_time_owner_factory is not None
+                and (not self.__gated or type(llm_engine) is not ScopedRetryModelEngine
+                    or not callable(getattr(llm_engine, "get_last_timing", None)))):
+            _fatal("SCOPED_AGENT_GENERATION_INTEGRATION_INVALID")
         self.__model_gate, self.__model_attempt, self.__model_finish = model_gate, model_attempt, model_finish
         self.__sdk_guard_callback = self.__sdk_guard  # Stable bound callable for broker identity freezing.
         self.__active_model = None
@@ -370,6 +377,8 @@ class ScopedAppAgentRunner:
             self.__collect_sources(model_gate, model_attempt, model_finish, llm_engine.begin_request,
                 llm_engine.get_last_usage, llm_engine.snapshot)
             self.__engine_binding()
+        if self.__generation_time_owner_factory is not None:
+            self.__collect_sources(llm_engine.get_last_timing)
         self.__instance_snapshot = self.__snapshot_instances()
 
     def __collect_sources(self, *objects: Any) -> None:
@@ -428,7 +437,8 @@ class ScopedAppAgentRunner:
                 "begin_request", "get_last_usage", "snapshot")) if self.__gated else (),
             self.__generation_owner_factory_identity,
             self.__generation_ledger_factory_identity,
-            _callable_identity(self.__generation_ledger_factory) if self.__generation_ledger_factory is not None else ())
+            _callable_identity(self.__generation_ledger_factory) if self.__generation_ledger_factory is not None else (),
+            _callable_identity(self.__model.get_last_timing) if self.__generation_time_owner_factory is not None else ())
 
     def __engine_binding(self) -> None:
         if not self.__gated:
@@ -456,9 +466,8 @@ class ScopedAppAgentRunner:
     def __generation_binding(self) -> None:
         """Audit the opt-in generation integration without starting it.
 
-        The owner may acquire a lease only in the later c2.2b timing slice;
-        this first slice merely pins its environment/source identity and the
-        ledger-factory callable.  A closed/failed owner is not reusable.
+        Factories are pinned here; their newly constructed results are checked
+        separately only after a model gate has admitted a real request.
         """
         if self.__generation_time_owner_factory is None:
             return
@@ -602,6 +611,187 @@ class ScopedAppAgentRunner:
             self.__failure_code = "SCOPED_AGENT_MODEL_SDK_FAILED"
             _fatal(self.__failure_code)
 
+    def __generation_owner_and_ledger(self, active: dict) -> dict:
+        """Create and admit one fresh generation owner/ledger after gate ACK."""
+        if self.__generation_time_owner_factory is None:
+            return None
+        try:
+            generation_owner = self.__generation_time_owner_factory()
+        except BaseException:
+            _fatal("SCOPED_AGENT_GENERATION_OWNER_FACTORY_FAILED")
+        if type(generation_owner) is not ScopedAREGenerationTimeOwner:
+            _fatal("SCOPED_AGENT_GENERATION_OWNER_INVALID")
+        try:
+            owner_snapshot = generation_owner.snapshot()
+        except BaseException:
+            _fatal("SCOPED_AGENT_GENERATION_OWNER_INVALID")
+        if (type(owner_snapshot) is not dict
+                or owner_snapshot.get("schemaVersion") != "gaia2-generation-time-owner-v1"
+                or owner_snapshot.get("environmentId") != id(self.__env)
+                or owner_snapshot.get("appId") != self.__manifest["appId"]
+                or type(owner_snapshot.get("sourceManifestHash")) is not str
+                or not _HASH.fullmatch(owner_snapshot["sourceManifestHash"])
+                or owner_snapshot.get("lease") is not None
+                or owner_snapshot.get("closed") is not False
+                or owner_snapshot.get("failed") is not False):
+            _fatal("SCOPED_AGENT_GENERATION_OWNER_INVALID")
+        source_hash = owner_snapshot["sourceManifestHash"]
+        if self.__generation_source_manifest_hash is None:
+            self.__generation_source_manifest_hash = source_hash
+        elif self.__generation_source_manifest_hash != source_hash:
+            _fatal("SCOPED_AGENT_GENERATION_OWNER_SOURCE_CHANGED")
+        if any(item is generation_owner for item in self.__generation_owners):
+            _fatal("SCOPED_AGENT_GENERATION_OWNER_REUSED")
+        evidence_root = self.__manifest.get("evidenceRoot")
+        if type(evidence_root) is not str or not evidence_root:
+            _fatal("SCOPED_AGENT_GENERATION_EVIDENCE_ROOT_INVALID")
+        identity = {"source_manifest_hash": source_hash, "scope_hash": self.__scope_hash,
+            "model_scope_hash": self.__model_scope_hash, "permit_id": active["permitId"],
+            "request_id": active["requestId"], "actual_input_hash": active["actualInputHash"]}
+        try:
+            trusted_root = Path(evidence_root)
+            if not trusted_root.is_absolute():
+                _fatal("SCOPED_AGENT_GENERATION_EVIDENCE_ROOT_INVALID")
+            root_info = trusted_root.lstat()
+            if (not trusted_root.is_dir() or stat.S_ISLNK(root_info.st_mode)
+                    or getattr(root_info, "st_file_attributes", 0) & 0x400
+                    or trusted_root.resolve(strict=True) != trusted_root):
+                _fatal("SCOPED_AGENT_GENERATION_EVIDENCE_ROOT_INVALID")
+            generation_root = trusted_root / "generation-time"
+            generation_root.mkdir(parents=False, exist_ok=True)
+            info = generation_root.lstat()
+            if (not generation_root.is_dir() or stat.S_ISLNK(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & 0x400
+                    or generation_root.resolve(strict=True) != generation_root):
+                _fatal("SCOPED_AGENT_GENERATION_EVIDENCE_ROOT_INVALID")
+        except ScopedAppAgentFatal:
+            raise
+        except BaseException:
+            _fatal("SCOPED_AGENT_GENERATION_EVIDENCE_ROOT_INVALID")
+        ledger_root = generation_root / active["requestId"]
+        try:
+            generation_ledger = self.__generation_ledger_factory(evidence_root=ledger_root, **identity)
+        except BaseException:
+            _fatal("SCOPED_AGENT_GENERATION_LEDGER_FACTORY_FAILED")
+        if type(generation_ledger) is not ScopedGenerationTimeLedger:
+            _fatal("SCOPED_AGENT_GENERATION_LEDGER_INVALID")
+        expected = {"schemaVersion": "gaia2-generation-time-ledger-v1", **{
+            "sourceManifestHash": source_hash, "scopeHash": self.__scope_hash,
+            "modelScopeHash": self.__model_scope_hash, "permitId": active["permitId"],
+            "requestId": active["requestId"], "actualInputHash": active["actualInputHash"]}}
+        try:
+            ledger_snapshot = generation_ledger.snapshot()
+        except BaseException:
+            _fatal("SCOPED_AGENT_GENERATION_LEDGER_INVALID")
+        if (type(ledger_snapshot) is not dict
+                or any(ledger_snapshot.get(key) != value for key, value in expected.items())
+                or ledger_snapshot.get("phase") != "new"
+                or type(ledger_snapshot.get("sequence")) is not int
+                or ledger_snapshot.get("sequence") != 0
+                or ledger_snapshot.get("previousHash") is not None
+                or ledger_snapshot.get("evidenceRefs") != []):
+            _fatal("SCOPED_AGENT_GENERATION_LEDGER_INVALID")
+        self.__generation_owners.append(generation_owner)
+        self.__generation_ledgers.append(generation_ledger)
+        state = {"owner": generation_owner, "ledger": generation_ledger, "lease": None,
+            "admitted": False, "releaseAttempted": False, "released": False,
+            "finished": False, "timing": None, "offset": None}
+        self.__generation_active = state
+        try:
+            generation_ledger.admission()
+            state["admitted"] = True
+            lease = generation_owner.acquire(scope_hash=self.__scope_hash,
+                model_scope_hash=self.__model_scope_hash, permit_id=active["permitId"],
+                request_id=active["requestId"], actual_input_hash=active["actualInputHash"])
+            if (type(lease) is not dict or type(lease.get("leaseId")) is not str
+                    or not _ID32.fullmatch(lease["leaseId"])
+                    or lease.get("sourceManifestHash") != source_hash
+                    or lease.get("permitId") != active["permitId"]
+                    or lease.get("requestId") != active["requestId"]
+                    or lease.get("actualInputHash") != active["actualInputHash"]):
+                _fatal("SCOPED_AGENT_GENERATION_LEASE_INVALID")
+            state["lease"] = _clone(lease)
+            generation_ledger.pause_acquired(lease_id=lease["leaseId"])
+            return state
+        except BaseException:
+            self.__generation_abort("SCOPED_AGENT_GENERATION_ADMISSION_FAILED")
+            raise
+
+    def __generation_timing(self) -> dict:
+        try:
+            raw = self.__model.get_last_timing()
+        except BaseException:
+            _fatal("SCOPED_AGENT_GENERATION_TIMING_INVALID")
+        keys = {"logicalElapsedSeconds", "sdkAttemptElapsedSeconds",
+            "successfulSdkElapsedSeconds", "cooldownSeconds"}
+        if type(raw) is not dict or set(raw) not in (keys, keys | {"schemaVersion"}):
+            _fatal("SCOPED_AGENT_GENERATION_TIMING_INVALID")
+        timing = {key: raw.get(key) for key in keys}
+        for value in timing.values():
+            if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
+                _fatal("SCOPED_AGENT_GENERATION_TIMING_INVALID")
+        return timing
+
+    def __generation_verify(self, state: dict, phase: str) -> dict:
+        verify = getattr(state["ledger"], "verify", None)
+        if not callable(verify):
+            _fatal("SCOPED_AGENT_GENERATION_LEDGER_VERIFY_UNAVAILABLE")
+        try:
+            value = verify(expected_phase=phase)
+        except BaseException:
+            _fatal("SCOPED_AGENT_GENERATION_LEDGER_VERIFY_FAILED")
+        if type(value) is not dict or value.get("phase") != phase:
+            _fatal("SCOPED_AGENT_GENERATION_LEDGER_VERIFY_FAILED")
+        return _clone(value)
+
+    def __generation_release(self, state: dict, offset: float) -> None:
+        if state["released"]:
+            return
+        if state["lease"] is None:
+            _fatal("SCOPED_AGENT_GENERATION_LEASE_MISSING")
+        if state["releaseAttempted"]:
+            _fatal("SCOPED_AGENT_GENERATION_RELEASE_REUSED")
+        state["releaseAttempted"] = True
+        try:
+            released = state["owner"].release(lease_id=state["lease"]["leaseId"], offset=offset)
+        except BaseException:
+            _fatal("SCOPED_AGENT_GENERATION_RELEASE_FAILED")
+        if type(released) is not dict or released.get("released") is not True or released.get("offset") != float(offset):
+            _fatal("SCOPED_AGENT_GENERATION_RELEASE_INVALID")
+        state["released"] = True
+        try:
+            state["ledger"].pause_released(lease_id=state["lease"]["leaseId"], offset=float(offset))
+        except BaseException:
+            _fatal("SCOPED_AGENT_GENERATION_LEDGER_RELEASE_FAILED")
+        state["releasedSnapshot"] = self.__generation_verify(state, "released")
+
+    def __generation_abort(self, code: str) -> None:
+        state = self.__generation_active
+        if state is None or state["finished"]:
+            return
+        cleanup_error = None
+        if state["lease"] is not None and not state["released"] and not state["releaseAttempted"]:
+            try:
+                self.__generation_release(state, 0.0)
+            except ScopedAppAgentFatal as error:
+                cleanup_error = error
+        try:
+            if state["ledger"].phase not in ("new", "finished", "failed"):
+                state["ledger"].failed(code=code)
+        except BaseException:
+            if cleanup_error is None:
+                cleanup_error = ScopedAppAgentFatal("SCOPED_AGENT_GENERATION_LEDGER_FAILURE_RECORD_FAILED")
+        if cleanup_error is not None:
+            raise cleanup_error
+
+    def __generation_complete(self, state: dict, output_hash: str, usage: dict | None) -> None:
+        try:
+            state["ledger"].model_finished(output_hash=output_hash, usage=usage)
+        except BaseException:
+            _fatal("SCOPED_AGENT_GENERATION_LEDGER_FINISH_FAILED")
+        state["finishedSnapshot"] = self.__generation_verify(state, "finished")
+        state["finished"] = True
+
     def __model_call(self, messages, stop_sequences=(), **kwargs):
         try:
             self.__check()
@@ -619,6 +809,8 @@ class ScopedAppAgentRunner:
             actual = self.__admit_model(safe) if self.__gated else safe
             if self.__gated:
                 active = self.__active_model
+                if self.__generation_time_owner_factory is not None:
+                    self.__generation_owner_and_ledger(active)
                 self.__model.begin_request(permit_id=active["permitId"], request_id=active["requestId"],
                     actual_input_hash=active["actualInputHash"], before_attempt=self.__sdk_guard_callback)
                 self.__check()
@@ -635,6 +827,26 @@ class ScopedAppAgentRunner:
                 if self.__active_model["attempt"] < 1:
                     _fatal("SCOPED_AGENT_MODEL_SDK_MISSING")
                 usage = _usage(self.__model.get_last_usage())
+                generation = self.__generation_active
+                if generation is not None:
+                    timing = self.__generation_timing()
+                    successful = timing["successfulSdkElapsedSeconds"]
+                    if successful is None:
+                        _fatal("SCOPED_AGENT_GENERATION_TIMING_UNKNOWN")
+                    offset = float(successful)
+                    generation["timing"] = timing
+                    generation["offset"] = offset
+                    try:
+                        generation["ledger"].model_returned(output_hash=output_hash,
+                            timing=timing, usage=usage)
+                    except BaseException:
+                        _fatal("SCOPED_AGENT_GENERATION_LEDGER_RETURN_FAILED")
+                    self.__generation_release(generation, offset)
+                    active["record"].update({"generationTiming": timing,
+                        "generationOffset": offset,
+                        "generationOffsetMode": "successfulSdkElapsedSeconds",
+                        "generationTimingSource": "ScopedRetryModelEngine.monotonic_clock",
+                        "generationLedgerReleased": generation.get("releasedSnapshot")})
                 finish = {"permitId": active["permitId"], "requestId": active["requestId"],
                     "actualInputHash": active["actualInputHash"], "outputHash": output_hash, "usage": usage}
                 ack = self.__model_finish(_clone(finish))
@@ -645,10 +857,20 @@ class ScopedAppAgentRunner:
                     _fatal("SCOPED_AGENT_MODEL_FINISH_INVALID")
                 self.__check()
                 active["record"].update({"completed": True, "outputHash": output_hash, "usage": usage})
+                if generation is not None:
+                    self.__generation_complete(generation, output_hash, usage)
+                    active["record"]["generationLedgerFinished"] = generation.get("finishedSnapshot")
+                    self.__generation_active = None
             return result
-        except BaseException:
+        except BaseException as error:
+            original_failure_code = (error.message if isinstance(error, ScopedAppAgentFatal)
+                and type(getattr(error, "message", None)) is str and error.message else None)
+            try:
+                self.__generation_abort("SCOPED_AGENT_GENERATION_FAILED")
+            except BaseException:
+                self.__failure_code = "SCOPED_AGENT_GENERATION_CLEANUP_FAILED"
             self.__failed = True
-            self.__failure_code = self.__failure_code or "SCOPED_AGENT_MODEL_FAILED"
+            self.__failure_code = self.__failure_code or original_failure_code or "SCOPED_AGENT_MODEL_FAILED"
             _fatal(self.__failure_code)
         finally:
             self.__active_model = None
@@ -802,6 +1024,9 @@ class ScopedAppAgentRunner:
             "generationTimeOptIn": self.__generation_time_owner_factory is not None,
             "generationTimeOwnerFactoryBound": self.__generation_time_owner_factory is not None,
             "generationLedgerFactoryBound": self.__generation_ledger_factory is not None,
+            "generationTimingOffsetMode": "successfulSdkElapsedSeconds" if self.__generation_time_owner_factory is not None else None,
+            "generationTimingSource": "ScopedRetryModelEngine.monotonic_clock" if self.__generation_time_owner_factory is not None else None,
+            "generationOwnerSourceManifestHash": self.__generation_source_manifest_hash,
             "originalObservationsTaken": self.__observations_taken,
             "started": self.__started, "closed": self.__closed, "completed": self.__completed and not self.__failed,
             "failed": self.__failed, "failureCode": self.__failure_code,

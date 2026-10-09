@@ -1,0 +1,81 @@
+{
+  "schemaVersion": "gaia2-phase5-2c2-2b-generation-runner-verification-v1",
+  "status": "passed_with_explicit_terminal_boundary",
+  "stage": "5.2c2.2b",
+  "route": "A",
+  "scope": "opt_in_gate_generation_pause_retry_release_ledger_runner",
+  "targetedTests": {
+    "generationTimeOwner": 10,
+    "generationLedgerAndTiming": 17,
+    "generationRunnerIntegration": 9,
+    "scopedAppAgentRegression": 55,
+    "scopedModelBrokerRegression": 11
+  },
+  "fullProjectPythonTests": 237,
+  "targetedCommands": [
+    "configured-python -m unittest discover -s test -p phase5_generation_time_test.py -v",
+    "configured-python -m unittest discover -s test -p phase5_generation_time_ledger_test.py -v",
+    "configured-python -m unittest discover -s test -p phase5_generation_runner_test.py -v",
+    "configured-python -m unittest discover -s test -p phase5_scoped_app_agent_test.py -v"
+  ],
+  "fullRegressionCommand": "configured-python -m unittest discover -s test -p '*.py' -v with PYTHONPATH=.official-python;scripts;test",
+  "sourceRefs": [
+    {
+      "path": "scripts/gaia2_generation_time.py",
+      "sha256": "d5cf8b2e0586674b312bcfd6f45fd149657efd5748441a7bc26a302addca84e4"
+    },
+    {
+      "path": "scripts/gaia2_generation_time_ledger.py",
+      "sha256": "71d602cb4f4687dc21e8c82d0f3bdc28cdb0a7667cb528d6160007b47ebe851d"
+    },
+    {
+      "path": "scripts/gaia2_scoped_app_agent.py",
+      "sha256": "6e4f16e9a39ffb8fa3b42d833b796bdabaa07e7de7ba178d6ff93a06983c4d9c"
+    },
+    {
+      "path": "test/phase5_generation_time_test.py",
+      "sha256": "5c571b2b341fe3c8216ecba8c5dee837b08106602ff34a56c8f580f4776895ce"
+    },
+    {
+      "path": "test/phase5_generation_time_ledger_test.py",
+      "sha256": "38d716c7dd301f32207f5eff458bf1e956a02d0026fc89d3e7a16e747751bb7c"
+    },
+    {
+      "path": "test/phase5_generation_runner_test.py",
+      "sha256": "767ec94f110f254cebcd32e8fa294f4fe97e8d266bd3cc0769ad5ff49a01f458"
+    },
+    {
+      "path": "test/phase5_scoped_app_agent_test.py",
+      "sha256": "2c5fde561a25f034dae315b56e8a89993eed3c3ce68af30c6ddc823f20f08cf3"
+    }
+  ],
+  "networkCalls": 0,
+  "realProviderCalls": 0,
+  "officialScenarioExecuted": false,
+  "officialAreModified": false,
+  "defaultRunnerBehaviorChanged": false,
+  "contracts": {
+    "optInOnly": true,
+    "gateBeforeGenerationLease": true,
+    "freshOwnerAndLedgerPerLogicalRequest": true,
+    "retryCoveredByOneLease": true,
+    "timingOffsetSource": "successfulSdkElapsedSeconds",
+    "unknownSuccessfulTimingFailsClosed": true,
+    "ledgerOrder": [
+      "admission",
+      "pause_acquired",
+      "model_returned",
+      "pause_released",
+      "model_finished"
+    ],
+    "ledgerDiskVerification": true,
+    "failedRequestsReleaseAndRecordTerminalFailure": true,
+    "partialPauseRestoresEnvironment": true,
+    "parserDeliveryAfterVerifiedFinishOnly": true
+  },
+  "knownBoundaries": [
+    "The model completion ACK is sent before model_finished is persisted; that cross-system interval cannot be rolled back. If the terminal ledger write fails, the runner fails closed and does not deliver the result to the official parser, while the Host ACK remains observable.",
+    "The integration is opt-in and uses deterministic private SDK fakes in this stage; no official GAIA2 A2A or Noise Scenario and no real provider benchmark score were produced.",
+    "OS monotonic deadlines, dynamic notifications, cross-App routing, and official enhanced runs remain subsequent stage work."
+  ]
+}

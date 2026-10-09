@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import socket
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -42,19 +43,36 @@ class Tests(unittest.TestCase):
     def ledger(self):
         return ScopedGenerationTimeLedger(evidence_root=Path(self.temp.name) / "evidence", **self.args())
 
+    def complete_ledger(self, name="evidence", **overrides):
+        values = self.args()
+        values.update(overrides)
+        ledger = ScopedGenerationTimeLedger(evidence_root=Path(self.temp.name) / name, **values)
+        ledger.admission()
+        ledger.pause_acquired(lease_id="a" * 32)
+        ledger.model_returned(output_hash="b" * 64,
+            timing={"logicalElapsedSeconds": 4.0, "sdkAttemptElapsedSeconds": 2.0,
+                "successfulSdkElapsedSeconds": 1.0, "cooldownSeconds": 1.0},
+            usage={"inputTokens": 2, "outputTokens": 3, "totalTokens": 5})
+        ledger.pause_released(lease_id="a" * 32, offset=2)
+        ledger.model_finished(output_hash="b" * 64,
+            usage={"inputTokens": 2, "outputTokens": 3, "totalTokens": 5})
+        return ledger
+
     def test_01_append_only_chain_and_safe_common_identity(self):
         ledger = self.ledger()
         refs = [ledger.admission(), ledger.pause_acquired(lease_id="a" * 32),
             ledger.model_returned(output_hash="b" * 64,
-                timing={"logicalElapsedSeconds": 4.0, "sdkAttemptElapsedSeconds": 2.0,
-                    "successfulSdkElapsedSeconds": 1.0, "cooldownSeconds": 1.0},
-                usage={"inputTokens": 2, "outputTokens": 3, "totalTokens": 5}),
+            timing={"logicalElapsedSeconds": 4.0, "sdkAttemptElapsedSeconds": 2.0,
+                "successfulSdkElapsedSeconds": 1.0, "cooldownSeconds": 1.0},
+            usage={"inputTokens": 2, "outputTokens": 3, "totalTokens": 5}),
             ledger.pause_released(lease_id="a" * 32, offset=2),
-            ledger.model_finished(output_hash="b" * 64, usage={"totalTokens": 5})]
+            ledger.model_finished(output_hash="b" * 64,
+                usage={"inputTokens": 2, "outputTokens": 3, "totalTokens": 5})]
         snapshot = ledger.snapshot()
         self.assertEqual((snapshot["sequence"], snapshot["phase"]), (5, "finished"))
         self.assertEqual(snapshot["previousHash"], refs[-1]["sha256"])
         self.assertEqual(len(snapshot["evidenceRefs"]), 5)
+        self.assertEqual(ledger.verify(expected_phase="finished"), snapshot)
         prior = None
         for index, ref in enumerate(refs, 1):
             raw = (Path(self.temp.name) / "evidence" / ref["path"]).read_bytes()
@@ -242,6 +260,87 @@ class Tests(unittest.TestCase):
             engine.chat_completion(messages)
         self.assertIsNone(engine.get_last_timing()["logicalElapsedSeconds"])
         self.assertNotIn("model_request_succeeded", [kind for kind, _event in events])
+
+    def test_11_verify_rejects_tamper_and_unknown_event_field(self):
+        ledger = self.complete_ledger("tamper")
+        path = Path(self.temp.name) / "tamper" / "json" / "000003-generation-time.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["unexpected"] = True
+        path.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8")
+        with self.assertRaisesRegex(GenerationLedgerError, "GENERATION_LEDGER_VERIFICATION_FAILED"):
+            ledger.verify(expected_phase="finished")
+
+    def test_12_verify_rejects_missing_and_extra_files(self):
+        ledger = self.complete_ledger("missing")
+        root = Path(self.temp.name) / "missing" / "json"
+        (root / "000004-generation-time.json").unlink()
+        with self.assertRaisesRegex(GenerationLedgerError, "GENERATION_LEDGER_VERIFICATION_FAILED"):
+            ledger.verify(expected_phase="finished")
+
+        ledger = self.complete_ledger("extra")
+        (Path(self.temp.name) / "extra" / "json" / "999999-generation-time.json").write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(GenerationLedgerError, "GENERATION_LEDGER_VERIFICATION_FAILED"):
+            ledger.verify(expected_phase="finished")
+
+    def test_13_verify_rejects_reordered_files_and_foreign_identity(self):
+        ledger = self.complete_ledger("reordered")
+        root = Path(self.temp.name) / "reordered" / "json"
+        # Swapping file names cannot pass the committed ref/hash and sequence checks.
+        first = root / "000001-generation-time.json"
+        second = root / "000002-generation-time.json"
+        tmp = root / "swap.tmp"
+        first.rename(tmp); second.rename(first); tmp.rename(second)
+        with self.assertRaisesRegex(GenerationLedgerError, "GENERATION_LEDGER_VERIFICATION_FAILED"):
+            ledger.verify(expected_phase="finished")
+
+        foreign = self.complete_ledger("foreign", scope_hash="f" * 64)
+        foreign_path = Path(self.temp.name) / "foreign" / "json" / "000001-generation-time.json"
+        target_ledger = self.complete_ledger("foreign-target")
+        target_path = Path(self.temp.name) / "foreign-target" / "json" / "000001-generation-time.json"
+        shutil.copyfile(foreign_path, target_path)
+        with self.assertRaisesRegex(GenerationLedgerError, "GENERATION_LEDGER_VERIFICATION_FAILED"):
+            target_ledger.verify(expected_phase="finished")
+
+    def test_14_verify_rejects_duplicate_json_keys_even_if_ref_is_rebased(self):
+        ledger = self.complete_ledger("duplicate")
+        path = Path(self.temp.name) / "duplicate" / "json" / "000003-generation-time.json"
+        raw = path.read_bytes()
+        needle = b'"outputHash":"' + (b"b" * 64) + b'","permitId"'
+        duplicate = b'"outputHash":"' + (b"b" * 64) + b'","outputHash":"' + (b"b" * 64) + b'","permitId"'
+        self.assertIn(needle, raw)
+        tampered = raw.replace(needle, duplicate, 1)
+        path.write_bytes(tampered)
+        # Rebase only the in-memory ref to reach the duplicate-key parser; the
+        # committed event remains original and therefore still cannot verify.
+        refs = ledger._ScopedGenerationTimeLedger__refs
+        refs[2]["sha256"] = hashlib.sha256(tampered).hexdigest()
+        with self.assertRaisesRegex(GenerationLedgerError, "GENERATION_LEDGER_VERIFICATION_FAILED"):
+            ledger.verify(expected_phase="finished")
+
+    def test_15_model_finished_usage_must_match_model_returned(self):
+        ledger = self.ledger()
+        ledger.admission(); ledger.pause_acquired(lease_id="a" * 32)
+        ledger.model_returned(output_hash="b" * 64,
+            timing={"logicalElapsedSeconds": 1, "sdkAttemptElapsedSeconds": 1,
+                "successfulSdkElapsedSeconds": 1, "cooldownSeconds": 0},
+            usage={"inputTokens": 1, "outputTokens": 1, "totalTokens": 2})
+        ledger.pause_released(lease_id="a" * 32, offset=1)
+        with self.assertRaisesRegex(GenerationLedgerError, "GENERATION_LEDGER_ORDER_INVALID"):
+            ledger.model_finished(output_hash="b" * 64, usage={"totalTokens": 2})
+
+    def test_16_nested_fresh_root_is_created_and_verifiable(self):
+        ledger = self.complete_ledger("native-evidence/generation-time/request")
+        self.assertEqual(ledger.verify(expected_phase="finished")["phase"], "finished")
+
+    def test_17_verify_rejects_replaced_root_identity(self):
+        ledger = self.complete_ledger("replace")
+        root = Path(self.temp.name) / "replace"
+        backup = Path(self.temp.name) / "replace-old"
+        root.rename(backup)
+        (root / "json").mkdir(parents=True)
+        with self.assertRaisesRegex(GenerationLedgerError, "GENERATION_LEDGER_PATH_CHANGED"):
+            ledger.verify(expected_phase="finished")
 
 
 if __name__ == "__main__":

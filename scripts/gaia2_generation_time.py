@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import threading
+import time
 import uuid
 import weakref
 from typing import Any
@@ -44,6 +45,13 @@ def _fail(code: str) -> None:
 def _finite_nonnegative(value: Any) -> bool:
     try:
         return type(value) in (int, float) and math.isfinite(value) and value >= 0
+    except (OverflowError, ValueError, TypeError):
+        return False
+
+
+def _finite_number(value: Any) -> bool:
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
     except (OverflowError, ValueError, TypeError):
         return False
 
@@ -123,12 +131,16 @@ class ScopedAREGenerationTimeOwner:
         self.__source_hash = _source_hash(self.__refs)
         self.__methods = ("start", "pause", "resume", "resume_with_offset", "time", "time_passed",
             "real_time_passed", "reset", "set_offset", "add_offset")
-        # Keep the original bound resume method solely for emergency cleanup
-        # if pause partially succeeds and a post-pause binding check detects
-        # drift. Normal release still uses the freshly verified environment.
-        self.__trusted_resume_with_offset = env.resume_with_offset
+        # Freeze only the references needed for emergency cleanup after a
+        # partially successful pause. Normal release still uses the freshly
+        # verified environment method.
+        self.__trusted_pause_event = env.pause_event
+        self.__trusted_pause_event_clear = env.pause_event.clear
+        self.__trusted_time_now = time.time
         self.__snapshot = self.__current_snapshot()
         self.__lease: dict[str, Any] | None = None
+        self.__pause_state: dict[str, Any] | None = None
+        self.__acquire_baseline: dict[str, Any] | None = None
         self.__pause_stamp: tuple | None = None
         self.__resume_attempted = False
         self.__closed = False
@@ -215,28 +227,72 @@ class ScopedAREGenerationTimeOwner:
             and self.__env.pause_event.is_set() and self.__pause_stamp is not None
             and self.__stamp() == self.__pause_stamp)
 
-    def __cleanup_failed_acquire(self) -> None:
-        binding_ok = True
-        try:
-            self.__verify_binding()
-        except GenerationTimeError:
-            binding_ok = False
-            if self.__pause_stamp is None and self.__env.state is EnvironmentState.PAUSED \
-                    and self.__manager.is_paused is True and self.__env.pause_event.is_set():
-                self.__pause_stamp = self.__stamp()
-        if not self.__owns_pause() or self.__resume_attempted:
+    def __state(self) -> dict[str, Any]:
+        return {"environmentState": self.__env.state, "pauseEventSet": self.__env.pause_event.is_set(),
+            "offset": self.__manager.offset, "pauseRealStartTime": self.__manager.pause_real_start_time,
+            "pausePassedTime": self.__manager.pause_passed_time, "pauseOffset": self.__manager.pause_offset,
+            "isPaused": self.__manager.is_paused}
+
+    def __same_receivers(self) -> bool:
+        return (self.__env.time_manager is self.__manager
+            and self.__app.time_manager is self.__manager
+            and self.__env.pause_event is self.__trusted_pause_event)
+
+    def __restore_acquire_state(self, baseline: dict[str, Any]) -> None:
+        if not self.__same_receivers():
+            _fail("GENERATION_PAUSE_CLEANUP_DENIED")
+        self.__manager.offset = baseline["offset"]
+        self.__manager.pause_real_start_time = baseline["pauseRealStartTime"]
+        self.__manager.pause_passed_time = baseline["pausePassedTime"]
+        self.__manager.pause_offset = baseline["pauseOffset"]
+        self.__manager.is_paused = baseline["isPaused"]
+        if not baseline["pauseEventSet"]:
+            self.__trusted_pause_event_clear()
+        self.__env.state = baseline["environmentState"]
+        current = self.__state()
+        if current != baseline:
+            _fail("GENERATION_PAUSE_CLEANUP_FAILED")
+
+    def __resume_trusted(self, offset: float) -> None:
+        if not self.__same_receivers() or self.__pause_state is None:
+            _fail("GENERATION_PAUSE_CLEANUP_DENIED")
+        if not self.__env.pause_event.is_set():
+            _fail("GENERATION_PAUSE_CLEANUP_DENIED")
+        if self.__env.state not in (EnvironmentState.PAUSED, EnvironmentState.RUNNING):
+            _fail("GENERATION_PAUSE_CLEANUP_DENIED")
+        pause_start = self.__pause_state["pauseRealStartTime"]
+        now = self.__trusted_time_now()
+        if (not _finite_number(pause_start) or not _finite_number(now)
+                or now < pause_start or not _finite_number(offset)):
+            _fail("GENERATION_PAUSE_CLEANUP_DENIED")
+        current_offset = self.__pause_state["offsetBeforePause"]
+        pause_offset = self.__pause_state["pauseOffset"]
+        if not _finite_number(current_offset) or not _finite_number(pause_offset):
+            _fail("GENERATION_PAUSE_CLEANUP_DENIED")
+        new_offset = current_offset - (now - pause_start) + pause_offset + offset
+        if not math.isfinite(new_offset):
+            _fail("GENERATION_PAUSE_CLEANUP_DENIED")
+        self.__manager.offset = new_offset
+        self.__manager.pause_offset = 0.0
+        self.__manager.is_paused = False
+        self.__manager.pause_passed_time = None
+        self.__manager.pause_real_start_time = None
+        self.__trusted_pause_event_clear()
+        self.__env.state = EnvironmentState.RUNNING
+        if (self.__env.state is not EnvironmentState.RUNNING or self.__manager.is_paused
+                or self.__env.pause_event.is_set()):
+            _fail("GENERATION_PAUSE_CLEANUP_FAILED")
+
+    def __cleanup_failed_acquire(self, baseline: dict[str, Any]) -> None:
+        current = self.__state()
+        if (not self.__same_receivers() or not current["pauseEventSet"]
+                or current["environmentState"] not in (EnvironmentState.RUNNING, EnvironmentState.PAUSED)
+                or current == baseline or self.__resume_attempted):
             _fail("GENERATION_PAUSE_CLEANUP_DENIED")
         self.__resume_attempted = True
         try:
-            if binding_ok:
-                self.__env.resume_with_offset(0.0)
-            else:
-                # The current public method is not trusted after drift; use
-                # the constructor-bound method for this one cleanup only.
-                self.__trusted_resume_with_offset(0.0)
+            self.__restore_acquire_state(baseline)
         except BaseException:
-            _fail("GENERATION_PAUSE_CLEANUP_FAILED")
-        if self.__env.state is not EnvironmentState.RUNNING or self.__manager.is_paused:
             _fail("GENERATION_PAUSE_CLEANUP_FAILED")
 
     def acquire(self, *, scope_hash: str, model_scope_hash: str, permit_id: str,
@@ -268,12 +324,17 @@ class ScopedAREGenerationTimeOwner:
             lease_id = uuid.uuid4().hex
             _ACTIVE_LEASES[id(self.__env)] = (weakref.ref(self), lease_id)
         acquired_pause = False
+        baseline = self.__state()
+        self.__acquire_baseline = baseline
         try:
             before = self.__safe_now()
             self.__env.pause()
             self.__verify_binding()
             if self.__env.state is EnvironmentState.PAUSED and self.__manager.is_paused is True:
                 self.__pause_stamp = self.__stamp()
+                self.__pause_state = {"offsetBeforePause": baseline["offset"],
+                    "pauseRealStartTime": self.__manager.pause_real_start_time,
+                    "pauseOffset": self.__manager.pause_offset}
                 acquired_pause = True
             after = self.__safe_now()
             passed = self.__manager.pause_passed_time
@@ -285,16 +346,16 @@ class ScopedAREGenerationTimeOwner:
                 "sourceManifestHash": self.__source_hash,
                 "beforeNow": before, "pausedNow": after, "pausePassedTime": float(passed),
                 "released": False}
+            self.__acquire_baseline = None
             return dict(self.__lease)
         except BaseException as error:
-            if (not acquired_pause and self.__env.state is EnvironmentState.PAUSED
-                    and self.__manager.is_paused is True and self.__env.pause_event.is_set()):
+            if (not acquired_pause and self.__env.pause_event.is_set()):
                 self.__pause_stamp = self.__stamp()
                 acquired_pause = True
             self.__failed = True
             try:
-                if acquired_pause:
-                    self.__cleanup_failed_acquire()
+                if self.__env.pause_event.is_set():
+                    self.__cleanup_failed_acquire(baseline)
             finally:
                 self.__clear_global(lease_id)
             if isinstance(error, GenerationTimeError):
@@ -306,18 +367,32 @@ class ScopedAREGenerationTimeOwner:
             return self.__release(lease_id=lease_id, offset=offset)
 
     def __release(self, *, lease_id: str, offset: float) -> dict:
-        try:
-            self.__check()
-        except GenerationTimeError:
-            if self.__lease is not None:
-                self.__clear_global(self.__lease["leaseId"])
-            raise
         if self.__lease is None or self.__lease["released"] or lease_id != self.__lease["leaseId"]:
             _fail("GENERATION_LEASE_NOT_ACTIVE")
         if not _finite_nonnegative(offset):
             _fail("GENERATION_OFFSET_INVALID")
+        try:
+            self.__check()
+        except GenerationTimeError as error:
+            self.__failed = True
+            try:
+                if self.__env.pause_event.is_set() and not self.__resume_attempted:
+                    self.__resume_attempted = True
+                    self.__resume_trusted(0.0)
+            except BaseException:
+                self.__clear_global(lease_id)
+                _fail("GENERATION_PAUSE_CLEANUP_FAILED")
+            self.__clear_global(lease_id)
+            raise error from None
         if not self.__owns_pause() or self.__resume_attempted:
             self.__failed = True
+            try:
+                if self.__env.pause_event.is_set() and not self.__resume_attempted:
+                    self.__resume_attempted = True
+                    self.__resume_trusted(0.0)
+            except BaseException:
+                self.__clear_global(lease_id)
+                _fail("GENERATION_PAUSE_CLEANUP_FAILED")
             self.__clear_global(lease_id)
             _fail("GENERATION_PAUSE_STATE_CHANGED")
         try:
@@ -327,14 +402,32 @@ class ScopedAREGenerationTimeOwner:
             after = self.__safe_now()
         except GenerationTimeError:
             self.__failed = True
+            try:
+                if self.__env.pause_event.is_set():
+                    self.__resume_trusted(0.0)
+            except BaseException:
+                self.__clear_global(lease_id)
+                _fail("GENERATION_PAUSE_CLEANUP_FAILED")
             self.__clear_global(lease_id)
             raise
         except BaseException:
             self.__failed = True
+            try:
+                if self.__env.pause_event.is_set():
+                    self.__resume_trusted(0.0)
+            except BaseException:
+                self.__clear_global(lease_id)
+                _fail("GENERATION_PAUSE_CLEANUP_FAILED")
             self.__clear_global(lease_id)
             _fail("GENERATION_RESUME_FAILED")
         if self.__env.state is not EnvironmentState.RUNNING or self.__manager.is_paused:
             self.__failed = True
+            try:
+                if self.__env.pause_event.is_set():
+                    self.__resume_trusted(0.0)
+            except BaseException:
+                self.__clear_global(lease_id)
+                _fail("GENERATION_PAUSE_CLEANUP_FAILED")
             self.__clear_global(lease_id)
             _fail("GENERATION_RESUME_INVALID")
         self.__lease["released"] = True

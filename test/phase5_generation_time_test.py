@@ -121,10 +121,13 @@ class Tests(unittest.TestCase):
         env.resume = lambda: None
         with self.assertRaisesRegex(GenerationTimeError, "GENERATION_BINDING_CHANGED"):
             owner.release(lease_id=lease["leaseId"], offset=0)
-        # Restore the real method and release the paused environment directly;
-        # the failed owner must never invoke a drifted method itself.
+        # The failed owner uses its frozen emergency transition. It must not
+        # dispatch through the drifted method and must leave the environment
+        # usable for the next owner.
         env.resume = original_resume
-        original_resume()
+        self.assertIs(env.state, EnvironmentState.RUNNING)
+        self.assertFalse(env.pause_event.is_set())
+        self.assertFalse(env.time_manager.is_paused)
         other = ScopedAREGenerationTimeOwner(env=env, app=app, trusted_source_files=(Path(__file__),))
         second = other.acquire(**self.args(8))
         other.release(lease_id=second["leaseId"], offset=0)
@@ -165,6 +168,42 @@ class Tests(unittest.TestCase):
         self.assertIs(env.state, EnvironmentState.RUNNING)
         self.assertFalse(env.time_manager.is_paused)
         env.resume_with_offset = original_resume
+        owner.close()
+
+    def test_09_partial_pause_manager_method_drift_uses_frozen_cleanup_methods(self):
+        env, _app, owner = self.fixture()
+        manager = env.time_manager
+        original_pause = manager.pause
+        original_add_offset = manager.add_offset
+
+        def pause_and_drift():
+            original_pause()
+            manager.add_offset = lambda _offset: (_ for _ in ()).throw(RuntimeError("drift"))
+
+        manager.pause = pause_and_drift
+        with self.assertRaisesRegex(GenerationTimeError, "GENERATION_BINDING_CHANGED"):
+            owner.acquire(**self.args(11))
+        self.assertIs(env.state, EnvironmentState.RUNNING)
+        self.assertFalse(manager.is_paused)
+        manager.pause = original_pause
+        manager.add_offset = original_add_offset
+        owner.close()
+
+    def test_10_pause_event_half_set_before_time_manager_failure_is_cleaned(self):
+        env, _app, owner = self.fixture()
+        manager = env.time_manager
+        original_pause = manager.pause
+
+        def failing_pause():
+            raise RuntimeError("pause failed after Environment.set")
+
+        manager.pause = failing_pause
+        with self.assertRaisesRegex(GenerationTimeError, "GENERATION_PAUSE_FAILED"):
+            owner.acquire(**self.args(12))
+        self.assertIs(env.state, EnvironmentState.RUNNING)
+        self.assertFalse(env.pause_event.is_set())
+        self.assertFalse(manager.is_paused)
+        manager.pause = original_pause
         owner.close()
 
 
