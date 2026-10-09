@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "gaia2-phase5-2c3d-parent-notification-lifecycle-verification-v1",
+  "status": "passed_with_same_process_boundary",
+  "stage": "5.2c3d",
+  "route": "A",
+  "scope": "trusted_parent_notification_lifecycle_coordinator",
+  "targetedTests": {
+    "parentNotificationLifecycle": 9,
+    "childReader": 7,
+    "notificationProducer": 12,
+    "bridgeNotificationWiring": 6,
+    "scopedAppAgent": 62,
+    "phase3LiveBridgeRegression": 39,
+    "allPhase5Regression": 252,
+    "pythonCompile": true,
+    "gitDiffCheck": true
+  },
+  "commands": {
+    "lifecycle": "configured-python -m unittest test.phase5_notification_lifecycle_test -q",
+    "readerRegression": "configured-python -m unittest test.phase5_notification_lifecycle_test test.phase5_child_notification_reader_test test.phase5_bridge_notification_test -q",
+    "allPhase5": "PYTHONPATH=.official-python;scripts configured-python -m unittest discover -s test -p 'phase5_*.py' -q",
+    "phase3": "PYTHONPATH=.official-python;scripts configured-python test/phase3_live_bridge_test.py -q"
+  },
+  "sourceRefs": [
+    {"path": "scripts/gaia2_notification_producer.py", "sha256": "f8fdfc21c622112cf7b9e3f00e4b95851052a930054be2e11b6c6783f6e3f4e9"},
+    {"path": "scripts/capybara_official_bridge.py", "sha256": "43682bbf21761d736e1c0ab7f99f1b671bdb06f038e9ac0b95b4403aec537bba"},
+    {"path": "test/phase5_notification_lifecycle_test.py", "sha256": "4838e5642af9c51ea9afe2da63d7e150ef15cfdd0849c6d5ac7b805ef9f42c02"}
+  ],
+  "networkCalls": 0,
+  "realProviderCalls": 0,
+  "officialScenarioExecuted": false,
+  "officialAreModified": false,
+  "contracts": {
+    "coordinator_binds_one_origin_projection_reader_unit": true,
+    "bridge_and_child_share_projection_with_independent_cursors": true,
+    "lifecycle_stop_closes_reader_after_origin_revoke": true,
+    "parent_close_is_idempotent_and_fail_closed": true,
+    "foreign_environment_clock_is_rejected": true,
+    "same_process_scope_isolation_and_prefix_uniqueness": true,
+    "invalid_scope_or_rebind_does_not_leave_live_origin": true,
+    "reader_open_failure_revokes_bound_origin": true,
+    "default_bridge_path_remains_unchanged": true
+  },
+  "knownBoundaries": [
+    "The coordinator is same-process only: ARE Environment, TimeManager, registry and child reader must share one Python process.",
+    "No production call from the official _native_run_with_agent or phase1_official spawn creates this coordinator yet.",
+    "Node/TS delegation registry and private pipe do not transport reader operations; 5.2d must define a fixed scope-bound transport before official A2A.",
+    "STOP remains immediate hard revoke; unread ordinary records are invalid after revoke.",
+    "No official A2A/Noise Scenario, real provider call, upload, or benchmark score was produced."
+  ]
+}

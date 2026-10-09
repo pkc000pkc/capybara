@@ -31,6 +31,7 @@ from gaia2_deadline_notifications import (
 
 SCHEMA_REGISTRY = "gaia2-scoped-notification-origin-registry-v1"
 SCHEMA_RECEIPT = "gaia2-scoped-notification-publish-receipt-v1"
+SCHEMA_LIFECYCLE = "gaia2-scoped-child-notification-lifecycle-v1"
 
 
 class NotificationProducerError(RuntimeError):
@@ -441,3 +442,148 @@ class ScopedChildNotificationReader:
     def close(self) -> None:
         with self.__lock:
             self.__closed = True
+
+
+class ScopedChildNotificationLifecycle:
+    """Trusted parent coordinator for one child notification binding.
+
+    The coordinator is intentionally local to the process that owns the ARE
+    ``Environment``. It creates the origin/projection/reader as one unit and
+    revokes the origin before closing the reader. No Actor or model input can
+    select an origin, arrival clock, or lifecycle transition. A future
+    cross-process adapter must carry this contract explicitly; it must not
+    serialize this reader or expose the parent queue to the child.
+    """
+
+    def __init__(self, *, registry: ScopedNotificationOriginRegistry,
+                 scope: dict[str, Any], time_manager: Any,
+                 occurrence_prefix: str | None = None):
+        if type(registry) is not ScopedNotificationOriginRegistry:
+            raise NotificationReaderError("NOTIFICATION_LIFECYCLE_REGISTRY_INVALID")
+        if type(scope) is not dict:
+            raise NotificationReaderError("NOTIFICATION_LIFECYCLE_SCOPE_INVALID")
+        required = ("requestId", "childExecutionId", "appId")
+        if any(type(scope.get(key)) is not str or not scope[key] for key in required):
+            raise NotificationReaderError("NOTIFICATION_LIFECYCLE_SCOPE_INVALID")
+        try:
+            time_callable = getattr(time_manager, "time", None)
+        except BaseException:
+            time_callable = None
+        if time_manager is None or not callable(time_callable):
+            raise NotificationReaderError("NOTIFICATION_LIFECYCLE_CLOCK_INVALID")
+        prefix = (scope["childExecutionId"] + ":notification"
+                  if occurrence_prefix is None else occurrence_prefix)
+        if type(prefix) is not str or not prefix or len(prefix.encode("utf-8")) > 512:
+            raise NotificationReaderError("NOTIFICATION_LIFECYCLE_PREFIX_INVALID")
+        self.__registry = registry
+        self.__scope_id = scope["requestId"]
+        self.__origin_id = scope["childExecutionId"]
+        self.__child_execution_id = scope["childExecutionId"]
+        self.__app_id = scope["appId"]
+        self.__occurrence_prefix = prefix
+        self.__lock = threading.RLock()
+        self.__closed = False
+        self.__close_reason: str | None = None
+        projection = ScopedArrivedNotificationProjection(scope_id=self.__scope_id)
+        bound = False
+        try:
+            bound = registry.bind_origin(origin_id=self.__origin_id, scope_id=self.__scope_id,
+                                         child_execution_id=self.__child_execution_id,
+                                         app_id=self.__app_id, projection=projection)
+            reader = registry.open_reader(origin_id=self.__origin_id, scope_id=self.__scope_id,
+                                         child_execution_id=self.__child_execution_id,
+                                         app_id=self.__app_id, time_manager=time_manager)
+        except NotificationProducerError as error:
+            if bound:
+                try:
+                    registry.revoke_origin(origin_id=self.__origin_id)
+                except BaseException:
+                    pass
+            raise NotificationReaderError("NOTIFICATION_LIFECYCLE_BINDING_FAILED") from None
+        except NotificationReaderError:
+            if bound:
+                try:
+                    registry.revoke_origin(origin_id=self.__origin_id)
+                except BaseException:
+                    pass
+            raise
+        except BaseException:
+            if bound:
+                try:
+                    registry.revoke_origin(origin_id=self.__origin_id)
+                except BaseException:
+                    pass
+            raise NotificationReaderError("NOTIFICATION_LIFECYCLE_BINDING_FAILED") from None
+        self.__projection = projection
+        self.__reader = reader
+
+    @property
+    def registry(self) -> ScopedNotificationOriginRegistry:
+        return self.__registry
+
+    @property
+    def origin_id(self) -> str:
+        return self.__origin_id
+
+    @property
+    def scope_id(self) -> str:
+        return self.__scope_id
+
+    @property
+    def child_execution_id(self) -> str:
+        return self.__child_execution_id
+
+    @property
+    def app_id(self) -> str:
+        return self.__app_id
+
+    @property
+    def occurrence_prefix(self) -> str:
+        return self.__occurrence_prefix
+
+    @property
+    def reader(self) -> ScopedChildNotificationReader:
+        return self.__reader
+
+    @property
+    def projection(self) -> ScopedArrivedNotificationProjection:
+        return self.__projection
+
+    def close(self, reason: str = "parent_close") -> None:
+        """Revoke first, then close the reader; repeated close is harmless."""
+        if type(reason) is not str or reason not in (
+                "stop", "parent_close", "completed", "failed", "cancelled"):
+            raise NotificationReaderError("NOTIFICATION_LIFECYCLE_REASON_INVALID")
+        with self.__lock:
+            if self.__closed:
+                return
+            revoke_error = None
+            try:
+                self.__registry.revoke_origin(origin_id=self.__origin_id)
+            except NotificationProducerError as error:
+                if error.code != "NOTIFICATION_PRODUCER_ORIGIN_REVOKED":
+                    revoke_error = error
+            except BaseException as error:
+                revoke_error = error
+            finally:
+                # A failed revoke must not leave an apparently live reader.
+                # The coordinator is terminal even when its parent registry
+                # has become inconsistent; callers receive a fixed failure.
+                self.__reader.close()
+                self.__closed = True
+                self.__close_reason = reason
+            if revoke_error is not None:
+                raise NotificationReaderError("NOTIFICATION_LIFECYCLE_REVOKE_FAILED") from None
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.__lock:
+            binding_hash = self.__reader.snapshot()["bindingHash"]
+            bindings = self.__registry.snapshot().get("bindings", ())
+            current = next((item for item in bindings if item.get("originHash") == binding_hash), None)
+            return {"schemaVersion": SCHEMA_LIFECYCLE, "scopeId": self.__scope_id,
+                    "childExecutionId": self.__child_execution_id, "appId": self.__app_id,
+                    "occurrencePrefixHash": hashlib.sha256(
+                        self.__occurrence_prefix.encode("utf-8")).hexdigest(),
+                    "closed": self.__closed, "closeReason": self.__close_reason,
+                    "originRevoked": current is None or current.get("active") is not True,
+                    "reader": self.__reader.snapshot()}

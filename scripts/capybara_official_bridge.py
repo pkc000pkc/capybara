@@ -25,6 +25,7 @@ from gaia2_model_retry import install_model_retries
 from gaia2_deadline_notifications import DeadlineNotificationError, ProjectedNotification
 from gaia2_notification_producer import (
     NotificationProducerError,
+    ScopedChildNotificationLifecycle,
     ScopedNotificationOriginRegistry,
 )
 from gaia2_runtime_hooks import HookProtocolError, RuntimeHookClient
@@ -56,6 +57,7 @@ class BridgeNotificationBinding:
     occurrence_prefix: str
     next_sequence: int = 1
     parent_cursor: int = 0
+    lifecycle: ScopedChildNotificationLifecycle | None = None
 
     def __post_init__(self):
         if type(self.registry) is not ScopedNotificationOriginRegistry:
@@ -68,6 +70,20 @@ class BridgeNotificationBinding:
             raise HookProtocolError("invalid_notification_binding")
         if type(self.parent_cursor) is not int or self.parent_cursor < 0:
             raise HookProtocolError("invalid_notification_binding")
+        if self.lifecycle is not None:
+            if type(self.lifecycle) is not ScopedChildNotificationLifecycle:
+                raise HookProtocolError("invalid_notification_binding")
+            if (self.lifecycle.registry is not self.registry
+                    or self.lifecycle.origin_id != self.origin_id
+                    or self.lifecycle.occurrence_prefix != self.occurrence_prefix):
+                raise HookProtocolError("invalid_notification_binding")
+
+    @classmethod
+    def from_lifecycle(cls, lifecycle: ScopedChildNotificationLifecycle) -> "BridgeNotificationBinding":
+        if type(lifecycle) is not ScopedChildNotificationLifecycle:
+            raise HookProtocolError("invalid_notification_lifecycle")
+        return cls(lifecycle.registry, lifecycle.origin_id, lifecycle.occurrence_prefix,
+                   lifecycle=lifecycle)
 
     def publish(self, notification, arrived_at: float) -> dict[str, Any]:
         sequence = self.next_sequence
@@ -79,6 +95,11 @@ class BridgeNotificationBinding:
         except NotificationProducerError as error:
             raise HookProtocolError(error.code.lower()) from None
         object.__setattr__(self, "next_sequence", self.next_sequence + 1)
+        if notification.message_type == MessageType.ENVIRONMENT_STOP and self.lifecycle is not None:
+            try:
+                self.lifecycle.close("stop")
+            except BaseException:
+                raise HookProtocolError("notification_lifecycle_close_failed") from None
         return receipt
 
     def project(self, arrived_at: float) -> tuple[ProjectedNotification, ...]:
@@ -95,6 +116,16 @@ class BridgeNotificationBinding:
         if visible:
             object.__setattr__(self, "parent_cursor", visible[-1].sequence)
         return visible
+
+    def validate_environment(self, env) -> None:
+        """Pin an attached lifecycle to the exact ARE Environment clock."""
+        if self.lifecycle is not None:
+            try:
+                manager = env.time_manager
+            except BaseException:
+                raise HookProtocolError("notification_lifecycle_environment_invalid") from None
+            if self.lifecycle.reader.time_manager is not manager:
+                raise HookProtocolError("notification_lifecycle_clock_mismatch")
 
 
 def configure_notification_bridge(factory) -> None:
@@ -361,6 +392,8 @@ def _drain_notifications(env, messages: list[dict[str, Any]], revision: int,
     trusted parent binding opts into origin-scoped publication and projection;
     Actor input never selects either path.
     """
+    if binding is not None:
+        binding.validate_environment(env)
     now = env.time_manager.time()
     if not math.isfinite(now):
         raise HookProtocolError("invalid_official_clock")
