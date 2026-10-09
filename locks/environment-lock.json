@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-environment-lock-v1",
-  "generatedAt": "2026-10-09T19:56:02.264Z",
+  "generatedAt": "2026-10-09T21:20:07.461Z",
   "timeSource": "client-system-clock-new-Date-ISO-not-authoritative-dataset-time",
   "noModelExecution": true,
   "secretConfigRead": false,
@@ -1662,7 +1662,7 @@
     ]
   },
   "packageLockSha256": "6f9c567badd221e703988d7e8d1f3190d111b45f9d396dedfb12e4dcddc64788",
-  "bridgeSha256": "d256092fc5f80b7658d52902285668f6e150279ce9964b5cf4881dce54cc8f3c",
+  "bridgeSha256": "f2cb9ac9c4af939d8a502638029e7041cfbb0cdba63d931492d8532e5a84e633",
   "codeInputs": [
     {
       "path": "config/phase0-protocol.json",
@@ -1766,8 +1766,8 @@
     },
     {
       "path": "plugins/gaia2-runtime/hooks/gaia2-write-guard.ts",
-      "sha256": "1b183840e43f71ef659d8977d2ff644d51ae8c421eac3938592a0b6ac1d1f97f",
-      "bytes": 2178
+      "sha256": "7adb56e7f38848932c14f749f2094ca385641b2c124de75ffc87765c98f57a11",
+      "bytes": 2596
     },
     {
       "path": "plugins/gaia2-runtime/hooks/gaia2-write-outcome.ts",
@@ -1791,8 +1791,8 @@
     },
     {
       "path": "scripts/capybara_official_bridge.py",
-      "sha256": "d256092fc5f80b7658d52902285668f6e150279ce9964b5cf4881dce54cc8f3c",
-      "bytes": 55238
+      "sha256": "f2cb9ac9c4af939d8a502638029e7041cfbb0cdba63d931492d8532e5a84e633",
+      "bytes": 60113
     },
     {
       "path": "scripts/download_dataset.mjs",
@@ -1850,14 +1850,19 @@
       "bytes": 30881
     },
     {
+      "path": "scripts/gaia2_official_a2a.py",
+      "sha256": "1e2a29bc06cdeda376a4d9c8c674dd8d1844a9511a45ef3c9ab548637adeee19",
+      "bytes": 16313
+    },
+    {
       "path": "scripts/gaia2_parent_a2a_coordinator.py",
       "sha256": "b846f04fafd9bdd9597ddbb561cf4d5c7b93ab1996a79aaf221ae4144836398b",
       "bytes": 17498
     },
     {
       "path": "scripts/gaia2_private_native_binding.py",
-      "sha256": "b26d3cf0eabc04c71b34ec900856080388b5737b356da4d588020e24cc5bd3a5",
-      "bytes": 55991
+      "sha256": "fbe0137566826ca7f25863c006a84f935cd854feab4d28d0407de0fc2cd81239",
+      "bytes": 56783
     },
     {
       "path": "scripts/gaia2_production_delegation.py",
@@ -1871,8 +1876,8 @@
     },
     {
       "path": "scripts/gaia2_scoped_app_agent.py",
-      "sha256": "1ebfc659904c502899f24c665ceaeba9be08326a5dd6e7e74faa4206a9a8f93f",
-      "bytes": 75924
+      "sha256": "9a4e4e993fa3ae40c4964eec3cab7068e949af60c1e5ba3b7ead1f17a3c5724a",
+      "bytes": 77286
     },
     {
       "path": "scripts/gaia2_scoped_model_broker.py",
@@ -1986,8 +1991,8 @@
     },
     {
       "path": "scripts/phase3_hook_server.ts",
-      "sha256": "395ed513ce134e2ef6a05ad1a545d1f982b0cc257e69f18ba2001f5858fb5642",
-      "bytes": 5152
+      "sha256": "e43c0bd229a90305026adcb0ba44f6804b4a16aec28a123b99c23ff1c268002d",
+      "bytes": 13271
     },
     {
       "path": "scripts/phase4_correction_replay.mjs",
@@ -2146,8 +2151,8 @@
     },
     {
       "path": "src/phase1_official.mjs",
-      "sha256": "fea9b5542095896099bc3a64b5f03692c4f227a074ee5901a255ee59894ece4b",
-      "bytes": 14336
+      "sha256": "7f2cc0d7aaf073b412d5fda577b535c0dbd9a5e21e710806a5994e954e18b3ed",
+      "bytes": 14835
     },
     {
       "path": "src/phase1_process.mjs",
@@ -2176,8 +2181,8 @@
     },
     {
       "path": "src/phase3_hook_service.mjs",
-      "sha256": "6b2946138034efe113b8d1f29815370b09113a92cf67a63713cff95cc46cd92a",
-      "bytes": 8983
+      "sha256": "0591bd8fa66cef2bb8ccd57dd792d24a733c63af8fab08a12e20dff590519c92",
+      "bytes": 9788
     },
     {
       "path": "src/phase3_runtime_evidence.mjs",
@@ -2605,7 +2610,7 @@
       "bytes": 1443
     }
   ],
-  "contentTreeSha256": "ef598a4869cab07a88715551dd5c72f1bbc97d9bf679843e61ee4e4698a8df76",
+  "contentTreeSha256": "7cb68f541f775ec80452b74a0ba037768f9c26a60d6d80477316b0dae8fe6119",
   "officialCodeInputs": [
     {
       "path": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.official-python/are/__init__.py",
@@ -4512,14 +4517,19 @@
         "bytes": 28199
       },
       {
+        "path": "src/core/plugins/runtime-delegation-pipe-listener.ts",
+        "sha256": "fd22e7fe939d0838af39a538b9d327b897ec67330c0e1a5c01a16c226ed43bed",
+        "bytes": 5864
+      },
+      {
         "path": "src/core/plugins/runtime-delegation-pipe.ts",
         "sha256": "dba4b2457312f1fd59d418bce47cb6d88cb116e9da58f5eb2cedd5a188dd1dbb",
         "bytes": 8153
       },
       {
         "path": "src/core/plugins/runtime-delegation-registry.ts",
-        "sha256": "a4b2dbc0d5271afc10d15e95deb89deda1140b4d17085135479791885baac43c",
-        "bytes": 45492
+        "sha256": "ce54a54eeb6b0b00ff57c7ce0f3b1c3dfe80c5bde922aed6f3377b3ca26b4304",
+        "bytes": 45863
       },
       {
         "path": "src/core/plugins/runtime-delegation-wire.ts",
@@ -4528,8 +4538,8 @@
       },
       {
         "path": "src/core/plugins/runtime-plugin-host.ts",
-        "sha256": "0850794029afb198edb9a07f006d5f3b6299e44cd5aa1c20c0b69ea9239397d7",
-        "bytes": 69332
+        "sha256": "ab7ca8db801f92fcc51f93b5b16d4c436a536908f0755b85c0a3a94d537b7482",
+        "bytes": 69834
       },
       {
         "path": "src/core/plugins/training-plugin-host.ts",
@@ -4737,6 +4747,11 @@
         "bytes": 3938
       },
       {
+        "path": "test/runtime-delegation-pipe-listener.test.ts",
+        "sha256": "c0eb261a922865c0fec47db3f1a587065aabaf00c1649267d6104eaf305d914d",
+        "bytes": 4913
+      },
+      {
         "path": "test/runtime-delegation-registry.test.ts",
         "sha256": "3eadd8fdb22a171f71266f139618fb81832c3edca9960d52ce971722e0cac7b4",
         "bytes": 26649
@@ -4777,7 +4792,7 @@
         "bytes": 3649
       }
     ],
-    "contentTreeSha256": "c5d8fd3b93aeba8ec268e446b3e9897da5a0fe891d326cf0c13fd222fcfc5892",
+    "contentTreeSha256": "aa91b5e55eaf1e89196f28c3911acd438997d3433ad0f0ec17af797f1f2c124a",
     "dependencyVersions": {
       "packageLockSha256": "465ffed3ad1a262cd4233fabd18231e77492093d42415b1fc3affce76f2d42e6",
       "installedDirect": [
@@ -5455,29 +5470,29 @@
     "project": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "efc84c94ef2d13f942199704839099a5e40a6d4f",
-      "gitHead": "efc84c94ef2d13f942199704839099a5e40a6d4f",
+      "head": "8c29a6627ed084247c567bada949e41634ee337d",
+      "gitHead": "8c29a6627ed084247c567bada949e41634ee337d",
       "dirty": true,
-      "statusSha256": "cfdb72b0b0de54677efa4065feeb6a055394c35dbc91d7b4f91ab7dbc97022f1",
-      "dirtyEntryCount": 23
+      "statusSha256": "00896a02cf8ba43193993a267433ff9c7bc7d43b58f059d95fd92d3e2de6f537",
+      "dirtyEntryCount": 26
     },
     "backend": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-backend",
-      "head": "fe320040fa7c948dbcfc2e19254705ae3883065f",
-      "gitHead": "fe320040fa7c948dbcfc2e19254705ae3883065f",
+      "head": "ab12a2ccf5aec6b1f24796763c80b26661fa18c1",
+      "gitHead": "ab12a2ccf5aec6b1f24796763c80b26661fa18c1",
       "dirty": true,
-      "statusSha256": "a225a132ffc44b4e600f5f1a3b99881903f5ac73edc3b4f086bf42acbb7ccf79",
-      "dirtyEntryCount": 2
+      "statusSha256": "bdba2cdddca743a9bee43eb994fe14a998b74079744798402f1809772dd3bc33",
+      "dirtyEntryCount": 3
     },
     "pluginSource": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "efc84c94ef2d13f942199704839099a5e40a6d4f",
-      "gitHead": "efc84c94ef2d13f942199704839099a5e40a6d4f",
+      "head": "8c29a6627ed084247c567bada949e41634ee337d",
+      "gitHead": "8c29a6627ed084247c567bada949e41634ee337d",
       "dirty": true,
-      "statusSha256": "cfdb72b0b0de54677efa4065feeb6a055394c35dbc91d7b4f91ab7dbc97022f1",
-      "dirtyEntryCount": 23
+      "statusSha256": "00896a02cf8ba43193993a267433ff9c7bc7d43b58f059d95fd92d3e2de6f537",
+      "dirtyEntryCount": 26
     }
   },
   "hashingPolicy": {

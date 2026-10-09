@@ -9,7 +9,11 @@ export default defineHook({
     const state = variables.builtin.variables.gaia2_write_state;
     const actions = state.actions || [], unknown = state.unknown || [];
     let decision = { action: "allow", reason: "No unresolved mutation identity." };
-    if (action.effect === "unknown") decision = { action: "block", reason: "Tool effect is not classified; obtain a verified tool contract." };
+    // The parent AppAgent boundary is intentionally `unknown`: its inner
+    // child owns the actual reads/writes.  The separate A2A guard has already
+    // authenticated an explicit unique permission, so do not let this
+    // parent-side mutation guard block a valid delegated scope.
+    if (action.effect === "unknown" && !(action.canonicalName === "AppAgent__expert_agent" && action.a2aPermission === true && typeof action.requestId === "string")) decision = { action: "block", reason: "Tool effect is not classified; obtain a verified tool contract." };
     else if (["write", "finish"].includes(action.effect)) {
       const prior = actions.find(item => item.mutationKey === action.mutationKey);
       const unresolved = unknown.find(item => item.mutationKey === action.mutationKey || item.resourceKey === action.resourceKey);

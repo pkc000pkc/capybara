@@ -251,10 +251,21 @@ class ScopedAppAgentRunner:
                  notification_reader: ScopedChildNotificationReader | None = None):
         if (not isinstance(app, App) or not isinstance(owner, NativeAppBinding)
                 or not isinstance(env, Environment) or not isinstance(llm_engine, LLMEngine)
-                or not callable(dispatch) or env.apps.get(app.name) is not app
+                or not callable(dispatch)
                 or app.time_manager is not env.time_manager
                 or (log_callback is not None and not callable(log_callback))):
             _fatal("SCOPED_AGENT_INITIALIZATION_INVALID")
+        registered = env.apps.get(app.name)
+        if registered is not app:
+            # Official A2A stores an AppAgent wrapper under the app name while
+            # its trusted AppToolAdapter objects retain the original native
+            # App. Permit only that exact identity relation; arbitrary
+            # unregistered Apps remain rejected.
+            tools = getattr(getattr(registered, "app_agent", None), "tools", None)
+            if not isinstance(tools, dict) or not any(
+                    getattr(getattr(tool, "app_tool", None), "class_instance", None) is app
+                    for tool in tools.values()):
+                _fatal("SCOPED_AGENT_INITIALIZATION_INVALID")
         _exact(scope, _SCOPE_KEYS)
         manifest = owner.manifest()
         expected = {key: manifest[key] for key in ("parentExecutionId", "parentSessionId",
@@ -649,7 +660,19 @@ class ScopedAppAgentRunner:
             _fatal("SCOPED_AGENT_MODEL_CLOCK_INVALID")
         request = {"requestId": request_id or uuid.uuid4().hex, "iteration": self.base_agent.iterations,
             "messages": safe, "clock": {"now": now, "revision": self.__gate_revision}}
-        ack = self.__model_gate(_clone(request))
+        # Projection is a pure, deterministic view of the exact input.  The
+        # external gate must inspect that same view before it can issue a
+        # permit; commit the projection ledger only after the gate/evidence
+        # checks below succeed.
+        projected, ledger = self.__projection(safe, request["requestId"])
+        gate_request = _clone(request)
+        # The production cross-process adapter needs the already projected
+        # messages so it can bind the Node evidence to the same occurrence
+        # IDs.  Keep the historical callback contract unchanged for the
+        # in-process fixtures and other trusted gates.
+        if getattr(self.__model_gate, "accepts_projected_messages", False):
+            gate_request["projectedMessages"] = projected
+        ack = self.__model_gate(gate_request)
         _exact(ack, _GATE_KEYS)
         if (ack["schemaVersion"] != "capybara-scoped-model-gate-v1"
                 or type(ack["permitId"]) is not str or not _ID32.fullmatch(ack["permitId"])
@@ -668,7 +691,6 @@ class ScopedAppAgentRunner:
         _exact(receipt.get("trustedModelAdmission"), {"delegationScopeHash", "modelScope", "modelScopeHash", "originalMessagesHash"})
         admission = {"delegationScopeHash": self.__scope_hash, "modelScope": self.__model_binding,
             "modelScopeHash": self.__model_scope_hash, "originalMessagesHash": wire.value_hash(safe)}
-        projected, ledger = self.__projection(safe, request["requestId"])
         invocation = {"checkpoint": "before_model", "loop": {"runId": self.__scope["childExecutionId"],
             "iteration": request["iteration"], "terminal": False}, "messages": projected, "clock": request["clock"]}
         ref = ack["beforeEvidenceRef"]

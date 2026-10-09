@@ -711,6 +711,13 @@ def _native_run_with_agent(
     termination_reason = "technical_failure"
     failure = None
     delegation_coordinator = None
+    a2a_client = None
+    a2a_transport_enabled = all(
+        isinstance(os.environ.get(key), str) and bool(os.environ.get(key))
+        for key in ("GAIA2_A2A_PIPE_HOST", "GAIA2_A2A_PIPE_PORT",
+                    "GAIA2_A2A_PIPE_CHANNEL", "GAIA2_A2A_PIPE_BINDING",
+                    "GAIA2_A2A_WORKSPACE")
+    )
     _emit_runtime_event("official_run_started", scenarioId=scenario_id, toolCount=len(app_tools),
                         executionMode="live_plugin_host", generationTimeMode=simulated_generation_time_mode,
                         generationMeasurement="unavailable_official_litellm_metadata" if simulated_generation_time_mode == "measured" else "fixed_one_second",
@@ -848,6 +855,13 @@ def _native_run_with_agent(
                     "arguments": arguments, "mutationKey": _stable_hash({"tool": name, "arguments": arguments}),
                     "resourceKey": "unknown", "idempotent": False, "authoritativeRead": False,
                 })
+                # The A2A guard requires an explicit, unique permission
+                # marker.  It is attached only when a trusted coordinator or
+                # the official private A2A transport is configured; ordinary
+                # bridge runs keep the boundary fail-closed.
+                if (action["canonicalName"] == "AppAgent__expert_agent"
+                        and (delegation_coordinator is not None or a2a_transport_enabled)):
+                    action = {**action, "a2aPermission": True, "requestId": uuid.uuid4().hex}
                 if action["effect"] == "finish":
                     # A completed turn legitimately permits a new reply in the
                     # next turn. The same-turn identity remains stable across
@@ -859,7 +873,7 @@ def _native_run_with_agent(
                                                                        binding=notification_binding)
                 multiple_calls = len(calls) != 1
                 delegation_requested = (
-                    delegation_coordinator is not None
+                    (delegation_coordinator is not None or a2a_transport_enabled)
                     and action["canonicalName"] == "AppAgent__expert_agent"
                 )
                 invalid = (argument_error or multiple_calls
@@ -879,19 +893,70 @@ def _native_run_with_agent(
                     _emit_runtime_event("delegation_started", turn=iteration, callId=call_id,
                                         canonicalName=action["canonicalName"])
                     try:
-                        handle = delegation_coordinator.begin_child(
-                            action=action, parent_gate=before_tool)
-                        child_result = delegation_coordinator.run_child(handle)
+                        if delegation_coordinator is not None:
+                            handle = delegation_coordinator.begin_child(
+                                action=action, parent_gate=before_tool)
+                            child_result = delegation_coordinator.run_child(handle)
+                        else:
+                            # The official A2A phase owns the real ARE app in
+                            # this Python process.  The child Host and its
+                            # model/native gates remain on the trusted Node
+                            # side of the private pipe; Actor JSON supplies
+                            # only the already-gated task argument.
+                            from gaia2_official_a2a import connect_official_a2a
+                            app = env.apps.get(action["resourceKey"])
+                            if app is None or getattr(app, "name", None) != action["resourceKey"]:
+                                raise HookProtocolError("a2a_app_binding_missing")
+                            if a2a_client is None:
+                                a2a_client = connect_official_a2a(
+                                    env=env, app=app, scenario_id=scenario_id,
+                                    workspace=os.environ["GAIA2_A2A_WORKSPACE"],
+                                    model=os.environ.get("GAIA2_A2A_MODEL", model),
+                                    provider=os.environ.get("GAIA2_A2A_PROVIDER") or provider or "openai",
+                                    endpoint=os.environ.get("GAIA2_A2A_ENDPOINT") or endpoint or "",
+                                    api_key=os.environ.get("OPENAI_API_KEY", ""),
+                                )
+                            elif a2a_client.app_name != app.name:
+                                raise HookProtocolError("a2a_app_rebind_forbidden")
+                            a2a_client.begin_child(parent_response=before_tool,
+                                                    task=action["arguments"]["task"])
+                            runner = a2a_client.child_runner()
+                            child_completed = False
+                            try:
+                                child_result = runner.run()
+                                snapshot = runner.snapshot()
+                                if (type(child_result) is not str or type(snapshot) is not dict
+                                        or snapshot.get("completed") is not True
+                                        or not snapshot.get("completionEvidenceRef")):
+                                    raise HookProtocolError("a2a_child_completion_missing")
+                                child_completed = True
+                            finally:
+                                try:
+                                    runner.close()
+                                finally:
+                                    a2a_client.reset_child(completed=child_completed)
                         if type(child_result) is not str:
                             raise TypeError("child_result_not_string")
-                    except BaseException:
+                    except BaseException as error:
+                        if a2a_client is not None:
+                            try:
+                                a2a_client.reset_child(completed=False)
+                            except BaseException:
+                                pass
                         result = {"status": "blocked", "reason": "delegation_failed",
                                   "executed": False, "requiredAction": "replan"}
                         outcome = {"status": "failed_before_execution", "complete": True,
                                    "executed": False, "reason": "delegation_failed"}
                         usage["blockedTools"] += 1
+                        # Keep the event evaluator-blind while retaining a
+                        # stable diagnostic for trusted integration tests. The
+                        # A2A adapter exposes fixed error codes; other errors
+                        # are reduced to their exception class only.
+                        error_code = getattr(error, "code", None) or getattr(error, "message", None)
+                        if type(error_code) is not str or not re.fullmatch(r"[A-Z0-9_]{1,80}", error_code):
+                            error_code = type(error).__name__
                         _emit_runtime_event("delegation_failed", turn=iteration, callId=call_id,
-                                            canonicalName=action["canonicalName"])
+                                            canonicalName=action["canonicalName"], errorCode=error_code)
                     else:
                         result = {"status": "succeeded", "childResult": child_result,
                                   "delegated": True}
@@ -971,6 +1036,15 @@ def _native_run_with_agent(
         raise
     finally:
         delegation_close_failed = False
+        if a2a_client is not None:
+            try:
+                a2a_client.close()
+            except BaseException:
+                delegation_close_failed = True
+                if failure is None:
+                    failure = HookProtocolError("a2a_close_failed")
+                    termination_reason = "live_hook_failure"
+                _emit_runtime_event("delegation_close_failed")
         if delegation_coordinator is not None:
             try:
                 # Parent termination is an authority boundary.  The

@@ -55,7 +55,11 @@ export async function startRuntimeHookService({ root, manifest, task, session, s
   const correctionAuthority = prepareCorrectionReadonlyInitialization({ root, manifest, task, session })
   const serviceRoot = join(output, 'hook-host'); mkdirSync(serviceRoot)
   const token = randomBytes(32).toString('hex'), readyPath = join(serviceRoot, 'ready.json'), specPath = join(serviceRoot, 'spec.json')
-  const options = { projectDir: root, workspaceDir: workspace, plugins: capabilities.plugins.map(({ id, snapshotRoot, files }) => ({ id, snapshotRoot, files })), executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, attemptIndex: task.attemptIndex ?? 0, runNumber: task.runNumber }
+  const options = { projectDir: root, workspaceDir: workspace, plugins: capabilities.plugins.map(({ id, snapshotRoot, files }) => ({ id, snapshotRoot, files })), executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, attemptIndex: task.attemptIndex ?? 0, runNumber: task.runNumber,
+    // The A2A listener is a private, loopback-only transport.  It is present
+    // only for the official agent2agent phase; standard/noise runs keep the
+    // public Hook Host surface unchanged.
+    ...(task.phase === 'agent2agent' ? { a2a: { enabled: true, channelId: randomBytes(32).toString('hex'), bindingHash: randomBytes(32).toString('hex'), requestTimeoutMs: Math.max(1, Math.min(2147483647, Math.trunc((settings.scenarioTimeoutSeconds ?? 480000) * 1000))), maxNativeActions: 100 } } : {}) }
   if (correctionAuthority) options.trustedReadonlySessionInitialValues = [correctionAuthority.initializer]
   writeFileSync(specPath, JSON.stringify({ backendRoot: protocol.runtime.backendRoot, readyPath, options,
     ...(entry ? { entry: { schemaVersion: entry.schemaVersion, path: entry.path, relativePath: entry.relativePath, sha256: entry.sha256, value: entry.value } } : {}) }) + '\n', { flag: 'wx' })
@@ -81,6 +85,9 @@ export async function startRuntimeHookService({ root, manifest, task, session, s
       && initialized.harnesses?.some(harness => harness.type === 'persistent')
       && (!entry || (ready.entry?.schemaVersion === entry.schemaVersion && ready.entry?.path === entry.path && ready.entry?.relativePath === entry.relativePath && ready.entry?.sha256 === entry.sha256))
       && (correctionAuthority ? digest(initialized.readonlySessionInitializations) === digest([{ ...correctionAuthority.initializer, pluginId: 'gaia2-evaluation', type: 'text', scope: 'session', readonly: true, valueHash: createHash('sha256').update(JSON.stringify(correctionAuthority.initializer.value)).digest('hex') }]) : !Object.hasOwn(initialized, 'readonlySessionInitializations'))
+      && (task.phase !== 'agent2agent' || (ready.a2a?.schemaVersion === 'gaia2-private-listener-v1'
+        && ready.a2a.host === '127.0.0.1' && Number.isInteger(ready.a2a.port) && ready.a2a.port > 0
+        && /^[a-f0-9]{64}$/.test(ready.a2a.channelId) && /^[a-f0-9]{64}$/.test(ready.a2a.bindingHash)))
     if (!valid) throw new Error('unsafe hook host ready receipt')
   } catch {
     controller.abort()

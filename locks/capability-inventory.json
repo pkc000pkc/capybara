@@ -1,13 +1,13 @@
 {
   "schemaVersion": "gaia2-capability-inventory-v1",
-  "generatedAt": "2026-10-09T19:56:02.264Z",
+  "generatedAt": "2026-10-09T21:20:07.461Z",
   "noModelExecution": true,
   "plugins": [
     {
       "id": "gaia2-runtime",
       "sourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/plugins/gaia2-runtime",
-      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/426678ce73f28982db7704f289f9393a840603b6708e816855d036dfebc79d56",
-      "treeSha256": "426678ce73f28982db7704f289f9393a840603b6708e816855d036dfebc79d56",
+      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/0000c64265f8d0b601fe1db2ea735c093562b28f0c6a7df8edfff4575e8df71f",
+      "treeSha256": "0000c64265f8d0b601fe1db2ea735c093562b28f0c6a7df8edfff4575e8df71f",
       "files": [
         {
           "relativePath": "capybara.plugin.json",
@@ -56,8 +56,8 @@
         },
         {
           "relativePath": "hooks/gaia2-write-guard.ts",
-          "sha256": "1b183840e43f71ef659d8977d2ff644d51ae8c421eac3938592a0b6ac1d1f97f",
-          "bytes": 2178
+          "sha256": "7adb56e7f38848932c14f749f2094ca385641b2c124de75ffc87765c98f57a11",
+          "bytes": 2596
         },
         {
           "relativePath": "hooks/gaia2-write-outcome.ts",
@@ -167,7 +167,7 @@
           "name": "gaia2-write-guard",
           "checkpoint": "before_tool",
           "path": "hooks/gaia2-write-guard.ts",
-          "sha256": "1b183840e43f71ef659d8977d2ff644d51ae8c421eac3938592a0b6ac1d1f97f",
+          "sha256": "7adb56e7f38848932c14f749f2094ca385641b2c124de75ffc87765c98f57a11",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
@@ -390,8 +390,8 @@
         "passed": true
       }
     ],
-    "inspectedProjectSourceCount": 97,
-    "inspectedBackendSourceCount": 47,
+    "inspectedProjectSourceCount": 98,
+    "inspectedBackendSourceCount": 48,
     "projectPluginLoader": {
       "status": "session_scoped_real_backend_host",
       "evidence": [
@@ -433,7 +433,7 @@
       },
       {
         "path": "D:/gitlocals/kanli8-human/capybara-backend/src/core/plugins/runtime-plugin-host.ts",
-        "sha256": "0850794029afb198edb9a07f006d5f3b6299e44cd5aa1c20c0b69ea9239397d7"
+        "sha256": "ab7ca8db801f92fcc51f93b5b16d4c436a536908f0755b85c0a3a94d537b7482"
       }
     ],
     "gaps": [],

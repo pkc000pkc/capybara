@@ -148,11 +148,23 @@ class NativeAppBinding:
         self.__clock_failed = False
         # Legacy clock is operational only. ARE authority is opt-in and comes
         # exclusively from this actual Environment's shared TimeManager.
-        if clock_environment is not None and (type(clock_environment) is not Environment
-                or type(clock_environment.time_manager) is not TimeManager
-                or clock_environment.apps.get(app.name) is not app
-                or app.time_manager is not clock_environment.time_manager):
-            _fail("NATIVE_CLOCK_ENVIRONMENT_INVALID")
+        if clock_environment is not None:
+            if (type(clock_environment) is not Environment
+                    or type(clock_environment.time_manager) is not TimeManager
+                    or app.time_manager is not clock_environment.time_manager):
+                _fail("NATIVE_CLOCK_ENVIRONMENT_INVALID")
+            registered = clock_environment.apps.get(app.name)
+            if registered is not app:
+                # Official A2A replaces the native App with AppAgent in the
+                # environment registry.  The wrapper's trusted AppToolAdapter
+                # objects retain the original App instance; accepting exactly
+                # that identity preserves ARE clock authority and event
+                # logging without granting a caller arbitrary app access.
+                tools = getattr(getattr(registered, "app_agent", None), "tools", None)
+                if not isinstance(tools, dict) or not any(
+                        getattr(getattr(tool, "app_tool", None), "class_instance", None) is app
+                        for tool in tools.values()):
+                    _fail("NATIVE_CLOCK_ENVIRONMENT_INVALID")
         self.__clock_environment = clock_environment
         self.__are_time_manager = clock_environment.time_manager if clock_environment is not None else None
         self.__are_last_clock = None
