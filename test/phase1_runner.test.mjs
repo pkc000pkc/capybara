@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { digest, fileDigest, readJson } from '../src/phase0_run.mjs'
 import { atomicJson, runFrozenBatch } from '../src/phase1_runner.mjs'
 import { readProcessIdentity } from '../src/phase1_process.mjs'
-import { fixtureFromScenario, readNativeResult, resolveModelRetrySettings } from '../src/phase1_official.mjs'
+import { fixtureFromScenario, readNativeResult, resolveModelRetrySettings, resolveTransportProvider } from '../src/phase1_official.mjs'
 import { canonicalScenarioHash } from '../src/phase0_dataset.mjs'
 import { spawn } from 'node:child_process'
 
@@ -19,6 +19,13 @@ function plan(phases = ['standard', 'standard']) {
 }
 function good({ task }, passed = true) { return { processResult: { exitCode: 0 }, report: { scenarioId: task.scenarioId, runNumber: task.runNumber, evaluationComplete: true, businessPassed: passed, hasException: false }, events: [], artifacts: [] } }
 function options(root, extra = {}) { return { root, manifest: plan(), settings, executeTask: good, ...extra } }
+
+test('official transport maps ARE local provider labels to explicit OpenAI LiteLLM transport', () => {
+  assert.equal(resolveTransportProvider('local'), 'openai')
+  assert.equal(resolveTransportProvider(null), 'openai')
+  assert.equal(resolveTransportProvider(undefined), 'openai')
+  assert.equal(resolveTransportProvider('azure'), 'azure')
+})
 
 test('phase1 completed tasks including judged business failures are never rerun', async () => {
   const root = project(); let calls = 0

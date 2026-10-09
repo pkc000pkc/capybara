@@ -42,6 +42,13 @@ export function modelRuntimeEnvironment(settings) {
   return { GAIA2_E2E_LLM_TIMEOUT_SECONDS: String(settings.modelRequestTimeoutSeconds), REQUEST_TIMEOUT: String(settings.modelRequestTimeoutSeconds), GAIA2_MODEL_MAX_ATTEMPTS: String(retry.maxAttempts), GAIA2_MODEL_BACKOFF_BASE_SECONDS: String(retry.backoffBaseSeconds), GAIA2_MODEL_BACKOFF_MAX_SECONDS: String(retry.backoffMaxSeconds), GAIA2_MODEL_MAX_RETRY_WAIT_SECONDS: String(retry.maxRetryWaitSeconds) }
 }
 
+// ARE manifests use ``local`` for an OpenAI-compatible endpoint.  LiteLLM
+// needs the transport provider explicitly; otherwise arbitrary model names
+// such as gpt-6-luna are rejected before the request reaches the endpoint.
+export function resolveTransportProvider(value) {
+  return value === 'local' || value == null ? 'openai' : value
+}
+
 export function fixtureFromScenario(scenario, task) {
   assert(canonicalScenarioHash(scenario) === task.scenarioHash, 'scenario content differs from frozen task')
   assert(scenario.metadata?.definition?.scenario_id === task.scenarioId && scenario.version === task.scenarioVersion, 'scenario identity/version differs')
@@ -121,7 +128,11 @@ export async function executeOfficialTask({ root, manifest, task, session, setti
   const eventPath = join(output, 'runtime-events.jsonl')
   const scriptsRoot = join(root, 'scripts')
   const runnerCode = `import sys, signal; signal.SIGALRM = getattr(signal, 'SIGALRM', signal.SIGTERM); signal.alarm = getattr(signal, 'alarm', lambda _seconds: 0); sys.path.insert(0, ${JSON.stringify(scriptsRoot)}); from capybara_official_bridge import install; install(); from are.simulation.benchmark import main; main()`
-  const args = ['-c', runnerCode, 'run', '--dataset', datasetRoot, '--config', task.config, '--agent', 'default', '--model', manifest.models.actor.model, '--provider', manifest.models.actor.provider, '--endpoint', connection.baseUrl, '--judge_model', manifest.models.judge.model, '--judge_provider', manifest.models.judge.provider, '--judge_endpoint', connection.baseUrl, '--limit', '1', '--num_runs', '1', '--max_concurrent_scenarios', '1', '--scenario_timeout', String(settings.scenarioTimeoutSeconds), '--output_dir', output, '--trace_dump_format', 'both', '--log-level', 'INFO']
+  // ``local`` is the public ARE configuration label for an OpenAI-compatible
+  // endpoint.  LiteLLM's provider selector is separate; pass its explicit
+  // transport name at the process boundary while preserving the frozen
+  // manifest's model/provider identity for evidence and export.
+  const args = ['-c', runnerCode, 'run', '--dataset', datasetRoot, '--config', task.config, '--agent', 'default', '--model', manifest.models.actor.model, '--provider', resolveTransportProvider(manifest.models.actor.provider), '--endpoint', connection.baseUrl, '--judge_model', manifest.models.judge.model, '--judge_provider', resolveTransportProvider(manifest.models.judge.provider), '--judge_endpoint', connection.baseUrl, '--limit', '1', '--num_runs', '1', '--max_concurrent_scenarios', '1', '--scenario_timeout', String(settings.scenarioTimeoutSeconds), '--output_dir', output, '--trace_dump_format', 'both', '--log-level', 'INFO']
   const hookService = await startRuntimeHookService({ root, manifest, task, session, settings, signal, entry })
   const authority = hookService.correctionAuthority
   const childEnv = { ...process.env, ...modelRuntimeEnvironment(settings), PYTHONPATH: resolve(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', OPENAI_API_KEY: connection.apiKey, GAIA2_E2E_MINIMAL: '0', GAIA2_E2E_MAX_ACTIONS: String(settings.maxActions), GAIA2_E2E_TOOL_ALLOWLIST: '', GAIA2_E2E_ATTEMPT_INDEX: String(task.attemptIndex ?? task.runNumber), GAIA2_E2E_CORRECTION_ORDINAL: String(task.correctionOrdinal ?? 0), GAIA2_CORRECTION_STRATEGY_TEXT: authority?.initializer.value ?? '', GAIA2_CORRECTION_STRATEGY_HASH: authority?.context.strategyHash ?? '', GAIA2_CORRECTION_CONTEXT_HASH: authority ? digest(authority.context) : '', GAIA2_EXECUTION_ID: task.executionId, GAIA2_SESSION_ID: session.sessionId, GAIA2_RUNTIME_EVENT_FILE: eventPath, GAIA2_HOOK_URL: hookService.endpoint, GAIA2_HOOK_TOKEN: hookService.token, GAIA2_OFFICIAL_ENTRY_REQUIRED: '1', GAIA2_OFFICIAL_ENTRY_PATH: entry.path, GAIA2_OFFICIAL_ENTRY_SHA256: entry.sha256, TMP: workspace, TEMP: workspace, TMPDIR: workspace }

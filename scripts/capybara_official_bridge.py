@@ -608,7 +608,12 @@ def _strict_arguments(raw: str) -> dict[str, Any]:
 
 def _call_model(messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str, provider: str | None, endpoint: str | None):
     _assert_native_model_protocol()
-    custom_provider = None if provider in (None, "local") else provider
+    # ``local`` is the ARE manifest label for an OpenAI-compatible endpoint;
+    # it is not a LiteLLM provider implementation.  Leaving it as ``None``
+    # makes LiteLLM infer a provider from names such as ``gpt-6-luna`` and
+    # fail before HTTP dispatch (``LLM Provider NOT provided``).  Pin the
+    # transport explicitly while retaining the public manifest value.
+    custom_provider = "openai" if provider in (None, "local") else provider
     return completion(
         model=model,
         custom_llm_provider=custom_provider,

@@ -21,7 +21,10 @@ for role in ("actor", "judge"):
             valid = call.function.name == "phase1_ping" and json.loads(call.function.arguments).get("value") == "phase1_ok"
             text = call.function.arguments
         else:
-            engine = create_judge_engine(LLMEngineConfig(model_name=os.environ["GAIA2_PROBE_JUDGE_MODEL"], provider="local", endpoint=os.environ["GAIA2_PROBE_ENDPOINT"]))
+            # ARE's public ``local`` label denotes an OpenAI-compatible
+            # endpoint, while LiteLLM requires the explicit ``openai``
+            # provider for arbitrary model names such as gpt-6-luna.
+            engine = create_judge_engine(LLMEngineConfig(model_name=os.environ["GAIA2_PROBE_JUDGE_MODEL"], provider="openai", endpoint=os.environ["GAIA2_PROBE_ENDPOINT"]))
             text, _ = engine.chat_completion([{"role": "user", "content": "Reply with exactly PHASE1_JUDGE_OK. This is only a connectivity check."}])
             valid = text.strip() == "PHASE1_JUDGE_OK"
         results.append({"role": role, "status": "passed" if valid else "invalid_response", "elapsedSeconds": round(time.monotonic() - start, 3), "responseChars": len(text), "responseHash": hashlib.sha256(text.encode()).hexdigest()})
