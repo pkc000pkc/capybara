@@ -123,6 +123,10 @@ class ScopedAREGenerationTimeOwner:
         self.__source_hash = _source_hash(self.__refs)
         self.__methods = ("start", "pause", "resume", "resume_with_offset", "time", "time_passed",
             "real_time_passed", "reset", "set_offset", "add_offset")
+        # Keep the original bound resume method solely for emergency cleanup
+        # if pause partially succeeds and a post-pause binding check detects
+        # drift. Normal release still uses the freshly verified environment.
+        self.__trusted_resume_with_offset = env.resume_with_offset
         self.__snapshot = self.__current_snapshot()
         self.__lease: dict[str, Any] | None = None
         self.__pause_stamp: tuple | None = None
@@ -212,12 +216,24 @@ class ScopedAREGenerationTimeOwner:
             and self.__stamp() == self.__pause_stamp)
 
     def __cleanup_failed_acquire(self) -> None:
-        self.__verify_binding()
+        binding_ok = True
+        try:
+            self.__verify_binding()
+        except GenerationTimeError:
+            binding_ok = False
+            if self.__pause_stamp is None and self.__env.state is EnvironmentState.PAUSED \
+                    and self.__manager.is_paused is True and self.__env.pause_event.is_set():
+                self.__pause_stamp = self.__stamp()
         if not self.__owns_pause() or self.__resume_attempted:
             _fail("GENERATION_PAUSE_CLEANUP_DENIED")
         self.__resume_attempted = True
         try:
-            self.__env.resume_with_offset(0.0)
+            if binding_ok:
+                self.__env.resume_with_offset(0.0)
+            else:
+                # The current public method is not trusted after drift; use
+                # the constructor-bound method for this one cleanup only.
+                self.__trusted_resume_with_offset(0.0)
         except BaseException:
             _fail("GENERATION_PAUSE_CLEANUP_FAILED")
         if self.__env.state is not EnvironmentState.RUNNING or self.__manager.is_paused:
@@ -271,6 +287,10 @@ class ScopedAREGenerationTimeOwner:
                 "released": False}
             return dict(self.__lease)
         except BaseException as error:
+            if (not acquired_pause and self.__env.state is EnvironmentState.PAUSED
+                    and self.__manager.is_paused is True and self.__env.pause_event.is_set()):
+                self.__pause_stamp = self.__stamp()
+                acquired_pause = True
             self.__failed = True
             try:
                 if acquired_pause:

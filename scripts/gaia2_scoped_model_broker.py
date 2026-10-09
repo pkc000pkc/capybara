@@ -197,12 +197,13 @@ class ScopedRetryModelEngine(LLMEngine):
                  policy: ModelRetryPolicy, max_logical_requests: int, max_sdk_attempts: int,
                  before_attempt: Callable[[dict], Any] | None = None,
                  config_hash: str | None = None, emit: Callable[..., None] | None = None,
-                 clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep):
+                 clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
+                 monotonic_clock: Callable[[], float] = time.monotonic):
         if role not in ROLES or type(role) is not str or type(model_scope_hash) is not str or not _HASH.fullmatch(model_scope_hash):
             _fail("SCOPED_MODEL_IDENTITY_INVALID")
         if any(type(value) is not int or not 1 <= value <= 100000 for value in (max_logical_requests, max_sdk_attempts)):
             _fail("SCOPED_MODEL_BUDGET_INVALID")
-        if (not all(callable(value) for value in (sdk_kwargs_factory, clock, sleep))
+        if (not all(callable(value) for value in (sdk_kwargs_factory, clock, sleep, monotonic_clock))
                 or emit is not None and not callable(emit)
                 or before_attempt is not None and not callable(before_attempt)):
             _fail("SCOPED_MODEL_CALLBACK_INVALID")
@@ -213,7 +214,9 @@ class ScopedRetryModelEngine(LLMEngine):
         self.__sdk, self.__factory, self.__policy = sdk_completion, sdk_kwargs_factory, policy
         self.__logical_limit, self.__sdk_limit = max_logical_requests, max_sdk_attempts
         self.__guard, self.__emit, self.__clock, self.__sleep = before_attempt, emit, clock, sleep
-        self.__callbacks = {"sdk": sdk_completion, "factory": sdk_kwargs_factory, "clock": clock, "sleep": sleep}
+        self.__monotonic = monotonic_clock
+        self.__callbacks = {"sdk": sdk_completion, "factory": sdk_kwargs_factory, "clock": clock,
+            "sleep": sleep, "monotonic": monotonic_clock}
         if emit is not None:
             self.__callbacks["emit"] = emit
         self.__identities = {name: _identity(value) for name, value in self.__callbacks.items()}
@@ -241,6 +244,10 @@ class ScopedRetryModelEngine(LLMEngine):
         self.__last_request = self.__last_input = self.__last_output = self.__last_usage = None
         self.__last_attempts = 0
         self.__last_status = None
+        self.__last_timing = None
+        self.__timing_last = None
+        self.__timing_failed = False
+        self.__ledger_failed = False
         self.__lock = threading.RLock()
         # Constructor provenance stays stable when the trusted runner first
         # supplies its guard. That guard's source is still added to __sources
@@ -300,10 +307,15 @@ class ScopedRetryModelEngine(LLMEngine):
 
     def __check(self) -> dict:
         try:
+            if self.__ledger_failed:
+                _fail("SCOPED_MODEL_LEDGER_FAILED")
+            if self.__timing_failed:
+                _fail("SCOPED_MODEL_TIMING_INVALID")
             binding = (self.__role, self.__scope, self.__config, self.__logical_limit,
                 self.__sdk_limit, id(self.__policy), _identity(type(self).chat_completion),
                 _identity(type(self).begin_request), _identity(type(self).__call__), self.__source_identity_hash)
-            actual_callbacks = {"sdk": self.__sdk, "factory": self.__factory, "clock": self.__clock, "sleep": self.__sleep}
+            actual_callbacks = {"sdk": self.__sdk, "factory": self.__factory, "clock": self.__clock,
+                "sleep": self.__sleep, "monotonic": self.__monotonic}
             if self.__emit is not None:
                 actual_callbacks["emit"] = self.__emit
             if (binding != self.__binding or set(actual_callbacks) != set(self.__callbacks)
@@ -349,14 +361,52 @@ class ScopedRetryModelEngine(LLMEngine):
             self.__last_request, self.__last_input = request_id, actual_input_hash
             self.__last_output = self.__last_usage = None
             self.__last_attempts, self.__last_status = 0, None
+            self.__last_timing = None
+            self.__timing_last = None
+
+    def __timing_now(self) -> float:
+        try:
+            value = self.__monotonic()
+        except BaseException:
+            self.__timing_failed = True
+            _fail("SCOPED_MODEL_TIMING_INVALID")
+        if type(value) not in (int, float) or not math.isfinite(value):
+            self.__timing_failed = True
+            _fail("SCOPED_MODEL_TIMING_INVALID")
+        value = float(value)
+        if self.__timing_last is not None and value < self.__timing_last:
+            self.__timing_failed = True
+            _fail("SCOPED_MODEL_TIMING_INVALID")
+        self.__timing_last = value
+        return value
+
+    def __timing_delta(self, start: float) -> float:
+        delta = self.__timing_now() - start
+        if not math.isfinite(delta) or delta < 0:
+            self.__timing_failed = True
+            _fail("SCOPED_MODEL_TIMING_INVALID")
+        return delta
+
+    def __timing_accumulate(self, total: float, delta: float) -> float:
+        value = total + delta
+        if not math.isfinite(value) or value < 0:
+            self.__timing_failed = True
+            _fail("SCOPED_MODEL_TIMING_INVALID")
+        return value
+
+    def get_last_timing(self):
+        return _clone(self.__last_timing)
 
     def __event(self, kind: str, request: dict, **fields) -> None:
+        if self.__ledger_failed:
+            _fail("SCOPED_MODEL_LEDGER_FAILED")
         event = {"schemaVersion": EVENT_SCHEMA, "modelRole": self.__role,
             "modelScopeHash": self.__scope, "configHash": self.__config, **request, **fields}
         if self.__emit is not None:
             try:
                 self.__emit(kind, **_clone(event))
             except BaseException:
+                self.__ledger_failed = True
                 _fail("SCOPED_MODEL_LEDGER_FAILED")
 
     def chat_completion(self, messages, stop_sequences=(), **kwargs):
@@ -366,6 +416,11 @@ class ScopedRetryModelEngine(LLMEngine):
                 _fail("SCOPED_MODEL_PERMIT_REQUIRED")
             request, self.__pending, self.__busy = self.__pending, None, True
         started, waited, attempted = False, 0.0, 0
+        timing_start = None
+        attempt_elapsed = 0.0
+        attempt_observed = False
+        success_elapsed = None
+        cooldown_elapsed = 0.0
         try:
             # Official BaseAgent always passes schema=self.decoding_schema.
             # None is its default text-only mode, not an Actor SDK option.
@@ -386,6 +441,7 @@ class ScopedRetryModelEngine(LLMEngine):
             self.__logical_used += 1
             started = True
             self.__event("model_logical_request_started", request)
+            timing_start = self.__timing_now()
             began = self.__clock()
             for attempt in range(1, self.__policy.max_attempts + 1):
                 sdk_kwargs = self.__check()
@@ -406,9 +462,13 @@ class ScopedRetryModelEngine(LLMEngine):
                 self.__sdk_used += 1
                 attempted += 1
                 self.__last_attempts = attempted
+                attempt_start = self.__timing_now()
+                attempt_observed = True
                 try:
                     result = self.__sdk(messages=_clone(converted), **sdk_kwargs)
                 except Exception as error:
+                    attempt_elapsed = self.__timing_accumulate(attempt_elapsed,
+                        self.__timing_delta(attempt_start))
                     try:
                         classification = classify_model_error(error)
                         now = self.__clock()
@@ -418,17 +478,29 @@ class ScopedRetryModelEngine(LLMEngine):
                         now, hint, hint_source = 0.0, None, None
                 else:
                     self.__check()
+                    success_elapsed = self.__timing_delta(attempt_start)
+                    attempt_elapsed = self.__timing_accumulate(attempt_elapsed, success_elapsed)
                     text = _response_text(result)
                     usage_result = _safe_usage(result)
                     usage = usage_result.get("usage")
-                    output_hash = hashlib.sha256(text.encode("utf-8", errors="strict")).hexdigest()
-                    self.__last_output, self.__last_usage, self.__last_status = output_hash, usage, "succeeded"
-                    self.__event("model_request_succeeded", request, **operational,
-                        outputHash=output_hash, **usage_result)
-                    self.__event("model_logical_request_finished", request, status="succeeded", sdkAttempts=attempted)
+                    logical_elapsed = self.__timing_delta(timing_start)
                     elapsed = max(0.0, self.__clock() - began)
                     if not math.isfinite(elapsed):
                         elapsed = 0.0
+                    output_hash = hashlib.sha256(text.encode("utf-8", errors="strict")).hexdigest()
+                    timing = {"schemaVersion": "gaia2-scoped-model-timing-v1",
+                        "logicalElapsedSeconds": logical_elapsed, "sdkAttemptElapsedSeconds": attempt_elapsed,
+                        "successfulSdkElapsedSeconds": success_elapsed, "cooldownSeconds": cooldown_elapsed}
+                    # Timing, completion duration, and output identity are all
+                    # computed before the irreversible success-event commit.
+                    # Once status is marked succeeded, no rejection event may
+                    # be appended for a later ledger callback failure.
+                    self.__last_output, self.__last_usage = output_hash, usage
+                    self.__last_timing = timing
+                    self.__last_status = "succeeded"
+                    self.__event("model_request_succeeded", request, **operational,
+                        outputHash=output_hash, **usage_result)
+                    self.__event("model_logical_request_finished", request, status="succeeded", sdkAttempts=attempted)
                     # Preserve the original SDK string for ARE's real parser;
                     # do not lowercase booleans, stringify or trim stop tokens.
                     return text, {"completion_duration": elapsed, "modelRole": self.__role,
@@ -453,11 +525,14 @@ class ScopedRetryModelEngine(LLMEngine):
                 remaining = delay
                 while remaining > 0:
                     chunk = min(remaining, 30.0)
+                    cooldown_start = self.__timing_now()
                     try:
                         self.__sleep(chunk)
                     except BaseException:
                         _fail("SCOPED_MODEL_WAIT_CANCELLED")
                     waited += chunk
+                    cooldown_elapsed = self.__timing_accumulate(cooldown_elapsed,
+                        self.__timing_delta(cooldown_start))
                     remaining = max(0.0, remaining - chunk)
                     self.__check()
                     if remaining > 0:
@@ -465,7 +540,11 @@ class ScopedRetryModelEngine(LLMEngine):
                             nextRetryAt=next_retry_at, remainingWaitSeconds=remaining)
             _fail("SCOPED_MODEL_RUNTIME_ERROR")
         except ScopedModelBrokerError as failure:
-            if self.__last_status != "failed":
+            if self.__ledger_failed:
+                self.__last_status = "failed"
+                self.__last_output = self.__last_usage = None
+                raise failure from None
+            if self.__last_status not in ("failed", "succeeded"):
                 self.__last_status = "rejected"
                 self.__last_output = self.__last_usage = None
                 self.__event("model_request_rejected", request, failureCode=failure.code)
@@ -473,13 +552,36 @@ class ScopedRetryModelEngine(LLMEngine):
                     self.__event("model_logical_request_finished", request, status="rejected", sdkAttempts=attempted)
             raise failure from None
         except BaseException:
-            self.__last_status = "rejected"
-            self.__last_output = self.__last_usage = None
-            self.__event("model_request_rejected", request, failureCode="SCOPED_MODEL_RUNTIME_ERROR")
-            if started:
-                self.__event("model_logical_request_finished", request, status="rejected", sdkAttempts=attempted)
+            if self.__ledger_failed:
+                self.__last_status = "failed"
+                self.__last_output = self.__last_usage = None
+                _fail("SCOPED_MODEL_LEDGER_FAILED")
+            if self.__last_status != "succeeded":
+                self.__last_status = "rejected"
+                self.__last_output = self.__last_usage = None
+                self.__event("model_request_rejected", request, failureCode="SCOPED_MODEL_RUNTIME_ERROR")
+                if started:
+                    self.__event("model_logical_request_finished", request, status="rejected", sdkAttempts=attempted)
             _fail("SCOPED_MODEL_RUNTIME_ERROR")
         finally:
+            if started and self.__last_timing is None and timing_start is not None:
+                try:
+                    logical_elapsed = self.__timing_delta(timing_start)
+                except ScopedModelBrokerError:
+                    logical_elapsed = None
+                    cooldown_elapsed = None
+                if self.__timing_failed:
+                    logical_elapsed = None
+                    attempt_value = None
+                    success_value = None
+                    cooldown_value = None
+                else:
+                    attempt_value = attempt_elapsed if attempt_observed else None
+                    success_value = success_elapsed
+                    cooldown_value = cooldown_elapsed
+                self.__last_timing = {"schemaVersion": "gaia2-scoped-model-timing-v1",
+                    "logicalElapsedSeconds": logical_elapsed, "sdkAttemptElapsedSeconds": attempt_value,
+                    "successfulSdkElapsedSeconds": success_value, "cooldownSeconds": cooldown_value}
             with self.__lock:
                 self.__busy = False
 

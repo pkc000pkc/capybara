@@ -150,6 +150,23 @@ class Tests(unittest.TestCase):
         env.time_manager.time_passed = original_time_passed
         owner.close()
 
+    def test_08_partial_pause_binding_failure_is_cleaned_by_frozen_method(self):
+        env, _app, owner = self.fixture()
+        original_pause = env.time_manager.pause
+        original_resume = env.resume_with_offset
+
+        def pause_and_drift():
+            original_pause()
+            env.resume_with_offset = lambda _offset: None
+
+        env.time_manager.pause = pause_and_drift
+        with self.assertRaisesRegex(GenerationTimeError, "GENERATION_BINDING_CHANGED"):
+            owner.acquire(**self.args(10))
+        self.assertIs(env.state, EnvironmentState.RUNNING)
+        self.assertFalse(env.time_manager.is_paused)
+        env.resume_with_offset = original_resume
+        owner.close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

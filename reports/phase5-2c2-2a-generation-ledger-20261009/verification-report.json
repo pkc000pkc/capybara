@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "gaia2-phase5-2c2-2a-generation-ledger-verification-v1",
+  "status": "passed",
+  "stage": "5.2c2.2a",
+  "route": "A",
+  "scope": "independent_generation_timing_and_append_only_ledger",
+  "targetedTests": {
+    "generationTimeOwner": 8,
+    "generationLedgerAndTiming": 10,
+    "scopedModelBrokerRegression": 11
+  },
+  "fullProjectPythonTests": 215,
+  "targetedCommands": [
+    "configured-python -B test/phase5_generation_time_test.py -v",
+    "configured-python -B test/phase5_generation_time_ledger_test.py -v",
+    "configured-python -B test/phase5_scoped_model_broker_test.py -v"
+  ],
+  "fullRegressionCommand": "configured-python -B -m unittest discover -s test -p *_test.py -v with official-python PYTHONPATH and offline flags",
+  "sourceRefs": [
+    {
+      "path": "scripts/gaia2_generation_time.py",
+      "sha256": "5de5044ac33a99d3e7c9a57eddc849ab8ab98ea077ae74d5a0b748ff06a7e7fc"
+    },
+    {
+      "path": "scripts/gaia2_scoped_model_broker.py",
+      "sha256": "e6b82409108d1db9dc3352162a44e6c2ec81ad00a97a3c19f2ea6a3a5bde2029"
+    },
+    {
+      "path": "scripts/gaia2_generation_time_ledger.py",
+      "sha256": "a7bd4177cd4253536f086f327d425c09e5ffa7998520b11f8bc91e6d4e5d2495"
+    },
+    {
+      "path": "test/phase5_generation_time_test.py",
+      "sha256": "9ad8dccfd2623dc2692a3cfc554b0b4bac83bde514e09602563593f7254d9f4c"
+    },
+    {
+      "path": "test/phase5_generation_time_ledger_test.py",
+      "sha256": "85fc695befc2a367d3d65cd375309636e9e7d1e4a01fa1032031d031d10982d3"
+    }
+  ],
+  "networkCalls": 0,
+  "realProviderCalls": 0,
+  "officialScenarioExecuted": false,
+  "runnerIntegration": false,
+  "officialAreModified": false,
+  "defaultRunnerBehaviorChanged": false,
+  "contracts": {
+    "independentMonotonicTiming": true,
+    "timingFields": [
+      "logicalElapsedSeconds",
+      "sdkAttemptElapsedSeconds",
+      "successfulSdkElapsedSeconds",
+      "cooldownSeconds"
+    ],
+    "timingUnknownIsNull": true,
+    "timingRollbackAndNonfiniteDeltaFailClosed": true,
+    "timingFailureIsSticky": true,
+    "appendOnlyLedgerSchema": "gaia2-generation-time-ledger-v1",
+    "ledgerHashChain": true,
+    "ledgerStrictOrder": true,
+    "ledgerSafePayloadOnly": true,
+    "ledgerFailureIsTerminal": true,
+    "partialPauseCleanupUsesFrozenTrustedResume": true
+  },
+  "limits": [
+    "The ledger is standalone and is not yet connected to BaseAgent, AppAgent, or the default runner.",
+    "The optional event callback has no atomic multi-event transaction; callback failure is terminal and the next stage must provide an atomic sink or verifier before claiming runner-level event atomicity.",
+    "No official A2A/Noise Scenario or benchmark score was produced in this mechanism gate."
+  ]
+}
