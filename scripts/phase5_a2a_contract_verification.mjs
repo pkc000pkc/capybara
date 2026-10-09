@@ -16,8 +16,9 @@ for (let index = 0; index < args.length; index += 2) {
   cli[args[index]] = args[index + 1]
 }
 const pipeScope = cli['--scope'] === 'private-pipe'
-assert.ok(cli['--scope'] === undefined || pipeScope, 'invalid verification scope')
-const label = pipeScope ? 'phase5-1b-pipe' : 'phase5-1a-contract'
+const nativeScope = cli['--scope'] === 'native-binding'
+assert.ok(cli['--scope'] === undefined || pipeScope || nativeScope, 'invalid verification scope')
+const label = nativeScope ? 'phase5-1b-native-binding' : pipeScope ? 'phase5-1b-pipe' : 'phase5-1a-contract'
 const output = resolve(root, cli['--output-dir'] ?? `reports/${label}-${Date.now()}`)
 assert.ok(within(join(root, 'reports'), output) && output !== join(root, 'reports'), 'output must be a new reports child')
 assert.ok(!existsSync(output), 'verification output already exists')
@@ -51,27 +52,42 @@ const sourceFilePaths = () => [...new Set([
   ...files(join(root, protocol.runtime.officialPythonPath, 'are')),
   ...['package.json', 'package-lock.json', 'tsconfig.json', 'tsconfig.build.json'].map(part => join(backend, part)).filter(existsSync),
   ...['package.json', 'package-lock.json'].map(part => join(root, part)),
+  ...(nativeScope ? ['typing.py', 'enum.py'].map(part => join(dirname(python), 'Lib', part)).filter(existsSync) : []),
 ])].sort()
 const ref = path => ({ path: regular(path), sha256: fileDigest(path), bytes: statSync(path).size })
 const inventory = sourceFilePaths().map(ref)
+if (nativeScope) {
+  for (const path of [join(backend, 'src/core/plugins/runtime-delegation-native-pipe.ts'),
+    join(backend, 'test/runtime-delegation-native-pipe.test.ts'),
+    join(root, 'scripts/gaia2_private_native_binding.py'), join(root, 'test/phase5_private_native_binding_test.py'),
+    join(root, 'test/fixtures/phase5_native_pipe_worker.py')]) assert.ok(inventory.some(ref => ref.path === path), 'native verification source missing')
+}
 const sourceHash = digest(inventory)
 const gitHead = directory => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: directory, windowsHide: true, encoding: 'utf8' }).trim()
 mkdirSync(output)
-writeJson(join(output, 'source-inventory.json'), { schemaVersion: pipeScope ? 'gaia2-phase5-1b-pipe-controlled-source-v1' : 'gaia2-phase5-1a-controlled-source-v1', sourceHash,
+writeJson(join(output, 'source-inventory.json'), { schemaVersion: nativeScope ? 'gaia2-phase5-1b-native-controlled-source-v1' : pipeScope ? 'gaia2-phase5-1b-pipe-controlled-source-v1' : 'gaia2-phase5-1a-controlled-source-v1', sourceHash,
   backendCommit: gitHead(backend), projectCommit: gitHead(root), files: inventory,
   historicalStage4Acceptance: ref(join(root, 'reports/phase4-v3-mechanism-acceptance-20261009-v1.json')),
-  scope: pipeScope ? 'controlled_private_pipe_only_not_official_app_binding' : 'controlled_contract_only_not_phase4_lock_replacement' }, { immutable: true })
+  scope: nativeScope ? 'controlled_single_app_native_binding_not_official_appagent_or_scenario' : pipeScope ? 'controlled_private_pipe_only_not_official_app_binding' : 'controlled_contract_only_not_phase4_lock_replacement' }, { immutable: true })
 
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/(?:API_KEY|ACCESS_TOKEN|AUTHORIZATION|HF_TOKEN|HUGGINGFACE_TOKEN|PASSWORD|SECRET|GAIA2_HOOK_|BASE_URL|ENDPOINT)/i.test(key)))
 Object.assign(env, { PYTHONPATH: join(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', PYTHONDONTWRITEBYTECODE: '1',
   HF_HUB_OFFLINE: '1', HF_DATASETS_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1',
   LITELLM_LOCAL_MODEL_COST_MAP: 'True', LITELLM_TELEMETRY: 'False' })
+if (nativeScope) {
+  const integrationRoot = join(output, 'native-integration-evidence')
+  mkdirSync(integrationRoot)
+  env.GAIA2_NATIVE_INTEGRATION_EVIDENCE_ROOT = integrationRoot
+}
 const checks = [
   { name: 'backend-typecheck', cwd: backend, command: process.execPath, args: [join(backend, 'node_modules/typescript/bin/tsc'), '--noEmit'] },
   { name: 'backend-build', cwd: backend, command: process.execPath, args: [join(backend, 'node_modules/typescript/bin/tsc'), '-p', 'tsconfig.build.json'] },
   { name: 'backend-full-tests', cwd: backend, command: process.execPath, args: [join(backend, 'node_modules/tsx/dist/cli.mjs'), '--conditions=development', '--test',
+    // Native integration starts genuine Python workers; serialize test files to
+    // avoid competing with the existing 100ms controlled Hook fixture budget.
+    ...(nativeScope ? ['--test-concurrency=1'] : []),
     ...files(join(backend, 'test'), file => file.endsWith('.test.ts')).map(file => relative(backend, file))], testKind: 'tap' },
-  { name: 'project-full-node-tests', cwd: root, command: process.execPath, args: ['--test'], testKind: 'tap' },
+  { name: 'project-full-node-tests', cwd: root, command: process.execPath, args: ['--test', ...(nativeScope ? ['--test-concurrency=1'] : [])], testKind: 'tap' },
   { name: 'project-python-tests', cwd: root, command: python, args: ['-B', '-m', 'unittest', 'discover', '-s', 'test', '-p', '*_test.py', '-v'], testKind: 'unittest' },
 ]
 const results = []
@@ -116,21 +132,34 @@ for (const check of checks) {
 }
 const sourceSetClosed = JSON.stringify(sourceFilePaths()) === JSON.stringify(inventory.map(item => item.path))
 const unchanged = sourceSetClosed && inventory.every(item => fileDigest(regular(item.path)) === item.sha256 && statSync(item.path).size === item.bytes)
-const evidence = [ref(join(output, 'source-inventory.json')), ...results.flatMap(check => check.evidence)]
+const integrationEvidence = nativeScope ? files(join(output, 'native-integration-evidence')).map(ref) : []
+if (nativeScope) assert.ok(integrationEvidence.some(item => item.path.endsWith('summary.json')), 'retained native integration evidence missing')
+const evidence = [ref(join(output, 'source-inventory.json')), ...results.flatMap(check => check.evidence), ...integrationEvidence]
 for (const item of evidence) assert.equal(fileDigest(regular(item.path)), item.sha256)
 const accepted = unchanged && results.every(check => check.passed)
-const report = { schemaVersion: pipeScope ? 'gaia2-phase5-1b-pipe-controlled-verification-v1' : 'gaia2-phase5-1a-controlled-verification-v1', status: accepted ? 'passed' : 'failed',
+const report = { schemaVersion: nativeScope ? 'gaia2-phase5-1b-native-controlled-verification-v1' : pipeScope ? 'gaia2-phase5-1b-pipe-controlled-verification-v1' : 'gaia2-phase5-1a-controlled-verification-v1', status: accepted ? 'passed' : 'failed',
   sourceHash, sourceFiles: inventory.length, sourceSetClosed, sourceUnchanged: unchanged, checks: results, evidence,
-  ...(pipeScope ? { privatePipeControlledAccepted: accepted, phase51b1Complete: false, nativeAppBindingComplete: false,
+  ...(nativeScope ? { privatePipeControlledAccepted: accepted, nativeAppBindingControlledAccepted: accepted,
+    realHostNativePipeIntegrationPassed: accepted, tsPythonControlledAreAppBound: accepted,
+    nativeIntegrationEvidenceFiles: integrationEvidence.length,
+    controlledApps: ['Contacts', 'RentAFlat'], phase51b1Complete: false, nativeAppBindingComplete: false,
+    officialAppAgentIntegrated: false, tsPythonPrivatePipeRoundTripPassed: accepted, tsPythonOfficialAppBound: false }
+    : pipeScope ? { privatePipeControlledAccepted: accepted, phase51b1Complete: false, nativeAppBindingComplete: false,
     officialAppAgentIntegrated: false, tsPythonPrivatePipeRoundTripPassed: accepted, tsPythonOfficialAppBound: false }
     : { phase51aControlledContractAccepted: accepted, tsPythonIpcConnected: false }),
   stage5Complete: false, productionA2aEnabled: false,
   officialScenarioExecuted: false, modelCalls: 0, officialSubmissionUploaded: false,
-  limits: [...(pipeScope ? ['Real TS/Python inherited pipes are tested; no official App/native collector binding or AppAgent integration is claimed.',
+  limits: [...(nativeScope ? ['Real Contacts/RentAFlat objects in a SETUP Environment are exercised through actual TS Host and private Python pipe; no Scenario or AppAgent is run.',
+    'Collector authority is the trusted source-frozen Python factory, actual App/adapter/callable identities and private dispatch context, not caller CE JSON or source hashes alone.',
+    'Only known single-App internal events are covered. Cross-App internal calls require a future trusted environment-wide observer and edge policy.',
+    'Raw native result and formatter observation are independently frozen; wire projections are evidence, not substitutes for original Python observations.',
+    'ARE clock is bound and checked independently; cross-clock deadlines, child roles and parent/child notification routing remain unimplemented.']
+    : pipeScope ? ['Real TS/Python inherited pipes are tested; no official App/native collector binding or AppAgent integration is claimed.',
     'Host timeout/EOF revocation is tested with a controlled pending native callback, not an official business operation.',
     'wireHash is separate from historical Host/Python hashes; actual raw/effective argument and App manifest mapping is not yet implemented.'] : ['TS native driver constructor is trusted; Python local gates are controlled doubles, not owned TS receipts.']),
     'OS birth identity is independently verified at the test wrapper admission, not for each short inner compiler/test process.',
-    'No real cross-process Host/native binding or official AppAgent benchmark integration is claimed.',
+    ...(nativeScope ? ['No official AppAgent benchmark integration or universal official tool compatibility is claimed.']
+      : ['No real cross-process Host/native binding or official AppAgent benchmark integration is claimed.']),
     'Existing production expert_agent guard remains blocked; stage 5.1b admission is still required.'],
   finishedAt: new Date().toISOString() }
 for (const item of evidence) assert.equal(fileDigest(regular(item.path)), item.sha256)
