@@ -5,7 +5,7 @@ import test from 'node:test'
 import { digest, fileDigest } from '../src/phase0_run.mjs'
 import { aggregatePhase4Metrics } from '../src/phase4_metrics.mjs'
 import { runtimeFixture } from './support/runtime_evidence_fixture.mjs'
-import { controlledReplayEvidenceFixture } from './support/correction_replay_fixture.mjs'
+import { controlledReplayFixture, controlledReplayEvidenceFixture } from './support/correction_replay_fixture.mjs'
 import { aggregateCorrectionUsage } from '../src/phase4_usage.mjs'
 
 function plan(first = null) {
@@ -119,6 +119,19 @@ const replayLedger = fixture => ({ schemaVersion: 'gaia2-phase4-correction-ledge
   trainingReceipt: { ...fixture.replayVerified.trainingReceipt }, strategyHash: fixture.replayVerified.strategyHash,
   replayReportRef: { ...fixture.replayReportRef },
 }] })
+
+test('Phase 4 controlled replay rejects failed/missing training proof before filesystem or replay execution', async () => {
+  for (const training of [
+    { status: 'training_failed', hostResult: { failureCode: 'training_host_or_provider_failure', cleanupCompleted: true }, processResult: { childClosed: true } },
+    { status: 'strategy_ready' },
+    { status: 'strategy_ready', trainingReportRef: { path: 'irrelevant.json', sha256: 'invalid' } },
+  ]) {
+    // No root/manifest/fixture paths exist in these inputs. The status guard
+    // must reject before joining a path, spawning a Host, or using a provider.
+    await assert.rejects(() => controlledReplayFixture({ after: () => assert.fail('unexpected cleanup registration') }, { training }),
+      /CONTROLLED_REPLAY_TRAINING_NOT_READY/)
+  }
+})
 
 test('Phase 4 independently judged fresh replay success improves only corrected scenario metric, never initial slots', async t => {
   const f = await controlledReplayEvidenceFixture(t, { passed: true, fullInitialPlan: true })

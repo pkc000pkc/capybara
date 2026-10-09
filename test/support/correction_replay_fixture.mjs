@@ -18,6 +18,16 @@ const portable = value => value.replaceAll('\\', '/')
 export async function controlledReplayFixture(t, { caseName = 'unknown', training = null, fullInitialPlan = false, passed = null } = {}) {
   const { trainingProofFixture } = await import('./training_proof_fixture.mjs')
   const f = training ?? await trainingProofFixture(t, { fullInitialPlan })
+  assert.ok(f.status === 'strategy_ready' && typeof f.trainingReportRef?.path === 'string'
+    && /^[a-f0-9]{64}$/.test(f.trainingReportRef?.sha256 ?? ''),
+  `CONTROLLED_REPLAY_TRAINING_NOT_READY ${JSON.stringify({
+    trainingFailed: f.status === 'training_failed',
+    hostFailureCode: ['training_host_or_provider_failure', 'training_provider_cleanup_unresolved'].includes(f.hostResult?.failureCode)
+      ? f.hostResult.failureCode : null,
+    hostCleanupCompleted: f.hostResult?.cleanupCompleted === true,
+    timedOut: f.processResult?.timedOut === true,
+    childClosed: f.processResult?.childClosed === true,
+  })}`)
   const { root, trainingManifest: initialManifest, parent, trainingReportRef } = f
   const directory = join(f.fixtureRoot, `replay-${caseName}-${randomUUID()}`)
   const plan = createCorrectionReplayPlan({ root, manifest: initialManifest, parent, trainingReportRef, outputDir: directory })

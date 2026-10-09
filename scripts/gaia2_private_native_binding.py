@@ -36,6 +36,8 @@ import gaia2_argument_preflight as preflight
 from are.simulation.agents.default_agent.app_agent import AppAgent
 from are.simulation.agents.default_agent.default_tools import FinalAnswerTool
 from are.simulation.apps.app import App
+from are.simulation.environment import Environment
+from are.simulation.time_manager import TimeManager
 from are.simulation.tool_utils import AppTool, AppToolAdapter, OperationType
 from are.simulation.tools import Tool
 from are.simulation.types import CompletedEvent, EventRegisterer, EventType
@@ -124,7 +126,8 @@ class NativeAppBinding:
     def __init__(self, app: App, *, environment_generation: str,
                  parent_execution_id: str, parent_session_id: str,
                  evidence_root: str | Path, clock: Callable[[], float],
-                 trusted_source_files: tuple[str | Path, ...] = ()):
+                 trusted_source_files: tuple[str | Path, ...] = (),
+                 clock_environment: Environment | None = None):
         if not isinstance(app, App) or not callable(clock):
             _fail("NATIVE_INITIALIZATION_INVALID")
         identities = (environment_generation, parent_execution_id, parent_session_id, app.name)
@@ -138,6 +141,19 @@ class NativeAppBinding:
         self.__clock = clock
         self.__last_clock = None
         self.__clock_failed = False
+        # Legacy clock is operational only. ARE authority is opt-in and comes
+        # exclusively from this actual Environment's shared TimeManager.
+        if clock_environment is not None and (type(clock_environment) is not Environment
+                or type(clock_environment.time_manager) is not TimeManager
+                or clock_environment.apps.get(app.name) is not app
+                or app.time_manager is not clock_environment.time_manager):
+            _fail("NATIVE_CLOCK_ENVIRONMENT_INVALID")
+        self.__clock_environment = clock_environment
+        self.__are_time_manager = clock_environment.time_manager if clock_environment is not None else None
+        self.__are_last_clock = None
+        self.__are_clock_failed = False
+        self.__clock_revision = 0
+        self.__clock_dispatches: dict[str, dict] = {}
         self.__closed = False
         self.__unknown = False
         self.__lock = threading.RLock()
@@ -184,6 +200,9 @@ class NativeAppBinding:
                          preflight.validate_tool_arguments, preflight.JsonScenarioExporter,
                          preflight.Scenario, wire.encode_value, type(app.time_manager)):
             self.__add_source_object(required)
+        if clock_environment is not None:
+            self.__add_source_object(Environment)
+            self.__add_source_object(TimeManager)
         self.__add_source_path(Path(__file__))
         for source in trusted_source_files:
             self.__add_source_path(Path(source))
@@ -381,6 +400,17 @@ class NativeAppBinding:
                 id(formatter), self.__function_snapshot(formatter) if formatter else None,
                 self.__function_snapshot(adapter.forward), self.__function_snapshot(adapter.__call__)))
         internal = tuple((name, self.__function_snapshot(getattr(type(self.__app), name))) for name in self.__internal)
+        clock_binding = None
+        if self.__clock_environment is not None:
+            env, manager = self.__clock_environment, self.__are_time_manager
+            clock_binding = (id(env), type(env), id(env.time_manager), type(env.time_manager),
+                id(env.apps.get(self.__app.name)), id(manager), type(manager),
+                tuple(self.__function_snapshot(getattr(manager, name)) for name in
+                    ("time", "time_passed", "real_time_passed", "reset", "pause", "resume", "set_offset", "add_offset")),
+                tuple(self.__function_snapshot(getattr(env, name)) for name in
+                    ("register_apps", "add_to_log", "pause", "resume", "resume_with_offset")),
+                id(_function(manager.real_time_passed).__globals__.get("time")),
+                id(getattr(_function(manager.real_time_passed).__globals__.get("time"), "time", None)))
         return (type(self.__app), self.__app.name, id(self.__app.time_manager),
                 tuple(id(tool) for tool in self.__app.get_tools()), tuple(entries), internal,
                 self.__function_snapshot(AppTool.__call__), self.__function_snapshot(App.add_event),
@@ -389,7 +419,7 @@ class NativeAppBinding:
                 self.__function_snapshot(EventRegisterer.event_registered),
                 self.__function_snapshot(EventRegisterer.is_active),
                 self.__function_snapshot(EventRegisterer.is_capture_mode),
-                self.__function_snapshot(preflight.validate_tool_arguments))
+                self.__function_snapshot(preflight.validate_tool_arguments), clock_binding)
 
     def __check(self) -> None:
         if self.__closed:
@@ -426,6 +456,108 @@ class NativeAppBinding:
             _fail("NATIVE_CLOCK_INVALID")
         self.__last_clock = now
         return now
+
+    def __are_now(self) -> float:
+        """Actual ARE seconds, never legacy/Actor/model clock fallback."""
+        if self.__clock_environment is None:
+            _fail("NATIVE_CLOCK_AUTHORITY_UNAVAILABLE")
+        if self.__are_clock_failed or self.__clock_failed:
+            _fail("NATIVE_CLOCK_INVALID")
+        try:
+            now = self.__are_time_manager.time()
+        except BaseException:
+            now = None
+        if not _finite(now) or now < 0 or self.__are_last_clock is not None and now < self.__are_last_clock:
+            self.__are_clock_failed = True
+            if self.__active is not None and self.__active["effect"] in ("write", "finish"):
+                self.__unknown = True
+            _fail("NATIVE_CLOCK_INVALID")
+        self.__are_last_clock = now
+        return now
+
+    def __clock_evidence(self, ref: dict) -> None:
+        try:
+            _exact(ref, {"path", "sha256"})
+            if type(ref["path"]) is not str or not re.fullmatch(r"json/[a-z0-9-]+\.json", ref["path"]):
+                _fail("NATIVE_CLOCK_EVIDENCE_CHANGED")
+            target = self.__root / ref["path"]
+            _no_links(target)
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != ref["sha256"]:
+                _fail("NATIVE_CLOCK_EVIDENCE_CHANGED")
+        except BaseException:
+            self.__are_clock_failed = True
+            _fail("NATIVE_CLOCK_EVIDENCE_CHANGED")
+
+    def observe_clock(self, payload: Any) -> dict:
+        """Trusted private owner probe, independently bound to one dispatch.
+
+        revision counts these owner observations, not ARE native revisions.
+        An after sample of a terminal dispatch is historical evidence only;
+        it cannot restore a native permit or manufacture a successful outcome.
+        """
+        _exact(payload, {"scope", "ticketId", "dispatchId", "checkpoint"})
+        if self.__clock_environment is None:
+            _fail("NATIVE_CLOCK_AUTHORITY_UNAVAILABLE")
+        dispatch_id, ticket_id, checkpoint = payload["dispatchId"], payload["ticketId"], payload["checkpoint"]
+        if (type(dispatch_id) is not str or type(ticket_id) is not str or not _TICKET.fullmatch(ticket_id)
+                or type(checkpoint) is not str or checkpoint not in ("before_tool", "after_tool")):
+            _fail("NATIVE_CLOCK_PROBE_INVALID")
+        try:
+            if str(uuid.UUID(dispatch_id)) != dispatch_id:
+                _fail("NATIVE_CLOCK_PROBE_INVALID")
+        except (ValueError, AttributeError):
+            _fail("NATIVE_CLOCK_PROBE_INVALID")
+        with self.__lock:
+            self.__check()
+            _, scope_hash = self.__scope_shape(payload["scope"])
+            child = self.__children.get(payload["scope"]["requestId"])
+            ticket = self.__tickets.get(ticket_id)
+            if (child is None or child["hash"] != scope_hash or ticket is None or ticket["child"] is not child):
+                _fail("NATIVE_CLOCK_SCOPE_INVALID")
+            response = ticket["response"]
+            common = {"sourceManifestHash": self.__manifest_hash, "scopeHash": child["hash"],
+                "ticketId": ticket_id, "dispatchId": dispatch_id, "toolId": response["toolId"],
+                "canonicalName": response["canonicalName"], "toolKind": response["toolKind"], "effect": response["effect"],
+                "rawArgumentsHash": response["rawArgumentsHash"], "effectiveArgumentsHash": response["effectiveArgumentsHash"]}
+            prior = self.__clock_dispatches.get(dispatch_id)
+            native_return_ref = None
+            if checkpoint == "before_tool":
+                if (child["status"] != "running" or ticket["consumed"] or dispatch_id in self.__dispatches
+                        or prior is not None or any(item["binding"]["ticketId"] == ticket_id for item in self.__clock_dispatches.values())):
+                    _fail("NATIVE_CLOCK_BEFORE_INVALID_OR_REUSED")
+            else:
+                if (prior is None or prior["binding"] != common or not ticket["consumed"]
+                        or dispatch_id not in self.__dispatches or prior["afterObserved"]
+                        or prior["nativeReturnEvidenceRef"] is None
+                        or self.__active is not None and self.__active["binding"]["dispatchId"] == dispatch_id):
+                    _fail("NATIVE_CLOCK_AFTER_INVALID_OR_REUSED")
+                native_return_ref = _clone(prior["nativeReturnEvidenceRef"])
+            try:
+                if checkpoint == "after_tool":
+                    self.__clock_evidence(prior["beforeEvidenceRef"])
+                    self.__clock_evidence(native_return_ref)
+                now = self.__are_now()
+                if self.__clock_revision >= wire.MAX_SAFE_INTEGER:
+                    _fail("NATIVE_CLOCK_REVISION_EXHAUSTED")
+                self.__clock_revision += 1
+                clock = {"now": now, "revision": self.__clock_revision}
+                evidence = self.__receipt("clock", {"schemaVersion": "gaia2-private-native-clock-receipt-v1",
+                    **common, "checkpoint": checkpoint, "clock": clock, "clockAuthority": "ARE",
+                    "revisionMeaning": "owner_observation_sequence_not_are_revision",
+                    "nativeReturnEvidenceRef": native_return_ref})
+            except BaseException:
+                if checkpoint == "after_tool" and response["effect"] in ("write", "finish"):
+                    self.__unknown = True
+                    child["status"] = "unknown"
+                raise
+            if checkpoint == "before_tool":
+                self.__clock_dispatches[dispatch_id] = {"binding": common, "beforeObserved": True,
+                    "afterObserved": False, "nativeReturnEvidenceRef": None, "beforeEvidenceRef": _clone(evidence)}
+            else:
+                prior["afterObserved"] = True
+            return _clone({"schemaVersion": "gaia2-private-native-clock-v1", "scopeHash": child["hash"],
+                "ticketId": ticket_id, "dispatchId": dispatch_id, "checkpoint": checkpoint,
+                "clock": clock, "evidenceRef": evidence})
 
     def manifest(self) -> dict:
         with self.__lock:
@@ -603,6 +735,14 @@ class NativeAppBinding:
                     _fail("NATIVE_UNRESOLVED_APP_MUTATION")
                 if child["count"] >= child["scope"]["maxNativeActions"]:
                     _fail("NATIVE_BUDGET_EXHAUSTED")
+                clock_dispatch = self.__clock_dispatches.get(payload["dispatchId"])
+                if self.__clock_environment is not None:
+                    if (clock_dispatch is None or clock_dispatch["binding"]["ticketId"] != payload["ticketId"]
+                            or clock_dispatch["binding"]["scopeHash"] != child["hash"]
+                            or clock_dispatch["nativeReturnEvidenceRef"] is not None):
+                        _fail("NATIVE_CLOCK_BEFORE_REQUIRED")
+                    self.__clock_evidence(clock_dispatch["beforeEvidenceRef"])
+                    self.__are_now()
                 ticket["consumed"] = True
                 self.__dispatches.add(payload["dispatchId"])
                 child["count"] += 1
@@ -705,6 +845,8 @@ class NativeAppBinding:
                     raise NativeBindingError("NATIVE_COMPLETION_EVIDENCE_FAILED") from None
                 finally:
                     self.__active = None
+                if self.__clock_environment is not None:
+                    clock_dispatch["nativeReturnEvidenceRef"] = _clone(native_return_ref)
                 if status != "succeeded":
                     child["status"] = status
                 elif response["toolKind"] == "child_final_answer":
@@ -750,9 +892,12 @@ class NativeAppBinding:
             return self.__agent_observations.pop(dispatch_id)
 
     def handlers(self) -> dict[str, Callable]:
-        return {"inspect_app": self.inspect_app, "bind_child": self.bind_child,
+        result = {"inspect_app": self.inspect_app, "bind_child": self.bind_child,
             "prepare_native": self.prepare_native, "commit_native": self.commit_native,
             "cancel_child": self.cancel_child}
+        if self.__clock_environment is not None:
+            result["observe_clock"] = self.observe_clock
+        return result
 
     def close(self) -> None:
         """Synchronous revocation, never waits for an in-flight native callback."""

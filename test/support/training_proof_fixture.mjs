@@ -272,7 +272,12 @@ export async function trainingProofFixture(t, { kind = 'multi_tool_response_reje
       receipt.process?.childExited === true && receipt.process.childClosed === true && !receipt.process.manualInspectionRequired
       && Array.isArray(receipt.process.terminationErrors) && receipt.process.terminationErrors.length === 0)
   const ref = file => ({ path: portable(relative(root, file)), sha256: fileDigest(file) })
-  if (!hostResult || hostResult.status !== 'passed') return { root, fixtureRoot, manifest: parent.manifest, parent, trainingManifest, trainingManifestPath, capabilities, spec, processResult, hostResult, httpRequests, readEvidence, put, candidate, scenario, controlledSourceRef, status: 'training_failed' }
+  if (!hostResult || hostResult.status !== 'passed') {
+    // A cleanly closed failed Host still needs its diagnostic bytes. Never
+    // discard the cause before the replay caller can report the failure.
+    cleanupSafe = false
+    return { root, fixtureRoot, manifest: parent.manifest, parent, trainingManifest, trainingManifestPath, capabilities, spec, processResult, hostResult, httpRequests, readEvidence, put, candidate, scenario, controlledSourceRef, status: 'training_failed' }
+  }
   assert.equal(healthyTrainingProcess(processResult), true)
   const proposal = hostResult.result.proposals[0].output.correction
   const { freshReplayRequired, attemptCountDelta, ...planInput } = proposal
