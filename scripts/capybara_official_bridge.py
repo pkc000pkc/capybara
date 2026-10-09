@@ -15,12 +15,18 @@ import time
 import hashlib
 import math
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 import litellm
 from litellm import completion
 from gaia2_model_retry import install_model_retries
+from gaia2_deadline_notifications import ProjectedNotification
+from gaia2_notification_producer import (
+    NotificationProducerError,
+    ScopedNotificationOriginRegistry,
+)
 from gaia2_runtime_hooks import HookProtocolError, RuntimeHookClient
 from gaia2_argument_preflight import safe_json_value, validate_tool_arguments
 
@@ -30,6 +36,72 @@ from are.simulation.tool_utils import OperationType
 from are.simulation.types import EnvironmentState
 
 logger = logging.getLogger(__name__)
+
+
+_notification_binding_factory = None
+_notification_binding_configured = False
+
+
+@dataclass(frozen=True)
+class BridgeNotificationBinding:
+    """Trusted parent binding used only by the opt-in bridge path.
+
+    The official queue remains parent-owned.  A trusted factory supplies this
+    object after binding one origin to one child scope; the bridge assigns
+    occurrence IDs and sequences as it drains arrived official messages.
+    """
+
+    registry: ScopedNotificationOriginRegistry
+    origin_id: str
+    occurrence_prefix: str
+    next_sequence: int = 1
+
+    def __post_init__(self):
+        if type(self.registry) is not ScopedNotificationOriginRegistry:
+            raise HookProtocolError("invalid_notification_binding")
+        if type(self.origin_id) is not str or not self.origin_id:
+            raise HookProtocolError("invalid_notification_binding")
+        if type(self.occurrence_prefix) is not str or not self.occurrence_prefix:
+            raise HookProtocolError("invalid_notification_binding")
+        if type(self.next_sequence) is not int or self.next_sequence < 1:
+            raise HookProtocolError("invalid_notification_binding")
+
+    def publish(self, notification, arrived_at: float) -> dict[str, Any]:
+        sequence = self.next_sequence
+        occurrence_id = self.occurrence_prefix + ":" + str(sequence)
+        try:
+            receipt = self.registry.publish(origin_id=self.origin_id,
+                occurrence_id=occurrence_id, sequence=sequence, arrived_at=arrived_at,
+                message=notification)
+        except NotificationProducerError as error:
+            raise HookProtocolError(error.code.lower()) from None
+        object.__setattr__(self, "next_sequence", self.next_sequence + 1)
+        return receipt
+
+
+def configure_notification_bridge(factory) -> None:
+    """Install the trusted parent factory once; Actor input cannot call this."""
+    global _notification_binding_factory, _notification_binding_configured
+    if _notification_binding_configured or not callable(factory):
+        raise HookProtocolError("notification_factory_reconfiguration")
+    _notification_binding_factory = factory
+    _notification_binding_configured = True
+
+
+def _notification_binding_for_run(env, scenario_id: str):
+    """Resolve the trusted parent binding without taking authority from Actor input."""
+    factory = _notification_binding_factory
+    if factory is None:
+        return None
+    try:
+        binding = factory(env, scenario_id)
+    except HookProtocolError:
+        raise
+    except BaseException:
+        raise HookProtocolError("notification_binding_factory_failed") from None
+    if type(binding) is not BridgeNotificationBinding:
+        raise HookProtocolError("invalid_notification_binding")
+    return binding
 
 
 class BridgeModelProtocolError(ValueError):
@@ -237,8 +309,40 @@ def _hook_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return projected
 
 
-def _drain_notifications(env, messages: list[dict[str, Any]], revision: int) -> tuple[int, bool, bool]:
-    """Consume only arrived notifications; do not inspect the future queue."""
+def _append_projected_notification(messages: list[dict[str, Any]], projected: ProjectedNotification,
+                                    now: float, revision: int) -> int:
+    """Append one trusted scoped projection to the bridge memory."""
+    notification = projected.message
+    if notification.message_type not in (MessageType.USER_MESSAGE, MessageType.ENVIRONMENT_NOTIFICATION):
+        raise HookProtocolError("unknown_notification_type")
+    content: Any = notification.message
+    if notification.message_type == MessageType.ENVIRONMENT_NOTIFICATION:
+        content = f"[Official environment notification at {notification.timestamp.isoformat()}]\n{content}"
+    attachments = [attachment.to_openai_json() for attachment in notification.attachments
+                   if attachment.mime.startswith("image/")]
+    if attachments:
+        content = [{"type": "text", "text": str(content)}, *attachments]
+    messages.append(_new_message("user", content,
+                                 notificationType=notification.message_type.value,
+                                 observedAt=projected.arrived_at,
+                                 notificationId=projected.notification_id,
+                                 notificationSequence=projected.sequence))
+    revision += 1
+    _emit_runtime_event("notification_observed", messageType=notification.message_type.value,
+                        messageHash=_stable_hash(content), clockNow=now,
+                        messageTimestamp=notification.timestamp.timestamp(), revision=revision,
+                        notificationId=projected.notification_id, notificationSequence=projected.sequence)
+    return revision
+
+
+def _drain_notifications(env, messages: list[dict[str, Any]], revision: int,
+                         binding: BridgeNotificationBinding | None = None) -> tuple[int, bool, bool]:
+    """Consume only arrived notifications; do not inspect the future queue.
+
+    With no binding this is the historical official queue path.  An installed
+    trusted parent binding opts into origin-scoped publication and projection;
+    Actor input never selects either path.
+    """
     now = env.time_manager.time()
     if not math.isfinite(now):
         raise HookProtocolError("invalid_official_clock")
@@ -248,6 +352,21 @@ def _drain_notifications(env, messages: list[dict[str, Any]], revision: int) -> 
     changed = False
     stopped = False
     for notification in pending:
+        if binding is not None:
+            if notification.message_type == MessageType.ENVIRONMENT_STOP:
+                # Publish STOP only after already-arrived normal records have
+                # been drained.  STOP revokes the origin and is never projected.
+                binding.publish(notification, now)
+                stopped = True
+                break
+            if notification.message_type not in (MessageType.USER_MESSAGE, MessageType.ENVIRONMENT_NOTIFICATION):
+                raise HookProtocolError("unknown_notification_type")
+            binding.publish(notification, now)
+            projected = binding.registry.drain(origin_id=binding.origin_id, are_now=now)
+            for item in projected:
+                revision = _append_projected_notification(messages, item, now, revision)
+                changed = True
+            continue
         if notification.message_type == MessageType.ENVIRONMENT_STOP:
             stopped = True
             continue
@@ -360,6 +479,7 @@ def _native_run_with_agent(
     turn_limit = scenario.nb_turns if scenario.nb_turns is not None else max_turns
     if turn_limit is not None and (isinstance(turn_limit, bool) or not isinstance(turn_limit, int) or turn_limit < 1):
         raise HookProtocolError("invalid_turn_limit")
+    notification_binding = _notification_binding_for_run(env, scenario_id)
 
     all_tools = scenario.get_tools()
     # Match the official agent: notifications deliver user messages; AUI never
@@ -413,7 +533,8 @@ def _native_run_with_agent(
 
     try:
         while True:
-            revision, changed, stopped = _drain_notifications(env, messages, revision)
+            revision, changed, stopped = _drain_notifications(env, messages, revision,
+                                                              binding=notification_binding)
             if stopped:
                 termination_reason = "environment_stop"
                 break
@@ -432,7 +553,8 @@ def _native_run_with_agent(
             before = _invoke_hook(client, "before_model", env, messages, revision, iteration)
             if before["decision"]["action"] != "allow":
                 raise HookProtocolError("before_model_rejected")
-            revision, hook_changed, stopped = _drain_notifications(env, messages, revision)
+            revision, hook_changed, stopped = _drain_notifications(env, messages, revision,
+                                                                    binding=notification_binding)
             if stopped:
                 termination_reason = "environment_stop"
                 break
@@ -461,7 +583,8 @@ def _native_run_with_agent(
             finally:
                 if was_running and env.state == EnvironmentState.PAUSED:
                     env.resume_with_offset(1.0 if simulated_generation_time_mode == "fixed" else 0.0)
-            revision, generation_changed, stopped = _drain_notifications(env, messages, revision)
+            revision, generation_changed, stopped = _drain_notifications(env, messages, revision,
+                                                                         binding=notification_binding)
             if stopped:
                 termination_reason = "environment_stop"
                 break
@@ -541,7 +664,8 @@ def _native_run_with_agent(
                     action["mutationKey"] = _stable_hash({"tool": tool.name, "arguments": arguments,
                                                           "conversationTurn": usage["completedTurns"]})
                 before_tool = _invoke_hook(client, "before_tool", env, messages, revision, iteration, action=action)
-                revision, gate_changed, stopped = _drain_notifications(env, messages, revision)
+                revision, gate_changed, stopped = _drain_notifications(env, messages, revision,
+                                                                       binding=notification_binding)
                 multiple_calls = len(calls) != 1
                 invalid = argument_error or multiple_calls or action["effect"] == "unknown" or not preflight["valid"]
                 stale = generation_changed or gate_changed or stopped

@@ -1,0 +1,62 @@
+{
+  "schemaVersion": "gaia2-phase5-2c3b-bridge-notification-wiring-verification-v1",
+  "status": "passed_with_child_reader_boundary",
+  "stage": "5.2c3b",
+  "route": "A",
+  "scope": "opt_in_trusted_parent_queue_drain_and_scoped_notification_projection",
+  "targetedTests": {
+    "bridgeNotificationWiring": 6,
+    "notificationProducer": 9,
+    "deadlineAndNotificationProjectionRegression": 9,
+    "phase3LiveBridgeRegression": 39,
+    "allPhase5Tests": 229
+  },
+  "commands": {
+    "bridge": "configured-python -m unittest discover -s test -p phase5_bridge_notification_test.py -v",
+    "producer": "configured-python -m unittest discover -s test -p phase5_notification_producer_test.py -v",
+    "primitive": "PYTHONPATH=.official-python;scripts configured-python -m unittest discover -s test -p phase5_deadline_notifications_test.py -v",
+    "phase3": "PYTHONPATH=.official-python;scripts configured-python -m unittest discover -s test -p phase3_live_bridge_test.py",
+    "allPhase5": "PYTHONPATH=.official-python;scripts configured-python -m unittest discover -s test -p phase5_*.py -q"
+  },
+  "sourceRefs": [
+    {
+      "path": "scripts/capybara_official_bridge.py",
+      "sha256": "dc9f5e68c90a81211b456b59a417c22f3c7944264d2dfecf111285d316315d99"
+    },
+    {
+      "path": "test/phase5_bridge_notification_test.py",
+      "sha256": "f618a8c3f35677d8b66274e791a6f406937bda42e6f0610bb185dd1fc56e70c4"
+    },
+    {
+      "path": "scripts/gaia2_notification_producer.py",
+      "sha256": "b3ab2110191d24c52102024afe9a3da0e7cd48216c51126b78cd264b0b20bd6e"
+    },
+    {
+      "path": "scripts/gaia2_deadline_notifications.py",
+      "sha256": "703791e7c967a0ff18a5afedfcd593c9b36768745f2904f3e7f4eab1db1b6564"
+    }
+  ],
+  "networkCalls": 0,
+  "realProviderCalls": 0,
+  "officialScenarioExecuted": false,
+  "officialAreModified": false,
+  "defaultRunnerBehaviorChanged": false,
+  "contracts": {
+    "defaultQueueDrainPathIsUnchanged": true,
+    "trustedFactoryIsOneTimeAndActorCannotSelectBinding": true,
+    "bridgeAssignsOccurrenceIdAndMonotonicSequence": true,
+    "sameTextOccurrencesRemainDistinct": true,
+    "futureOfficialMessagesRemainHidden": true,
+    "officialClockIsUsedAsArrivalAuthority": true,
+    "normalRecordsDrainBeforeStopRevocation": true,
+    "stopIsNeverProjectedToChild": true,
+    "lateMessagesAfterStopFailClosed": true,
+    "scopeProjectionIsParentOwned": true
+  },
+  "knownBoundaries": [
+    "The opt-in bridge factory is a trusted parent integration seam; no production parent currently installs it by default.",
+    "The child runner still has no notification-system queue access or scoped reader injection; this slice only creates the parent projection and bridge drain.",
+    "The bridge still does not infer app origin from Message text, timestamp, or attachments.",
+    "No official A2A/Noise Scenario, real provider call, upload, or benchmark score was produced in this controlled wiring slice."
+  ]
+}
