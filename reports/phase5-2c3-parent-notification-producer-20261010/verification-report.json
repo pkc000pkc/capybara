@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "gaia2-phase5-2c3-parent-notification-producer-verification-v1",
+  "status": "passed_with_parent_bridge_boundary",
+  "stage": "5.2c3",
+  "route": "A",
+  "scope": "trusted_parent_notification_origin_binding_and_projection_producer",
+  "targetedTests": {
+    "notificationProducer": 9,
+    "deadlineAndNotificationProjectionRegression": 18
+  },
+  "commands": {
+    "producer": "configured-python -m unittest test.phase5_notification_producer_test -q",
+    "primitiveRegression": "configured-python -m unittest test.phase5_deadline_notifications_test test.phase5_notification_producer_test -q",
+    "compile": "configured-python -m py_compile scripts/gaia2_notification_producer.py test/phase5_notification_producer_test.py"
+  },
+  "sourceRefs": [
+    {
+      "path": "scripts/gaia2_notification_producer.py",
+      "sha256": "b3ab2110191d24c52102024afe9a3da0e7cd48216c51126b78cd264b0b20bd6e"
+    },
+    {
+      "path": "test/phase5_notification_producer_test.py",
+      "sha256": "c74480677097ff69a9ff3fb7658792f30d60e70cc8d4129aca44da8fb34b08ca"
+    },
+    {
+      "path": "scripts/gaia2_deadline_notifications.py",
+      "sha256": "703791e7c967a0ff18a5afedfcd593c9b36768745f2904f3e7f4eab1db1b6564"
+    }
+  ],
+  "networkCalls": 0,
+  "realProviderCalls": 0,
+  "officialScenarioExecuted": false,
+  "officialAreModified": false,
+  "contracts": {
+    "originBindingIsImmutable": true,
+    "unknownForeignAndRevokedOriginsFailClosed": true,
+    "occurrenceIdAndSequenceAreTrustedInputs": true,
+    "sameOccurrenceExactDuplicateIsIdempotent": true,
+    "sameOccurrenceCannotMoveBetweenOrigins": true,
+    "sameMessageDifferentOccurrencesRemainDistinct": true,
+    "sequenceAndArrivalRollbackFailClosed": true,
+    "environmentStopRevokesWithoutChildProjection": true,
+    "scopeReaderIsolation": true,
+    "parentQueueIsNotReadOrConsumed": true
+  },
+  "knownBoundaries": [
+    "The producer intentionally does not read the official ARE queue. A later trusted bridge must drain arrived messages and supply occurrenceId and sequence; Message text/timestamp/attachments are not authority.",
+    "The child runner still has no notification-system queue access; parent routing and child reader wiring remain a later slice.",
+    "No official A2A/Noise Scenario, real provider call, upload, or benchmark score was produced in this controlled contract slice."
+  ]
+}
