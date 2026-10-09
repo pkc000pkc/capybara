@@ -98,6 +98,18 @@ def _fatal(code: str) -> None:
     raise ScopedAppAgentFatal(code) from None
 
 
+_FIXED_FAILURE_CODE = re.compile(r"SCOPED_AGENT_[A-Z0-9_]{1,96}\Z")
+
+
+def _preserved_failure_code(error: BaseException, fallback: str) -> str:
+    """Keep an already-classified local failure while hiding arbitrary text."""
+    if isinstance(error, ScopedAppAgentFatal):
+        candidate = getattr(error, "message", None) or str(error)
+        if type(candidate) is str and _FIXED_FAILURE_CODE.fullmatch(candidate):
+            return candidate
+    return fallback
+
+
 def _clone(value: Any) -> Any:
     try:
         return wire.decode_value(wire.encode_value(value))
@@ -1202,9 +1214,11 @@ class ScopedAppAgentRunner:
                 self.__completed = True
                 self.__final_log_start = len(self.base_agent.logs)
             return observation
-        except BaseException:
+        except BaseException as error:
             self.__failed = True
-            _fatal("SCOPED_AGENT_DISPATCH_FAILED")
+            self.__failure_code = self.__failure_code or _preserved_failure_code(
+                error, "SCOPED_AGENT_DISPATCH_FAILED")
+            _fatal(self.__failure_code)
 
     def __execute_parsed_action(self, executor, parsed_action, append_agent_log, make_timestamp, agent_id):
         """Run the unchanged ARE body; never retry a lost native observation.
@@ -1218,18 +1232,20 @@ class ScopedAppAgentRunner:
             self.__check()
             self.__official_execute_parsed(parsed_action, append_agent_log, make_timestamp, agent_id)
             self.__check()
-        except BaseException:
+        except BaseException as error:
             self.__failed = True
             if not (isinstance(self.__failure_code, str)
                     and self.__failure_code.startswith("SCOPED_AGENT_NOTIFICATION_")):
-                self.__failure_code = "SCOPED_AGENT_ACTION_FAILED"
+                self.__failure_code = self.__failure_code or _preserved_failure_code(
+                    error, "SCOPED_AGENT_ACTION_FAILED")
             _fatal(self.__failure_code)
 
     def __termination_condition(self, agent):
         if self.__completed:
             return True
         if self.__closed or self.__failed or agent.iterations >= agent.total_iterations:
-            self.__failure_code = "SCOPED_AGENT_CLOSED" if self.__closed else "SCOPED_AGENT_DISPATCH_FAILED" if self.__failed else "SCOPED_AGENT_BUDGET_EXHAUSTED"
+            if not self.__failure_code:
+                self.__failure_code = "SCOPED_AGENT_CLOSED" if self.__closed else "SCOPED_AGENT_DISPATCH_FAILED" if self.__failed else "SCOPED_AGENT_BUDGET_EXHAUSTED"
             return True
         return False
 
@@ -1266,8 +1282,8 @@ class ScopedAppAgentRunner:
             return returned
         except BaseException as exc:
             self.__failed = True
-            self.__failure_code = self.__failure_code or (str(exc) if isinstance(exc, ScopedAppAgentFatal)
-                else "SCOPED_AGENT_RUN_FAILED")
+            self.__failure_code = self.__failure_code or _preserved_failure_code(
+                exc, "SCOPED_AGENT_RUN_FAILED")
             _fatal(self.__failure_code)
 
     def snapshot(self) -> dict:

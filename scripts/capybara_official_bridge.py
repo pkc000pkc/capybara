@@ -892,6 +892,7 @@ def _native_run_with_agent(
                     # reachable from this branch.
                     _emit_runtime_event("delegation_started", turn=iteration, callId=call_id,
                                         canonicalName=action["canonicalName"])
+                    runner = None
                     try:
                         if delegation_coordinator is not None:
                             handle = delegation_coordinator.begin_child(
@@ -938,6 +939,23 @@ def _native_run_with_agent(
                         if type(child_result) is not str:
                             raise TypeError("child_result_not_string")
                     except BaseException as error:
+                        child_diagnostic = None
+                        if runner is not None:
+                            try:
+                                raw_snapshot = runner.snapshot()
+                                if isinstance(raw_snapshot, dict):
+                                    child_diagnostic = {
+                                        "failureCode": raw_snapshot.get("failureCode"),
+                                        "completed": raw_snapshot.get("completed") is True,
+                                        "failed": raw_snapshot.get("failed") is True,
+                                        "modelCalls": raw_snapshot.get("modelCalls"),
+                                        "engineCalls": raw_snapshot.get("engineCalls"),
+                                        "originalObservationsTaken": raw_snapshot.get("originalObservationsTaken"),
+                                        "actions": len(raw_snapshot.get("actions", [])) if isinstance(raw_snapshot.get("actions"), list) else None,
+                                        "completionEvidence": isinstance(raw_snapshot.get("completionEvidenceRef"), dict),
+                                    }
+                            except BaseException:
+                                child_diagnostic = {"snapshotUnavailable": True}
                         if a2a_client is not None:
                             try:
                                 a2a_client.reset_child(completed=False)
@@ -948,6 +966,15 @@ def _native_run_with_agent(
                         outcome = {"status": "failed_before_execution", "complete": True,
                                    "executed": False, "reason": "delegation_failed"}
                         usage["blockedTools"] += 1
+                        # The child did not produce a parent-visible result,
+                        # so represent the delegation as a blocked parent tool
+                        # call.  The child-side native receipts remain the
+                        # authoritative evidence for any work attempted inside
+                        # the failed child and are never replaced by this
+                        # summary event.
+                        _emit_runtime_event("tool_call_blocked", turn=iteration, callId=call_id,
+                                            function=name, canonicalName=action["canonicalName"],
+                                            reason="delegation_failed")
                         # Keep the event evaluator-blind while retaining a
                         # stable diagnostic for trusted integration tests. The
                         # A2A adapter exposes fixed error codes; other errors
@@ -956,7 +983,8 @@ def _native_run_with_agent(
                         if type(error_code) is not str or not re.fullmatch(r"[A-Z0-9_]{1,80}", error_code):
                             error_code = type(error).__name__
                         _emit_runtime_event("delegation_failed", turn=iteration, callId=call_id,
-                                            canonicalName=action["canonicalName"], errorCode=error_code)
+                                            canonicalName=action["canonicalName"], errorCode=error_code,
+                                            childDiagnostic=child_diagnostic)
                     else:
                         result = {"status": "succeeded", "childResult": child_result,
                                   "delegated": True}
@@ -965,6 +993,17 @@ def _native_run_with_agent(
                                    "result": result, "resultHash": result_hash,
                                    "delegated": True}
                         usage["toolsExecuted"] += 1
+                        # A delegated AppAgent is still a parent-visible tool
+                        # invocation.  Keep the standard lifecycle alongside
+                        # the A2A-specific receipts so the parent evidence
+                        # verifier can bind its before_tool/after_tool chain.
+                        _emit_runtime_event("tool_call_started", turn=iteration, callId=call_id,
+                                            function=name, canonicalName=action["canonicalName"],
+                                            effect=action["effect"], argumentKeys=sorted(arguments),
+                                            argumentHash=_stable_hash(arguments))
+                        _emit_runtime_event("tool_call_completed", turn=iteration, callId=call_id,
+                                            function=name, canonicalName=action["canonicalName"],
+                                            status=outcome["status"], ok=True, resultHash=result_hash)
                         _emit_runtime_event("delegation_completed", turn=iteration, callId=call_id,
                                             canonicalName=action["canonicalName"],
                                             resultHash=result_hash)

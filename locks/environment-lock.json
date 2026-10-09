@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-environment-lock-v1",
-  "generatedAt": "2026-10-09T21:20:07.461Z",
+  "generatedAt": "2026-10-09T21:41:49.190Z",
   "timeSource": "client-system-clock-new-Date-ISO-not-authoritative-dataset-time",
   "noModelExecution": true,
   "secretConfigRead": false,
@@ -1662,7 +1662,7 @@
     ]
   },
   "packageLockSha256": "6f9c567badd221e703988d7e8d1f3190d111b45f9d396dedfb12e4dcddc64788",
-  "bridgeSha256": "f2cb9ac9c4af939d8a502638029e7041cfbb0cdba63d931492d8532e5a84e633",
+  "bridgeSha256": "3792c61b4f7dc87a8d9c0b9588d1040c6f227e4e7d85dc99b3c87e2c2f1ab909",
   "codeInputs": [
     {
       "path": "config/phase0-protocol.json",
@@ -1791,8 +1791,8 @@
     },
     {
       "path": "scripts/capybara_official_bridge.py",
-      "sha256": "f2cb9ac9c4af939d8a502638029e7041cfbb0cdba63d931492d8532e5a84e633",
-      "bytes": 60113
+      "sha256": "3792c61b4f7dc87a8d9c0b9588d1040c6f227e4e7d85dc99b3c87e2c2f1ab909",
+      "bytes": 63216
     },
     {
       "path": "scripts/download_dataset.mjs",
@@ -1876,8 +1876,8 @@
     },
     {
       "path": "scripts/gaia2_scoped_app_agent.py",
-      "sha256": "9a4e4e993fa3ae40c4964eec3cab7068e949af60c1e5ba3b7ead1f17a3c5724a",
-      "bytes": 77286
+      "sha256": "fab90e5768162e97cc640ecf20ca1ceec618db9135c239e2e6b214dc8fc4d668",
+      "bytes": 77948
     },
     {
       "path": "scripts/gaia2_scoped_model_broker.py",
@@ -1991,8 +1991,8 @@
     },
     {
       "path": "scripts/phase3_hook_server.ts",
-      "sha256": "e43c0bd229a90305026adcb0ba44f6804b4a16aec28a123b99c23ff1c268002d",
-      "bytes": 13271
+      "sha256": "6cfaed64a682e2573e98bf6a86b16a12bd5b46c07ea49db496dcb5e67a9e188d",
+      "bytes": 13306
     },
     {
       "path": "scripts/phase4_correction_replay.mjs",
@@ -2610,7 +2610,7 @@
       "bytes": 1443
     }
   ],
-  "contentTreeSha256": "7cb68f541f775ec80452b74a0ba037768f9c26a60d6d80477316b0dae8fe6119",
+  "contentTreeSha256": "9c46c952aa8adf9710128b5851ba72af83cbe2f17e2a01b1c5180b69aa60710b",
   "officialCodeInputs": [
     {
       "path": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.official-python/are/__init__.py",
@@ -5470,29 +5470,29 @@
     "project": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "8c29a6627ed084247c567bada949e41634ee337d",
-      "gitHead": "8c29a6627ed084247c567bada949e41634ee337d",
+      "head": "4c4ea612363a32a59a26097899f52475bb099915",
+      "gitHead": "4c4ea612363a32a59a26097899f52475bb099915",
       "dirty": true,
-      "statusSha256": "00896a02cf8ba43193993a267433ff9c7bc7d43b58f059d95fd92d3e2de6f537",
-      "dirtyEntryCount": 26
+      "statusSha256": "f33c596e895d656ffba3f6218ce880fc42495bef29a64dd8b1b4dccf3a12dfd0",
+      "dirtyEntryCount": 21
     },
     "backend": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-backend",
-      "head": "ab12a2ccf5aec6b1f24796763c80b26661fa18c1",
-      "gitHead": "ab12a2ccf5aec6b1f24796763c80b26661fa18c1",
+      "head": "355c67f31d3956910b5ac40f63bb988e09971c93",
+      "gitHead": "355c67f31d3956910b5ac40f63bb988e09971c93",
       "dirty": true,
-      "statusSha256": "bdba2cdddca743a9bee43eb994fe14a998b74079744798402f1809772dd3bc33",
-      "dirtyEntryCount": 3
+      "statusSha256": "a225a132ffc44b4e600f5f1a3b99881903f5ac73edc3b4f086bf42acbb7ccf79",
+      "dirtyEntryCount": 2
     },
     "pluginSource": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "8c29a6627ed084247c567bada949e41634ee337d",
-      "gitHead": "8c29a6627ed084247c567bada949e41634ee337d",
+      "head": "4c4ea612363a32a59a26097899f52475bb099915",
+      "gitHead": "4c4ea612363a32a59a26097899f52475bb099915",
       "dirty": true,
-      "statusSha256": "00896a02cf8ba43193993a267433ff9c7bc7d43b58f059d95fd92d3e2de6f537",
-      "dirtyEntryCount": 26
+      "statusSha256": "f33c596e895d656ffba3f6218ce880fc42495bef29a64dd8b1b4dccf3a12dfd0",
+      "dirtyEntryCount": 21
     }
   },
   "hashingPolicy": {
