@@ -1,13 +1,13 @@
 {
   "schemaVersion": "gaia2-capability-inventory-v1",
-  "generatedAt": "2026-10-09T21:52:18.308Z",
+  "generatedAt": "2026-10-09T22:26:36.685Z",
   "noModelExecution": true,
   "plugins": [
     {
       "id": "gaia2-runtime",
       "sourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/plugins/gaia2-runtime",
-      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/0000c64265f8d0b601fe1db2ea735c093562b28f0c6a7df8edfff4575e8df71f",
-      "treeSha256": "0000c64265f8d0b601fe1db2ea735c093562b28f0c6a7df8edfff4575e8df71f",
+      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/9ec366fbc0317579ebfd26d33d83f4395c13ac853a6780670e5405e857243ef0",
+      "treeSha256": "9ec366fbc0317579ebfd26d33d83f4395c13ac853a6780670e5405e857243ef0",
       "files": [
         {
           "relativePath": "capybara.plugin.json",
@@ -36,8 +36,8 @@
         },
         {
           "relativePath": "hooks/gaia2-conflict-gate.ts",
-          "sha256": "02f2021b9ae894eaf3f4f44f7a7e35c95460af40b304d97cc8c451b8e28f10d2",
-          "bytes": 1400
+          "sha256": "371214c5ef7289c90e4e08bb7509045e6e4afe3711e91c25790621c463fd9a5f",
+          "bytes": 2319
         },
         {
           "relativePath": "hooks/gaia2-event-sync.ts",
@@ -139,7 +139,7 @@
           "name": "gaia2-conflict-gate",
           "checkpoint": "before_tool",
           "path": "hooks/gaia2-conflict-gate.ts",
-          "sha256": "02f2021b9ae894eaf3f4f44f7a7e35c95460af40b304d97cc8c451b8e28f10d2",
+          "sha256": "371214c5ef7289c90e4e08bb7509045e6e4afe3711e91c25790621c463fd9a5f",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {

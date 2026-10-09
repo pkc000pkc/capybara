@@ -23,7 +23,7 @@ test('live Python bridge consumes real ARE dynamics and fails closed around sync
   })
   assert.ifError(result.error)
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
-  assert.match(result.stderr, /Ran 39 tests/)
+  assert.match(result.stderr, /Ran 40 tests/)
   assert.match(result.stderr, /OK/)
   const auditLine = result.stdout.split(/\r?\n/).find(line => line.startsWith('MODEL_PROTOCOL_FAILURE_AUDITS:'))
   const failures = JSON.parse(auditLine.slice('MODEL_PROTOCOL_FAILURE_AUDITS:'.length))

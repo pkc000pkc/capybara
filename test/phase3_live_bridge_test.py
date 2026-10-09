@@ -375,6 +375,34 @@ class Tests(unittest.TestCase):
         self.assertEqual(len([e for e in self.events if e['type']=='dynamic_context_injected']),3)
         self.assertTrue(all(e['contextHash']==e['injectedContextHash'] for e in self.events if e['type']=='dynamic_context_injected'))
 
+    def test_01b_actor_guidance_requires_exact_writes_messages_and_readback(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        calls=[]
+        def model(messages,*unused):
+            calls.append(copy.deepcopy(messages))
+            if len(calls)==1:
+                return response('AgentUserInterface__send_message_to_user',
+                                {'content':'Controlled guidance check'}, call_id='finish')
+            raise AssertionError('model unexpectedly continued')
+        with hook_server() as host:
+            result=self.run_bridge(scenario,env,model)
+        self.assertTrue(result.success)
+        self.assertEqual(len(calls),1)
+        system_text=calls[0][0]['content']
+        for phrase in (
+            'determine the exact required targets',
+            'Do not repeat a successful write or message',
+            'private checklist',
+            'does not substitute for a requested app-to-app message',
+            'read back the authoritative state or conversation',
+            'A pre-execution read-back block is safe to retry only after the same resource is freshly verified',
+            "Honor the user's ordering: verify outbound messages and attachments before moving or deleting their source",
+            'Reuse exact identifiers and absolute paths returned by the same app',
+            'For content predicates, inspect all relevant candidates before mutating',
+        ):
+            self.assertIn(phrase, system_text)
+        self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='after_tool']),1)
+
     def test_02_unknown_write_is_not_retried_and_requires_read_back(self):
         scenario,env,aui,system,ledger=setup_scenario()
         steps=[response('LedgerApp__write',{'value':'uncertain'},call_id='first'),
