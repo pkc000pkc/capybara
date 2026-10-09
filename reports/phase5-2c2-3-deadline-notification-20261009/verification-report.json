@@ -1,0 +1,46 @@
+{
+  "schemaVersion": "gaia2-phase5-2c2-3-deadline-notification-verification-v1",
+  "status": "passed_with_integration_boundary",
+  "stage": "5.2c2.3",
+  "route": "A",
+  "scope": "controlled_os_deadline_and_arrived_notification_projection",
+  "targetedTests": {
+    "deadlineAndNotificationProjection": 9
+  },
+  "fullProjectPythonTests": 246,
+  "targetedCommand": "configured-python -m unittest discover -s test -p phase5_deadline_notifications_test.py -v with PYTHONPATH=.official-python;scripts;test",
+  "fullRegressionCommand": "configured-python -m unittest discover -s test -p '*.py' -v with PYTHONPATH=.official-python;scripts;test",
+  "sourceRefs": [
+    {
+      "path": "scripts/gaia2_deadline_notifications.py",
+      "sha256": "703791e7c967a0ff18a5afedfcd593c9b36768745f2904f3e7f4eab1db1b6564"
+    },
+    {
+      "path": "test/phase5_deadline_notifications_test.py",
+      "sha256": "9a401676cab788a1e726339a913fd992139c8cfd9c7dbb0c258ad1a72f3fb689"
+    }
+  ],
+  "networkCalls": 0,
+  "realProviderCalls": 0,
+  "officialScenarioExecuted": false,
+  "officialAreModified": false,
+  "defaultRunnerBehaviorChanged": false,
+  "contracts": {
+    "osDeadlineUsesIndependentMonotonicClock": true,
+    "deadlineRollbackAndInvalidClockAreSticky": true,
+    "deadlineExpirationIsSticky": true,
+    "areClockIsNotUsedForOsDeadline": true,
+    "notificationProjectionScopeBound": true,
+    "futureNotificationsRemainInvisible": true,
+    "notificationSequenceAndArrivalOrderChecked": true,
+    "exactDuplicateIsIdempotent": true,
+    "payloadIsDeepCopied": true,
+    "projectionDoesNotConsumeOfficialQueue": true,
+    "drainIsExactlyOnce": true
+  },
+  "knownBoundaries": [
+    "The projection is a parent-owned primitive; the trusted parent still must authenticate message origin and bind producer scope before calling ingest because the official Message type has no origin field.",
+    "The deadline is not yet inserted into every model gate, SDK attempt, cooldown and finish boundary; the next runner slice must check it at those points and pass remaining seconds to provider timeout configuration.",
+    "No official A2A/Noise Scenario, real provider, upload or benchmark score was produced in this controlled slice."
+  ]
+}
