@@ -1,13 +1,13 @@
 {
   "schemaVersion": "gaia2-capability-inventory-v1",
-  "generatedAt": "2026-10-09T22:32:02.774Z",
+  "generatedAt": "2026-10-09T23:12:31.261Z",
   "noModelExecution": true,
   "plugins": [
     {
       "id": "gaia2-runtime",
       "sourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/plugins/gaia2-runtime",
-      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/9ec366fbc0317579ebfd26d33d83f4395c13ac853a6780670e5405e857243ef0",
-      "treeSha256": "9ec366fbc0317579ebfd26d33d83f4395c13ac853a6780670e5405e857243ef0",
+      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/974ed8ecc625972643f1bf351c5efccddf3994283a56a587299ec73e91a43207",
+      "treeSha256": "974ed8ecc625972643f1bf351c5efccddf3994283a56a587299ec73e91a43207",
       "files": [
         {
           "relativePath": "capybara.plugin.json",
@@ -56,8 +56,8 @@
         },
         {
           "relativePath": "hooks/gaia2-write-guard.ts",
-          "sha256": "7adb56e7f38848932c14f749f2094ca385641b2c124de75ffc87765c98f57a11",
-          "bytes": 2596
+          "sha256": "f7823a2e99e2a3fdec5ee3612dc9935ac6f86eb74b7f34762a50a7654c377abc",
+          "bytes": 2925
         },
         {
           "relativePath": "hooks/gaia2-write-outcome.ts",
@@ -167,7 +167,7 @@
           "name": "gaia2-write-guard",
           "checkpoint": "before_tool",
           "path": "hooks/gaia2-write-guard.ts",
-          "sha256": "7adb56e7f38848932c14f749f2094ca385641b2c124de75ffc87765c98f57a11",
+          "sha256": "f7823a2e99e2a3fdec5ee3612dc9935ac6f86eb74b7f34762a50a7654c377abc",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
