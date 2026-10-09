@@ -7,8 +7,8 @@ dispatcher is trusted constructor authority, not an Actor-provided callback,
 scope, proof or endpoint. It owns the Node child handle and real Host chain.
 
 This module does not call providers, consume an Environment notification queue,
-construct native events or re-execute a tool. Production model brokering and
-cross-clock synchronization are deliberately outside this controlled slice.
+construct native events or re-execute a tool. A broker is admitted only through
+the trusted child model gate. This does not synchronize Node and ARE clocks.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import gaia2_a2a_wire as wire
 from gaia2_private_native_binding import NativeAppBinding
 from are.simulation.agents.agent_builder import AppAgentBuilder
 from are.simulation.agents.agent_config_builder import AppAgentConfigBuilder
-from are.simulation.agents.agent_log import ErrorLog, FinalAnswerLog, ObservationLog
+from are.simulation.agents.agent_log import ErrorLog, FinalAnswerLog, ObservationLog, LLMInputLog
 from are.simulation.agents.default_agent.agent_factory import are_simulation_react_json_app_agent
 from are.simulation.agents.default_agent.app_agent import AppAgent
 from are.simulation.agents.default_agent.base_agent import BaseAgent, RunningState, TerminationStep
@@ -47,8 +47,19 @@ _SCOPE_KEYS = frozenset(("parentExecutionId", "parentSessionId", "environmentGen
     "parentActionId", "requestId", "childExecutionId", "childSessionId", "task", "deadline", "maxNativeActions"))
 _ACK_KEYS = frozenset(("schemaVersion", "scopeHash", "dispatchId", "toolId", "toolKind",
     "status", "childCompleted", "completionEvidenceRef"))
+_MODEL_SCOPE_KEYS = frozenset(("schemaVersion", "delegationScopeHash", "modelRole", "configHash",
+    "maxLogicalRequests", "maxSdkAttempts"))
+_GATE_KEYS = frozenset(("schemaVersion", "permitId", "requestId", "scopeHash", "modelScopeHash",
+    "originalMessagesHash", "actualInputHash", "context", "contextHash", "variablesHash", "revision", "beforeEvidenceRef"))
+_SDK_KEYS = frozenset(("schemaVersion", "permitId", "requestId", "scopeHash", "modelScopeHash", "attempt",
+    "actualInputHash", "logicalRequestsUsed", "sdkAttemptsUsed"))
+_FINISH_KEYS = frozenset(("schemaVersion", "permitId", "requestId", "scopeHash", "modelScopeHash",
+    "actualInputHash", "outputHash", "status", "usage"))
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
+_ID32 = re.compile(r"[0-9a-f]{32}\Z")
 _MAX_BYTES = 4 * 1024 * 1024
+_MAX_SAFE = 2**53 - 1
+_CONTEXT_PREFIX = "Live Capybara dynamic context:\n"
 
 
 class ScopedAppAgentFatal(FatalError):
@@ -72,6 +83,43 @@ def _exact(value: Any, keys: frozenset | set) -> None:
     if type(value) is not dict or set(value) != keys:
         _fatal("SCOPED_AGENT_CONTRACT_INVALID")
     _clone(value)
+
+
+def _safe_uint(value: Any, minimum: int = 0) -> bool:
+    return type(value) is int and minimum <= value <= _MAX_SAFE
+
+
+def _usage(value: Any) -> dict | None:
+    if value is None:
+        return None
+    if (type(value) is not dict or not value or set(value) - {"inputTokens", "outputTokens", "totalTokens"}
+            or any(not _safe_uint(number) for number in value.values())):
+        _fatal("SCOPED_AGENT_MODEL_USAGE_INVALID")
+    return _clone(value)
+
+
+def _read_evidence(ref: Any) -> dict:
+    _exact(ref, {"path", "sha256"})
+    if type(ref["path"]) is not str or type(ref["sha256"]) is not str or not _HASH.fullmatch(ref["sha256"]):
+        _fatal("SCOPED_AGENT_MODEL_EVIDENCE_INVALID")
+    try:
+        raw = _regular(Path(ref["path"])).read_bytes()
+        if len(raw) > _MAX_BYTES or hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+            _fatal("SCOPED_AGENT_MODEL_EVIDENCE_INVALID")
+        def pairs(items):
+            result = {}
+            for key, value in items:
+                if key in result:
+                    _fatal("SCOPED_AGENT_MODEL_EVIDENCE_INVALID")
+                result[key] = value
+            return result
+        receipt = json.loads(raw.decode("utf-8", errors="strict"), object_pairs_hook=pairs,
+            parse_constant=lambda _: _fatal("SCOPED_AGENT_MODEL_EVIDENCE_INVALID"))
+        if type(receipt) is not dict:
+            _fatal("SCOPED_AGENT_MODEL_EVIDENCE_INVALID")
+        return _clone(receipt)
+    except BaseException:
+        _fatal("SCOPED_AGENT_MODEL_EVIDENCE_INVALID")
 
 
 def _callable_identity(value: Any) -> tuple:
@@ -167,11 +215,15 @@ class ScopedAppAgentRunner:
     """Trusted instance lifetime. run() has no Actor kwargs or reset facility."""
 
     def __init__(self, *, app: App, owner: NativeAppBinding, env: Environment,
-                 scope: dict, llm_engine: LLMEngine, dispatch: Callable[[dict], dict]):
+                 scope: dict, llm_engine: LLMEngine, dispatch: Callable[[dict], dict],
+                 model_binding: dict | None = None, model_gate: Callable | None = None,
+                 model_attempt: Callable | None = None, model_finish: Callable | None = None,
+                 max_logical_requests: int | None = None, log_callback: Callable | None = None):
         if (not isinstance(app, App) or not isinstance(owner, NativeAppBinding)
                 or not isinstance(env, Environment) or not isinstance(llm_engine, LLMEngine)
                 or not callable(dispatch) or env.apps.get(app.name) is not app
-                or app.time_manager is not env.time_manager):
+                or app.time_manager is not env.time_manager
+                or (log_callback is not None and not callable(log_callback))):
             _fatal("SCOPED_AGENT_INITIALIZATION_INVALID")
         _exact(scope, _SCOPE_KEYS)
         manifest = owner.manifest()
@@ -192,6 +244,48 @@ class ScopedAppAgentRunner:
         self.__manifest_hash = wire.value_hash(manifest)
         self.__scope = _clone(scope)
         self.__scope_hash = wire.value_hash(scope)
+        supplied = (model_binding, model_gate, model_attempt, model_finish)
+        self.__gated = any(item is not None for item in supplied)
+        if self.__gated:
+            if model_binding is None or not all(callable(item) for item in supplied[1:]):
+                _fatal("SCOPED_AGENT_MODEL_GATE_REQUIRED")
+            _exact(model_binding, _MODEL_SCOPE_KEYS)
+            if (model_binding["schemaVersion"] != "capybara-scoped-model-scope-v1"
+                    or model_binding["delegationScopeHash"] != self.__scope_hash
+                    or model_binding["modelRole"] != "child_actor"
+                    or type(model_binding["configHash"]) is not str or not _HASH.fullmatch(model_binding["configHash"])
+                    or any(not _safe_uint(model_binding[key], 1) or model_binding[key] > 100000
+                        for key in ("maxLogicalRequests", "maxSdkAttempts"))
+                    or (max_logical_requests is not None and max_logical_requests != model_binding["maxLogicalRequests"])
+                    or any(not callable(getattr(llm_engine, method, None)) for method in ("begin_request", "get_last_usage", "snapshot"))):
+                _fatal("SCOPED_AGENT_MODEL_BINDING_INVALID")
+            self.__model_binding = _clone(model_binding)
+            self.__model_scope_hash = wire.value_hash(model_binding)
+            self.__logical_budget = model_binding["maxLogicalRequests"]
+        else:
+            # Only the explicit finite offline engine is permitted without a
+            # model gate; a real/custom engine can never silently fall through.
+            if type(llm_engine) is not ControlledAppAgentEngine:
+                _fatal("SCOPED_AGENT_MODEL_GATE_REQUIRED")
+            self.__model_binding = self.__model_scope_hash = None
+            # Preserve the old controlled fixture limit only for compatibility.
+            self.__logical_budget = scope["maxNativeActions"] if max_logical_requests is None else max_logical_requests
+            if not _safe_uint(self.__logical_budget, 1) or self.__logical_budget > 100000:
+                _fatal("SCOPED_AGENT_MODEL_BINDING_INVALID")
+        self.__model_gate, self.__model_attempt, self.__model_finish = model_gate, model_attempt, model_finish
+        self.__sdk_guard_callback = self.__sdk_guard  # Stable bound callable for broker identity freezing.
+        self.__active_model = None
+        self.__sdk_attempts = 0
+        self.__engine_calls = 0
+        self.__gate_revision = 0
+        self.__gate_sequence = 0
+        self.__gate_permits: set[str] = set()
+        self.__gate_evidence: set[str] = set()
+        self.__projected_history: list[dict] = []
+        self.__original_input_hashes: list[str] = []
+        self.__model_receipts: list[dict] = []
+        self.__model = llm_engine
+        self.__engine_identity_hash = None
         self.__dispatch = dispatch
         self.__started = False
         self.__closed = False
@@ -211,7 +305,7 @@ class ScopedAppAgentRunner:
         self.__tools = {tool["publicName"]: tool for tool in manifest["tools"]}
         config = AppAgentConfigBuilder().build("default_app_agent")
         config.use_custom_logger = False
-        config.max_iterations = scope["maxNativeActions"]
+        config.max_iterations = self.__logical_budget
         # The official builder and factory are used unchanged. No provider engine
         # is constructed; its injected builder returns the trusted engine only.
         self.app_agent = AppAgentBuilder(_InjectedEngineBuilder(llm_engine)).build(config, app, env)
@@ -224,7 +318,7 @@ class ScopedAppAgentRunner:
         self.base_agent.parent = None  # Parent relation is scope-bound, not guessed.
         self.base_agent.pause_env = env.pause
         self.base_agent.resume_env = env.resume_with_offset
-        self.base_agent.total_iterations = scope["maxNativeActions"]
+        self.base_agent.total_iterations = self.__logical_budget
         # ARE increments format_try_count before comparing it to this value.
         # A zero limit rejects even the first valid response. One with retries
         # disabled means exactly one request per official step.
@@ -244,10 +338,16 @@ class ScopedAppAgentRunner:
             function=self.__termination_result, name="scoped_verified_final_answer")
         self.__model = llm_engine
         self.base_agent.llm_engine = self.__model_call
+        self.__official_log_callback = self.base_agent.log_callback if log_callback is None else log_callback
+        self.base_agent.log_callback = self.__log_callback
         self.__collect_sources(dispatch, type(llm_engine), AppAgentBuilder, AppAgentConfigBuilder,
             BaseAgent, JsonActionExecutor, TerminationStep, LLMEngine, _InjectedEngineBuilder,
             ControlledAppAgentEngine, type(self), AppAgent, are_simulation_react_json_app_agent,
-            self.executor._append_final_answer, type(self.executor).extract_action)
+            self.executor._append_final_answer, type(self.executor).extract_action, self.__official_log_callback)
+        if self.__gated:
+            self.__collect_sources(model_gate, model_attempt, model_finish, llm_engine.begin_request,
+                llm_engine.get_last_usage, llm_engine.snapshot)
+            self.__engine_binding()
         self.__instance_snapshot = self.__snapshot_instances()
 
     def __collect_sources(self, *objects: Any) -> None:
@@ -288,6 +388,7 @@ class ScopedAppAgentRunner:
             tuple(_callable_identity(getattr(executor, name)) for name in (
                 "parse_action", "execute_parsed_action", "extract_action", "_append_final_answer", "update_tools")),
             _callable_identity(self.app_agent.expert_agent), _callable_identity(base.log_callback),
+            _callable_identity(self.__official_log_callback),
             _callable_identity(self.__official_execute_parsed),
             _callable_identity(self.__dispatch), _callable_identity(getattr(self.__dispatch, "__call__", None)),
             id(self.__owner), _callable_identity(self.__owner.manifest),
@@ -297,7 +398,45 @@ class ScopedAppAgentRunner:
             tuple((id(step), _callable_identity(step.condition), _callable_identity(step.function))
                 for step in base.conditional_pre_steps),
             tuple((id(step), _callable_identity(step.condition), _callable_identity(step.function))
-                for step in base.conditional_post_steps))
+                for step in base.conditional_post_steps), self.__logical_budget,
+            wire.value_hash(self.__model_binding),
+            tuple((_callable_identity(callback), _callable_identity(getattr(callback, "__call__", None)))
+                for callback in (self.__model_gate, self.__model_attempt, self.__model_finish, self.__sdk_guard_callback)),
+            tuple(_callable_identity(getattr(self.__model, name, None)) for name in (
+                "begin_request", "get_last_usage", "snapshot")) if self.__gated else ())
+
+    def __engine_binding(self) -> None:
+        if not self.__gated:
+            return
+        binding = self.__model_binding
+        if (self.__model.model_role != "child_actor" or self.__model.model_scope_hash != self.__model_scope_hash
+                or self.__model.config_hash != binding["configHash"]
+                or self.__model.max_logical_requests != binding["maxLogicalRequests"]
+                or self.__model.max_sdk_attempts != binding["maxSdkAttempts"]):
+            _fatal("SCOPED_AGENT_MODEL_BINDING_CHANGED")
+
+        snapshot = self.__model.snapshot()
+        if (type(snapshot) is not dict or snapshot.get("schemaVersion") != "gaia2-scoped-model-engine-v1"
+                or snapshot.get("modelRole") != "child_actor" or snapshot.get("modelScopeHash") != self.__model_scope_hash
+                or snapshot.get("configHash") != binding["configHash"]
+                or snapshot.get("maxLogicalRequests") != binding["maxLogicalRequests"]
+                or snapshot.get("maxSdkAttempts") != binding["maxSdkAttempts"]
+                or type(snapshot.get("sourceIdentityHash")) is not str or not _HASH.fullmatch(snapshot["sourceIdentityHash"])):
+            _fatal("SCOPED_AGENT_MODEL_BINDING_CHANGED")
+        if self.__engine_identity_hash is None:
+            self.__engine_identity_hash = snapshot["sourceIdentityHash"]
+        elif self.__engine_identity_hash != snapshot["sourceIdentityHash"]:
+            _fatal("SCOPED_AGENT_MODEL_BINDING_CHANGED")
+
+    def __log_callback(self, log):
+        # The official append_agent_log method remains intact. Only its trusted
+        # callback exception boundary is guarded, including pre-action logs.
+        try:
+            return self.__official_log_callback(log)
+        except BaseException:
+            self.__failed = True
+            self.__failure_code = "SCOPED_AGENT_LOG_FAILED"
+            _fatal(self.__failure_code)
 
     def __check(self) -> None:
         if self.__closed:
@@ -307,6 +446,7 @@ class ScopedAppAgentRunner:
                 _fatal("SCOPED_AGENT_SOURCE_CHANGED")
             if wire.value_hash(self.__owner.manifest()) != self.__manifest_hash:
                 _fatal("SCOPED_AGENT_SOURCE_CHANGED")
+            self.__engine_binding()
             for ref in self.__sources.values():
                 data = _regular(Path(ref["path"])).read_bytes()
                 if len(data) != ref["bytes"] or hashlib.sha256(data).hexdigest() != ref["sha256"]:
@@ -316,22 +456,160 @@ class ScopedAppAgentRunner:
         except BaseException:
             _fatal("SCOPED_AGENT_SOURCE_CHANGED")
 
-    def __model_call(self, messages, stop_sequences=(), **kwargs):
+    def __projection(self, messages: list[dict], request_id: str) -> tuple[list[dict], list[dict]]:
+        hashes = [wire.value_hash(message) for message in messages]
+        ledger = self.__projected_history
+        matched = min(len(ledger), len(hashes))
+        while matched and [entry["hash"] for entry in ledger[-matched:]] != hashes[:matched]:
+            matched -= 1
+        if not matched and any(value in {entry["hash"] for entry in ledger} for value in hashes):
+            _fatal("SCOPED_AGENT_MODEL_HISTORY_REPLAY")
+        ids = [entry["id"] for entry in ledger[-matched:]] if matched else []
+        appended = []
+        for value in hashes[matched:]:
+            identifier = self.__scope["childExecutionId"] + ".model-message-" + str(len(ledger) + len(appended) + 1)
+            ids.append(identifier)
+            appended.append({"hash": value, "id": identifier})
+        projected = [{"role": {"tool-call": "assistant", "tool-response": "tool"}.get(message["role"], message["role"]),
+            "content": message["content"], "id": identifier, "requestId": request_id}
+            for message, identifier in zip(messages, ids)]
+        return projected, ledger + appended
+
+    def __admit_model(self, safe: list[dict]) -> list[dict]:
+        now = self.__env.time_manager.time()
+        if type(now) not in (int, float) or not math.isfinite(now) or now < 0:
+            _fatal("SCOPED_AGENT_MODEL_CLOCK_INVALID")
+        request = {"requestId": uuid.uuid4().hex, "iteration": self.base_agent.iterations,
+            "messages": safe, "clock": {"now": now, "revision": self.__gate_revision}}
+        ack = self.__model_gate(_clone(request))
+        _exact(ack, _GATE_KEYS)
+        if (ack["schemaVersion"] != "capybara-scoped-model-gate-v1"
+                or type(ack["permitId"]) is not str or not _ID32.fullmatch(ack["permitId"])
+                or ack["permitId"] in self.__gate_permits or ack["requestId"] != request["requestId"]
+                or ack["scopeHash"] != self.__scope_hash or ack["modelScopeHash"] != self.__model_scope_hash
+                or ack["originalMessagesHash"] != wire.value_hash(safe)
+                or type(ack["context"]) is not str or ack["contextHash"] != hashlib.sha256(ack["context"].encode("utf-8")).hexdigest()
+                or type(ack["variablesHash"]) is not str or not _HASH.fullmatch(ack["variablesHash"])
+                or not _safe_uint(ack["revision"]) or ack["revision"] < self.__gate_revision):
+            _fatal("SCOPED_AGENT_MODEL_GATE_ACK_INVALID")
+        actual = _clone(safe)
+        actual.insert(1, {"role": "system", "content": _CONTEXT_PREFIX + ack["context"], "attachments": None})
+        if ack["actualInputHash"] != wire.value_hash(actual):
+            _fatal("SCOPED_AGENT_MODEL_GATE_INPUT_INVALID")
+        receipt = _read_evidence(ack["beforeEvidenceRef"])
+        _exact(receipt.get("trustedModelAdmission"), {"delegationScopeHash", "modelScope", "modelScopeHash", "originalMessagesHash"})
+        admission = {"delegationScopeHash": self.__scope_hash, "modelScope": self.__model_binding,
+            "modelScopeHash": self.__model_scope_hash, "originalMessagesHash": wire.value_hash(safe)}
+        projected, ledger = self.__projection(safe, request["requestId"])
+        invocation = {"checkpoint": "before_model", "loop": {"runId": self.__scope["childExecutionId"],
+            "iteration": request["iteration"], "terminal": False}, "messages": projected, "clock": request["clock"]}
+        ref = ack["beforeEvidenceRef"]
+        if (receipt.get("schemaVersion") != "capybara-runtime-plugin-invocation-v1"
+                or receipt.get("executionId") != self.__scope["childExecutionId"]
+                or receipt.get("sessionId") != self.__scope["childSessionId"]
+                or not _safe_uint(receipt.get("sequence"), 1) or receipt["sequence"] <= self.__gate_sequence
+                or ref["path"] in self.__gate_evidence
+                or wire.value_hash(receipt.get("trustedModelAdmission")) != wire.value_hash(admission)
+                or wire.value_hash(receipt.get("input")) != wire.value_hash(invocation)
+                or type(receipt.get("decision")) is not dict or receipt["decision"].get("action") != "allow"
+                or any(receipt.get(key) != ack[key] for key in ("context", "contextHash", "variablesHash", "revision"))
+                or type(receipt.get("hookReceipts")) is not list
+                or any(type(item) is not dict or item.get("status") != "passed" for item in receipt["hookReceipts"])):
+            _fatal("SCOPED_AGENT_MODEL_GATE_EVIDENCE_INVALID")
+        self.__projected_history = ledger
+        self.__gate_revision = ack["revision"]
+        self.__gate_sequence = receipt["sequence"]
+        self.__gate_permits.add(ack["permitId"])
+        self.__gate_evidence.add(ref["path"])
+        record = {key: _clone(ack[key]) for key in _GATE_KEYS - {"schemaVersion", "context"}}
+        record["iteration"] = request["iteration"]
+        record["sdkAttempts"] = []
+        record["completed"] = False
+        self.__model_receipts.append(record)
+        self.__active_model = {"permitId": ack["permitId"], "requestId": request["requestId"],
+            "actualInputHash": ack["actualInputHash"], "attempt": 0, "record": record}
         self.__check()
-        if self.__failed or self.__completed:
-            _fatal("SCOPED_AGENT_TERMINAL")
-        safe = _safe_model_messages(messages)
-        self.__wrapped_task_hash = hashlib.sha256(self.base_agent.task.encode("utf-8")).hexdigest()
-        self.__actor_input_hashes.append(wire.value_hash(safe))
-        self.__model_calls += 1
-        if self.__model_calls > self.__scope["maxNativeActions"]:
-            _fatal("SCOPED_AGENT_BUDGET_EXHAUSTED")
+        return actual
+
+    def __sdk_guard(self, payload: dict) -> dict:
         try:
-            result = self.__model(messages, stop_sequences=stop_sequences, **kwargs)
+            self.__check()
+            if self.__failed or self.__completed or self.__active_model is None:
+                _fatal("SCOPED_AGENT_MODEL_REQUEST_INACTIVE")
+            _exact(payload, {"permitId", "requestId", "attempt", "actualInputHash"})
+            active = self.__active_model
+            if (any(payload[key] != active[key] for key in ("permitId", "requestId", "actualInputHash"))
+                    or not _safe_uint(payload["attempt"], 1) or payload["attempt"] != active["attempt"] + 1
+                    or self.__sdk_attempts >= self.__model_binding["maxSdkAttempts"]):
+                _fatal("SCOPED_AGENT_MODEL_SDK_ATTEMPT_INVALID")
+            ack = self.__model_attempt(_clone(payload))
+            _exact(ack, _SDK_KEYS)
+            if (ack["schemaVersion"] != "capybara-scoped-model-sdk-attempt-v1"
+                    or any(ack[key] != payload[key] for key in payload)
+                    or ack["scopeHash"] != self.__scope_hash or ack["modelScopeHash"] != self.__model_scope_hash
+                    or not _safe_uint(ack["logicalRequestsUsed"], 1) or ack["logicalRequestsUsed"] != self.__model_calls
+                    or not _safe_uint(ack["sdkAttemptsUsed"], 1) or ack["sdkAttemptsUsed"] != self.__sdk_attempts + 1):
+                _fatal("SCOPED_AGENT_MODEL_SDK_ACK_INVALID")
+            self.__check()
+            active["attempt"] += 1
+            self.__sdk_attempts += 1
+            active["record"]["sdkAttempts"].append(_clone(ack))
+            return _clone(ack)
         except BaseException:
-            _fatal("SCOPED_AGENT_MODEL_FAILED")
-        self.__check()
-        return result
+            self.__failed = True
+            self.__failure_code = "SCOPED_AGENT_MODEL_SDK_FAILED"
+            _fatal(self.__failure_code)
+
+    def __model_call(self, messages, stop_sequences=(), **kwargs):
+        try:
+            self.__check()
+            if self.__failed or self.__completed or self.__active_model is not None:
+                _fatal("SCOPED_AGENT_TERMINAL")
+            safe = _safe_model_messages(messages)
+            if (not self.base_agent.logs or not isinstance(self.base_agent.logs[-1], LLMInputLog)
+                    or wire.value_hash(_safe_model_messages(self.base_agent.logs[-1].content)) != wire.value_hash(safe)):
+                _fatal("SCOPED_AGENT_MODEL_LOG_INPUT_INVALID")
+            self.__wrapped_task_hash = hashlib.sha256(self.base_agent.task.encode("utf-8")).hexdigest()
+            self.__original_input_hashes.append(wire.value_hash(safe))
+            self.__model_calls += 1
+            if self.__model_calls > self.__logical_budget:
+                _fatal("SCOPED_AGENT_BUDGET_EXHAUSTED")
+            actual = self.__admit_model(safe) if self.__gated else safe
+            if self.__gated:
+                active = self.__active_model
+                self.__model.begin_request(permit_id=active["permitId"], request_id=active["requestId"],
+                    actual_input_hash=active["actualInputHash"], before_attempt=self.__sdk_guard_callback)
+                self.__check()
+            self.__actor_input_hashes.append(wire.value_hash(actual))
+            self.__engine_calls += 1
+            # Keep the engine's actual tuple/metadata object in Python. Only
+            # safe hashes/usage go to the private model-completion protocol.
+            result = self.__model(actual if self.__gated else messages, stop_sequences=stop_sequences, **kwargs)
+            self.__check()
+            if self.__gated:
+                if type(result) is not tuple or len(result) != 2 or type(result[0]) is not str:
+                    _fatal("SCOPED_AGENT_MODEL_OUTPUT_INVALID")
+                output_hash = hashlib.sha256(result[0].encode("utf-8", errors="strict")).hexdigest()
+                if self.__active_model["attempt"] < 1:
+                    _fatal("SCOPED_AGENT_MODEL_SDK_MISSING")
+                usage = _usage(self.__model.get_last_usage())
+                finish = {"permitId": active["permitId"], "requestId": active["requestId"],
+                    "actualInputHash": active["actualInputHash"], "outputHash": output_hash, "usage": usage}
+                ack = self.__model_finish(_clone(finish))
+                _exact(ack, _FINISH_KEYS)
+                if (ack["schemaVersion"] != "capybara-scoped-model-completion-v1"
+                        or ack["scopeHash"] != self.__scope_hash or ack["modelScopeHash"] != self.__model_scope_hash
+                        or ack["status"] != "completed" or any(ack[key] != finish[key] for key in finish)):
+                    _fatal("SCOPED_AGENT_MODEL_FINISH_INVALID")
+                self.__check()
+                active["record"].update({"completed": True, "outputHash": output_hash, "usage": usage})
+            return result
+        except BaseException:
+            self.__failed = True
+            self.__failure_code = self.__failure_code or "SCOPED_AGENT_MODEL_FAILED"
+            _fatal(self.__failure_code)
+        finally:
+            self.__active_model = None
 
     def __completion(self, ref: Any, dispatch_id: str) -> dict:
         _exact(ref, {"path", "sha256"})
@@ -475,6 +753,10 @@ class ScopedAppAgentRunner:
             "sourceManifestHash": self.__manifest_hash, "sourceRefs": sorted(self.__sources.values(), key=lambda ref: ref["path"].encode("utf-8")),
             "originalTaskHash": self.__scope["taskHash"], "wrappedTaskHash": self.__wrapped_task_hash,
             "actorInputHashes": self.__actor_input_hashes, "modelCalls": self.__model_calls,
+            "originalAreInputHashes": self.__original_input_hashes, "engineCalls": self.__engine_calls,
+            "modelGateEnabled": self.__gated, "modelScopeHash": self.__model_scope_hash,
+            "maxLogicalRequests": self.__logical_budget, "sdkAttemptsUsed": self.__sdk_attempts,
+            "modelRequests": self.__model_receipts,
             "originalObservationsTaken": self.__observations_taken,
             "started": self.__started, "closed": self.__closed, "completed": self.__completed and not self.__failed,
             "failed": self.__failed, "failureCode": self.__failure_code,
@@ -491,6 +773,11 @@ class ScopedAppAgentRunner:
 
 def build_scoped_app_agent(*, app: App, owner: NativeAppBinding, env: Environment,
                           scope: dict, llm_engine: LLMEngine,
-                          dispatch: Callable[[dict], dict]) -> ScopedAppAgentRunner:
+                          dispatch: Callable[[dict], dict], model_binding: dict | None = None,
+                          model_gate: Callable | None = None, model_attempt: Callable | None = None,
+                          model_finish: Callable | None = None, max_logical_requests: int | None = None,
+                          log_callback: Callable | None = None) -> ScopedAppAgentRunner:
     return ScopedAppAgentRunner(app=app, owner=owner, env=env, scope=scope,
-        llm_engine=llm_engine, dispatch=dispatch)
+        llm_engine=llm_engine, dispatch=dispatch, model_binding=model_binding, model_gate=model_gate,
+        model_attempt=model_attempt, model_finish=model_finish, max_logical_requests=max_logical_requests,
+        log_callback=log_callback)

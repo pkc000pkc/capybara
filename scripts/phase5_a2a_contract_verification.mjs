@@ -16,10 +16,11 @@ for (let index = 0; index < args.length; index += 2) {
   cli[args[index]] = args[index + 1]
 }
 const pipeScope = cli['--scope'] === 'private-pipe'
-const appAgentScope = cli['--scope'] === 'official-app-agent'
+const modelGateScope = cli['--scope'] === 'model-gate'
+const appAgentScope = cli['--scope'] === 'official-app-agent' || modelGateScope
 const nativeScope = cli['--scope'] === 'native-binding' || appAgentScope
 assert.ok(cli['--scope'] === undefined || pipeScope || nativeScope, 'invalid verification scope')
-const label = appAgentScope ? 'phase5-2a-official-app-agent' : nativeScope ? 'phase5-1b-native-binding' : pipeScope ? 'phase5-1b-pipe' : 'phase5-1a-contract'
+const label = modelGateScope ? 'phase5-2b-model-gate' : appAgentScope ? 'phase5-2a-official-app-agent' : nativeScope ? 'phase5-1b-native-binding' : pipeScope ? 'phase5-1b-pipe' : 'phase5-1a-contract'
 const output = resolve(root, cli['--output-dir'] ?? `reports/${label}-${Date.now()}`)
 assert.ok(within(join(root, 'reports'), output) && output !== join(root, 'reports'), 'output must be a new reports child')
 assert.ok(!existsSync(output), 'verification output already exists')
@@ -70,13 +71,22 @@ if (appAgentScope) {
     assert.ok(inventory.some(ref => ref.path === path), 'official AppAgent verification source missing')
   }
 }
+if (modelGateScope) {
+  for (const path of [join(backend, 'src/core/plugins/runtime-delegation-model.ts'),
+    join(backend, 'test/runtime-delegation-model.test.ts'), join(backend, 'test/runtime-delegation-model-gate.test.ts'),
+    join(root, 'scripts/gaia2_scoped_model_broker.py'), join(root, 'test/phase5_scoped_model_broker_test.py'),
+    join(root, 'src/phase5_model_usage.mjs'), join(root, 'test/phase5_model_usage.test.mjs'),
+    join(root, 'test/fixtures/phase5_model_gate_pipe_worker.py')]) {
+    assert.ok(inventory.some(ref => ref.path === path), 'model gate verification source missing')
+  }
+}
 const sourceHash = digest(inventory)
 const gitHead = directory => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: directory, windowsHide: true, encoding: 'utf8' }).trim()
 mkdirSync(output)
-writeJson(join(output, 'source-inventory.json'), { schemaVersion: appAgentScope ? 'gaia2-phase5-2a-app-agent-controlled-source-v1' : nativeScope ? 'gaia2-phase5-1b-native-controlled-source-v1' : pipeScope ? 'gaia2-phase5-1b-pipe-controlled-source-v1' : 'gaia2-phase5-1a-controlled-source-v1', sourceHash,
+writeJson(join(output, 'source-inventory.json'), { schemaVersion: modelGateScope ? 'gaia2-phase5-2b-model-gate-controlled-source-v1' : appAgentScope ? 'gaia2-phase5-2a-app-agent-controlled-source-v1' : nativeScope ? 'gaia2-phase5-1b-native-controlled-source-v1' : pipeScope ? 'gaia2-phase5-1b-pipe-controlled-source-v1' : 'gaia2-phase5-1a-controlled-source-v1', sourceHash,
   backendCommit: gitHead(backend), projectCommit: gitHead(root), files: inventory,
   historicalStage4Acceptance: ref(join(root, 'reports/phase4-v3-mechanism-acceptance-20261009-v1.json')),
-  scope: appAgentScope ? 'controlled_official_appagent_loop_single_apps_no_scenario_or_model' : nativeScope ? 'controlled_single_app_native_binding_not_official_appagent_or_scenario' : pipeScope ? 'controlled_private_pipe_only_not_official_app_binding' : 'controlled_contract_only_not_phase4_lock_replacement' }, { immutable: true })
+  scope: modelGateScope ? 'controlled_child_before_model_sdk_budget_and_terminal_audit_no_provider_or_scenario' : appAgentScope ? 'controlled_official_appagent_loop_single_apps_no_scenario_or_model' : nativeScope ? 'controlled_single_app_native_binding_not_official_appagent_or_scenario' : pipeScope ? 'controlled_private_pipe_only_not_official_app_binding' : 'controlled_contract_only_not_phase4_lock_replacement' }, { immutable: true })
 
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/(?:API_KEY|ACCESS_TOKEN|AUTHORIZATION|HF_TOKEN|HUGGINGFACE_TOKEN|PASSWORD|SECRET|GAIA2_HOOK_|BASE_URL|ENDPOINT)/i.test(key)))
 Object.assign(env, { PYTHONPATH: join(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', PYTHONDONTWRITEBYTECODE: '1',
@@ -91,6 +101,11 @@ if (appAgentScope) {
   const integrationRoot = join(output, 'app-agent-integration-evidence')
   mkdirSync(integrationRoot)
   env.GAIA2_APP_AGENT_INTEGRATION_EVIDENCE_ROOT = integrationRoot
+}
+if (modelGateScope) {
+  const integrationRoot = join(output, 'model-gate-integration-evidence')
+  mkdirSync(integrationRoot)
+  env.GAIA2_MODEL_GATE_INTEGRATION_EVIDENCE_ROOT = integrationRoot
 }
 const checks = [
   { name: 'backend-typecheck', cwd: backend, command: process.execPath, args: [join(backend, 'node_modules/typescript/bin/tsc'), '--noEmit'] },
@@ -149,10 +164,12 @@ const integrationEvidence = nativeScope ? files(join(output, 'native-integration
 if (nativeScope) assert.ok(integrationEvidence.some(item => item.path.endsWith('summary.json')), 'retained native integration evidence missing')
 const appAgentIntegrationEvidence = appAgentScope ? files(join(output, 'app-agent-integration-evidence')).map(ref) : []
 if (appAgentScope) assert.ok(appAgentIntegrationEvidence.some(item => item.path.endsWith('summary.json')), 'retained AppAgent integration evidence missing')
-const evidence = [ref(join(output, 'source-inventory.json')), ...results.flatMap(check => check.evidence), ...integrationEvidence, ...appAgentIntegrationEvidence]
+const modelGateIntegrationEvidence = modelGateScope ? files(join(output, 'model-gate-integration-evidence')).map(ref) : []
+if (modelGateScope) assert.ok(modelGateIntegrationEvidence.some(item => item.path.endsWith('summary.json')), 'retained model gate integration evidence missing')
+const evidence = [ref(join(output, 'source-inventory.json')), ...results.flatMap(check => check.evidence), ...integrationEvidence, ...appAgentIntegrationEvidence, ...modelGateIntegrationEvidence]
 for (const item of evidence) assert.equal(fileDigest(regular(item.path)), item.sha256)
 const accepted = unchanged && results.every(check => check.passed)
-const report = { schemaVersion: appAgentScope ? 'gaia2-phase5-2a-app-agent-controlled-verification-v1' : nativeScope ? 'gaia2-phase5-1b-native-controlled-verification-v1' : pipeScope ? 'gaia2-phase5-1b-pipe-controlled-verification-v1' : 'gaia2-phase5-1a-controlled-verification-v1', status: accepted ? 'passed' : 'failed',
+const report = { schemaVersion: modelGateScope ? 'gaia2-phase5-2b-model-gate-controlled-verification-v1' : appAgentScope ? 'gaia2-phase5-2a-app-agent-controlled-verification-v1' : nativeScope ? 'gaia2-phase5-1b-native-controlled-verification-v1' : pipeScope ? 'gaia2-phase5-1b-pipe-controlled-verification-v1' : 'gaia2-phase5-1a-controlled-verification-v1', status: accepted ? 'passed' : 'failed',
   sourceHash, sourceFiles: inventory.length, sourceSetClosed, sourceUnchanged: unchanged, checks: results, evidence,
   ...(nativeScope ? { privatePipeControlledAccepted: accepted, nativeAppBindingControlledAccepted: accepted,
     realHostNativePipeIntegrationPassed: accepted, tsPythonControlledAreAppBound: accepted,
@@ -163,11 +180,23 @@ const report = { schemaVersion: appAgentScope ? 'gaia2-phase5-2a-app-agent-contr
     officialAppAgentIntegrated: false, tsPythonPrivatePipeRoundTripPassed: accepted, tsPythonOfficialAppBound: false }
     : { phase51aControlledContractAccepted: accepted, tsPythonIpcConnected: false }),
   ...(appAgentScope ? { officialAppAgentControlledLoopIntegrated: accepted, officialAppAgentProductionIntegrated: false,
-    appAgentIntegrationEvidenceFiles: appAgentIntegrationEvidence.length, beforeModelHooksIntegrated: false,
-    childModelRoleBudgetIntegrated: false, parentChildNotificationRoutingIntegrated: false } : {}),
+    appAgentIntegrationEvidenceFiles: appAgentIntegrationEvidence.length, beforeModelHooksIntegrated: modelGateScope && accepted,
+    childModelRoleBudgetIntegrated: modelGateScope && accepted, parentChildNotificationRoutingIntegrated: false } : {}),
+  ...(modelGateScope ? { modelGateIntegrationEvidenceFiles: modelGateIntegrationEvidence.length,
+    scopedFakeSdkControlledAccepted: accepted, independentLogicalSdkNativeBudgetsControlledAccepted: accepted,
+    parentPostRevocationTerminalAuditControlledAccepted: accepted, realChildProviderIntegrated: false,
+    modelPermitIsHttpProof: false, historyProjectionSupportsArbitraryTrimming: false,
+    productionAfterToolClockOutcomeIntegrated: false, productionFullChildPluginIntegrated: false } : {}),
   stage5Complete: false, productionA2aEnabled: false,
   officialScenarioExecuted: false, modelCalls: 0, officialSubmissionUploaded: false,
-  limits: [...(appAgentScope ? ['Actual AppAgentBuilder/AppAgent/BaseAgent parser, logs and loop use a finite local engine through trusted TS Host native dispatch; no real model or official Scenario is run.',
+  limits: [...(modelGateScope ? ['Actual child Host before_model, production typed variables and persistent Harness are checked before a finite offline SDK callable in the original AppAgent loop; no real provider or official Scenario is run.',
+    'Node logical admission, SDK-attempt permits, Python actual SDK invocations and native actions are separately counted; permissions do not prove HTTP packets or provider billing.',
+    'Retry is inside one logical request and never replays a native action. Instance-bound role/config/callable freezes do not patch the global judge alias.',
+    'Original ARE input logs and actual context-injected model inputs are separately hashed; history occurrence projection supports unchanged history and suffix-prefix pruning, not arbitrary rewrites or mid-history trimming.',
+    'Parent terminal audit is written after Host/registry revoke+drain and observed process exit+close; it is not an after_tool receipt and grants no Hook, patch or permit.',
+    'Positive model-gate runs load byte-identical production before_model and before_tool resources with typed variables/Harness, but use controlled after_tool Hooks. The full production snapshot is separately tested as an expected rejection: trusted after-tool clock and completed/succeeded outcome projection are not integrated.',
+    'Known single-App controlled SETUP only. Real child provider, cross-clock deadlines, trusted notification routing, cross-App internal edges and official Scenario acceptance remain future gates.']
+    : appAgentScope ? ['Actual AppAgentBuilder/AppAgent/BaseAgent parser, logs and loop use a finite local engine through trusted TS Host native dispatch; no real model or official Scenario is run.',
     'Original Python adapter observations are released after actual Host dispatch acknowledgements; wire values never replace those original objects.',
     'Final termination depends on actual native return, allowed after Hook and registry.completeChild, not ToolCallLog or AppAgent string output.',
     'Known single-App native collection only; cross-App internal observer, before-model Hook integration, real child model roles/budgets, cross-clock deadlines and trusted notification routing remain future gates.']
