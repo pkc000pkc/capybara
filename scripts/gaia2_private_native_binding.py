@@ -564,6 +564,25 @@ class NativeAppBinding:
             self.__check()
             return _clone(self.__manifest)
 
+    @property
+    def bound_app(self) -> App:
+        """Trusted in-process identity for a parent coordinator.
+
+        This is not exposed through ``handlers()`` or the private pipe.  A
+        coordinator uses identity (rather than only ``appId``) to ensure the
+        child runner and the native owner target the same ARE App instance.
+        """
+        with self.__lock:
+            self.__check()
+            return self.__app
+
+    @property
+    def clock_environment(self) -> Environment | None:
+        """Trusted ARE Environment identity, never Actor/pipe input."""
+        with self.__lock:
+            self.__check()
+            return self.__clock_environment
+
     def inspect_app(self, payload: Any) -> dict:
         if payload is not None:
             _fail("NATIVE_PAYLOAD_INVALID")

@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "gaia2-phase5-2d0-parent-coordinator-verification-v1",
+  "status": "passed_with_same_process_boundary",
+  "stage": "5.2d0",
+  "route": "A",
+  "scope": "lazy_parent_a2a_child_coordinator_and_controlled_e2e",
+  "targetedTests": {
+    "parentCoordinator": 6,
+    "parentChildNativeCompletion": 1,
+    "notificationLifecycle": 9,
+    "notificationReaderProducerBridge": 26,
+    "scopedAppAgent": 64,
+    "allPhase5Regression": 262,
+    "phase3LiveBridgeRegression": 39,
+    "pythonCompile": true,
+    "gitDiffCheck": true
+  },
+  "commands": {
+    "coordinator": "configured-python -m unittest test.phase5_parent_a2a_coordinator_test -q",
+    "e2e": "configured-python -m unittest test.phase5_2d0_child_e2e_test -q",
+    "notificationRegression": "configured-python -m unittest test.phase5_notification_producer_test test.phase5_child_notification_reader_test test.phase5_notification_lifecycle_test test.phase5_bridge_notification_test -q",
+    "allPhase5": "PYTHONPATH=.official-python;scripts configured-python -m unittest discover -s test -p 'phase5_*.py' -q",
+    "phase3": "PYTHONPATH=.official-python;scripts configured-python test/phase3_live_bridge_test.py -q"
+  },
+  "sourceRefs": [
+    {"path": "scripts/gaia2_parent_a2a_coordinator.py", "sha256": "b846f04fafd9bdd9597ddbb561cf4d5c7b93ab1996a79aaf221ae4144836398b"},
+    {"path": "scripts/gaia2_notification_producer.py", "sha256": "f3031cadbe1e82070295583bb523c3e4ba25375a4fc334ef46b610bcfececc78"},
+    {"path": "scripts/gaia2_private_native_binding.py", "sha256": "8341ad37d956693958a7a78bad620b46bee935d92db83cf939619a093c45ad06"},
+    {"path": "scripts/capybara_official_bridge.py", "sha256": "43682bbf21761d736e1c0ab7f99f1b671bdb06f038e9ac0b95b4403aec537bba"},
+    {"path": "test/phase5_parent_a2a_coordinator_test.py", "sha256": "f481a81d061689813d42d19e16613e1de86201850d9528e13e9fb6b64beb85c6"},
+    {"path": "test/phase5_2d0_child_e2e_test.py", "sha256": "f084387aa797e07e239e7d13c1ad1931264622fe479ba66fbcc5808807f14dd7"},
+    {"path": "test/phase5_scoped_app_agent_test.py", "sha256": "cb1b4be11150fe4e07a55e1a4dd42532992aed9fd0c3c357b90d02a8dde25f72"},
+    {"path": "test/phase5_child_notification_reader_test.py", "sha256": "b72384e5aff1213e7e915bab8f24d7e644ff3a21d1329198abb7bf097b98f83c"},
+    {"path": "test/phase5_notification_lifecycle_test.py", "sha256": "4838e5642af9c51ea9afe2da63d7e150ef15cfdd0849c6d5ac7b805ef9f42c02"}
+  ],
+  "networkCalls": 0,
+  "realProviderCalls": 0,
+  "officialScenarioExecuted": false,
+  "officialAreModified": false,
+  "contracts": {
+    "parent_gate_must_allow_before_child_creation": true,
+    "child_scope_is_lazy_unique_and_hash_bound": true,
+    "native_owner_and_are_environment_identity_are_pinned": true,
+    "child_reader_capability_and_projection_provenance_are_opaque": true,
+    "parent_bridge_and_child_reader_have_independent_cursors": true,
+    "child_completion_requires_runner_and_native_evidence": true,
+    "factory_failure_child_failure_stop_and_parent_close_revoke": true,
+    "default_official_expert_agent_path_remains_blocked": true
+  },
+  "knownBoundaries": [
+    "The coordinator and E2E are same-process trusted fixtures; the official _native_run_with_agent has not invoked this coordinator yet.",
+    "AppAgent__expert_agent remains unknown/block in the default official bridge path until a production child factory and native action gate are installed.",
+    "Node/TS delegation registry and private pipe still do not transport the reader or lifecycle; real child hooks need a child-identity transport or HookHost.",
+    "STOP uses immediate hard revoke; concurrent STOP-after-model dispatch=0 remains a later race test.",
+    "No official A2A/Noise Scenario, real provider call, upload, or benchmark score was produced."
+  ]
+}

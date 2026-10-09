@@ -722,6 +722,53 @@ class Tests(unittest.TestCase):
         self.assertEqual(engine.calls, 0)
         self.assertEqual(len(dispatch.calls), 0)
 
+    def test_19d_scoped_reader_projection_replacement_fails_before_model(self):
+        state = {}
+
+        def reader_factory(env, scope):
+            registry = ScopedNotificationOriginRegistry()
+            projection = ScopedArrivedNotificationProjection(scope_id=scope["requestId"])
+            registry.bind_origin(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                 child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                 projection=projection)
+            reader = registry.open_reader(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                          child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                          time_manager=env.time_manager)
+            state["registry"], state["scope"] = registry, scope
+            return reader
+
+        runner, _, _, _, _, engine, dispatch = self.fixture(
+            notification_reader_factory=reader_factory)
+        bindings = state["registry"]._ScopedNotificationOriginRegistry__bindings
+        bindings[state["scope"]["childExecutionId"]].projection = ScopedArrivedNotificationProjection(
+            scope_id=state["scope"]["requestId"])
+        with self.assertRaisesRegex(ScopedAppAgentFatal, "SCOPED_AGENT_SOURCE_CHANGED"):
+            runner.run()
+        self.assertEqual(engine.calls, 0)
+        self.assertEqual(len(dispatch.calls), 0)
+
+    def test_19e_scoped_reader_projection_method_tamper_fails_before_model(self):
+        state = {}
+
+        def reader_factory(env, scope):
+            registry = ScopedNotificationOriginRegistry()
+            projection = ScopedArrivedNotificationProjection(scope_id=scope["requestId"])
+            registry.bind_origin(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                 child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                 projection=projection)
+            reader = registry.open_reader(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                          child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                          time_manager=env.time_manager)
+            state["projection"] = projection
+            return reader
+
+        runner, _, _, _, _, engine, dispatch = self.fixture(notification_reader_factory=reader_factory)
+        state["projection"].project = lambda *, are_now: ()
+        with self.assertRaisesRegex(ScopedAppAgentFatal, "SCOPED_AGENT_SOURCE_CHANGED"):
+            runner.run()
+        self.assertEqual(engine.calls, 0)
+        self.assertEqual(len(dispatch.calls), 0)
+
     def test_20_run_reuse_no_reset_start_logs_or_scope_input(self):
         runner, _, _, _, _, engine, dispatch = self.fixture()
         self.assertEqual(runner.run(), "completed")

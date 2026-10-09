@@ -165,6 +165,17 @@ class ChildNotificationReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(NotificationReaderError, "NOTIFICATION_READER_BINDING_CHANGED"):
             reader2.poll()
 
+    def test_projection_method_tamper_is_sticky(self):
+        original = self.projection.project
+        self.projection.project = lambda *, are_now: ()
+        with self.assertRaisesRegex(NotificationReaderError, "NOTIFICATION_READER_BINDING_CHANGED"):
+            self.reader.poll()
+        # Restoring the method cannot reopen a reader after a failed binding
+        # check; this is required for fail-closed child lifecycle semantics.
+        self.projection.project = original
+        with self.assertRaisesRegex(NotificationReaderError, "NOTIFICATION_READER_BINDING_CHANGED"):
+            self.reader.poll()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
