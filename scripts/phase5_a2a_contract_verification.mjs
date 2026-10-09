@@ -16,9 +16,10 @@ for (let index = 0; index < args.length; index += 2) {
   cli[args[index]] = args[index + 1]
 }
 const pipeScope = cli['--scope'] === 'private-pipe'
-const nativeScope = cli['--scope'] === 'native-binding'
+const appAgentScope = cli['--scope'] === 'official-app-agent'
+const nativeScope = cli['--scope'] === 'native-binding' || appAgentScope
 assert.ok(cli['--scope'] === undefined || pipeScope || nativeScope, 'invalid verification scope')
-const label = nativeScope ? 'phase5-1b-native-binding' : pipeScope ? 'phase5-1b-pipe' : 'phase5-1a-contract'
+const label = appAgentScope ? 'phase5-2a-official-app-agent' : nativeScope ? 'phase5-1b-native-binding' : pipeScope ? 'phase5-1b-pipe' : 'phase5-1a-contract'
 const output = resolve(root, cli['--output-dir'] ?? `reports/${label}-${Date.now()}`)
 assert.ok(within(join(root, 'reports'), output) && output !== join(root, 'reports'), 'output must be a new reports child')
 assert.ok(!existsSync(output), 'verification output already exists')
@@ -62,13 +63,20 @@ if (nativeScope) {
     join(root, 'scripts/gaia2_private_native_binding.py'), join(root, 'test/phase5_private_native_binding_test.py'),
     join(root, 'test/fixtures/phase5_native_pipe_worker.py')]) assert.ok(inventory.some(ref => ref.path === path), 'native verification source missing')
 }
+if (appAgentScope) {
+  for (const path of [join(backend, 'src/core/plugins/runtime-delegation-app-agent.ts'),
+    join(backend, 'test/runtime-delegation-app-agent.test.ts'), join(root, 'scripts/gaia2_scoped_app_agent.py'),
+    join(root, 'test/phase5_scoped_app_agent_test.py'), join(root, 'test/fixtures/phase5_app_agent_pipe_worker.py')]) {
+    assert.ok(inventory.some(ref => ref.path === path), 'official AppAgent verification source missing')
+  }
+}
 const sourceHash = digest(inventory)
 const gitHead = directory => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: directory, windowsHide: true, encoding: 'utf8' }).trim()
 mkdirSync(output)
-writeJson(join(output, 'source-inventory.json'), { schemaVersion: nativeScope ? 'gaia2-phase5-1b-native-controlled-source-v1' : pipeScope ? 'gaia2-phase5-1b-pipe-controlled-source-v1' : 'gaia2-phase5-1a-controlled-source-v1', sourceHash,
+writeJson(join(output, 'source-inventory.json'), { schemaVersion: appAgentScope ? 'gaia2-phase5-2a-app-agent-controlled-source-v1' : nativeScope ? 'gaia2-phase5-1b-native-controlled-source-v1' : pipeScope ? 'gaia2-phase5-1b-pipe-controlled-source-v1' : 'gaia2-phase5-1a-controlled-source-v1', sourceHash,
   backendCommit: gitHead(backend), projectCommit: gitHead(root), files: inventory,
   historicalStage4Acceptance: ref(join(root, 'reports/phase4-v3-mechanism-acceptance-20261009-v1.json')),
-  scope: nativeScope ? 'controlled_single_app_native_binding_not_official_appagent_or_scenario' : pipeScope ? 'controlled_private_pipe_only_not_official_app_binding' : 'controlled_contract_only_not_phase4_lock_replacement' }, { immutable: true })
+  scope: appAgentScope ? 'controlled_official_appagent_loop_single_apps_no_scenario_or_model' : nativeScope ? 'controlled_single_app_native_binding_not_official_appagent_or_scenario' : pipeScope ? 'controlled_private_pipe_only_not_official_app_binding' : 'controlled_contract_only_not_phase4_lock_replacement' }, { immutable: true })
 
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/(?:API_KEY|ACCESS_TOKEN|AUTHORIZATION|HF_TOKEN|HUGGINGFACE_TOKEN|PASSWORD|SECRET|GAIA2_HOOK_|BASE_URL|ENDPOINT)/i.test(key)))
 Object.assign(env, { PYTHONPATH: join(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', PYTHONDONTWRITEBYTECODE: '1',
@@ -78,6 +86,11 @@ if (nativeScope) {
   const integrationRoot = join(output, 'native-integration-evidence')
   mkdirSync(integrationRoot)
   env.GAIA2_NATIVE_INTEGRATION_EVIDENCE_ROOT = integrationRoot
+}
+if (appAgentScope) {
+  const integrationRoot = join(output, 'app-agent-integration-evidence')
+  mkdirSync(integrationRoot)
+  env.GAIA2_APP_AGENT_INTEGRATION_EVIDENCE_ROOT = integrationRoot
 }
 const checks = [
   { name: 'backend-typecheck', cwd: backend, command: process.execPath, args: [join(backend, 'node_modules/typescript/bin/tsc'), '--noEmit'] },
@@ -134,10 +147,12 @@ const sourceSetClosed = JSON.stringify(sourceFilePaths()) === JSON.stringify(inv
 const unchanged = sourceSetClosed && inventory.every(item => fileDigest(regular(item.path)) === item.sha256 && statSync(item.path).size === item.bytes)
 const integrationEvidence = nativeScope ? files(join(output, 'native-integration-evidence')).map(ref) : []
 if (nativeScope) assert.ok(integrationEvidence.some(item => item.path.endsWith('summary.json')), 'retained native integration evidence missing')
-const evidence = [ref(join(output, 'source-inventory.json')), ...results.flatMap(check => check.evidence), ...integrationEvidence]
+const appAgentIntegrationEvidence = appAgentScope ? files(join(output, 'app-agent-integration-evidence')).map(ref) : []
+if (appAgentScope) assert.ok(appAgentIntegrationEvidence.some(item => item.path.endsWith('summary.json')), 'retained AppAgent integration evidence missing')
+const evidence = [ref(join(output, 'source-inventory.json')), ...results.flatMap(check => check.evidence), ...integrationEvidence, ...appAgentIntegrationEvidence]
 for (const item of evidence) assert.equal(fileDigest(regular(item.path)), item.sha256)
 const accepted = unchanged && results.every(check => check.passed)
-const report = { schemaVersion: nativeScope ? 'gaia2-phase5-1b-native-controlled-verification-v1' : pipeScope ? 'gaia2-phase5-1b-pipe-controlled-verification-v1' : 'gaia2-phase5-1a-controlled-verification-v1', status: accepted ? 'passed' : 'failed',
+const report = { schemaVersion: appAgentScope ? 'gaia2-phase5-2a-app-agent-controlled-verification-v1' : nativeScope ? 'gaia2-phase5-1b-native-controlled-verification-v1' : pipeScope ? 'gaia2-phase5-1b-pipe-controlled-verification-v1' : 'gaia2-phase5-1a-controlled-verification-v1', status: accepted ? 'passed' : 'failed',
   sourceHash, sourceFiles: inventory.length, sourceSetClosed, sourceUnchanged: unchanged, checks: results, evidence,
   ...(nativeScope ? { privatePipeControlledAccepted: accepted, nativeAppBindingControlledAccepted: accepted,
     realHostNativePipeIntegrationPassed: accepted, tsPythonControlledAreAppBound: accepted,
@@ -147,9 +162,16 @@ const report = { schemaVersion: nativeScope ? 'gaia2-phase5-1b-native-controlled
     : pipeScope ? { privatePipeControlledAccepted: accepted, phase51b1Complete: false, nativeAppBindingComplete: false,
     officialAppAgentIntegrated: false, tsPythonPrivatePipeRoundTripPassed: accepted, tsPythonOfficialAppBound: false }
     : { phase51aControlledContractAccepted: accepted, tsPythonIpcConnected: false }),
+  ...(appAgentScope ? { officialAppAgentControlledLoopIntegrated: accepted, officialAppAgentProductionIntegrated: false,
+    appAgentIntegrationEvidenceFiles: appAgentIntegrationEvidence.length, beforeModelHooksIntegrated: false,
+    childModelRoleBudgetIntegrated: false, parentChildNotificationRoutingIntegrated: false } : {}),
   stage5Complete: false, productionA2aEnabled: false,
   officialScenarioExecuted: false, modelCalls: 0, officialSubmissionUploaded: false,
-  limits: [...(nativeScope ? ['Real Contacts/RentAFlat objects in a SETUP Environment are exercised through actual TS Host and private Python pipe; no Scenario or AppAgent is run.',
+  limits: [...(appAgentScope ? ['Actual AppAgentBuilder/AppAgent/BaseAgent parser, logs and loop use a finite local engine through trusted TS Host native dispatch; no real model or official Scenario is run.',
+    'Original Python adapter observations are released after actual Host dispatch acknowledgements; wire values never replace those original objects.',
+    'Final termination depends on actual native return, allowed after Hook and registry.completeChild, not ToolCallLog or AppAgent string output.',
+    'Known single-App native collection only; cross-App internal observer, before-model Hook integration, real child model roles/budgets, cross-clock deadlines and trusted notification routing remain future gates.']
+    : nativeScope ? ['Real Contacts/RentAFlat objects in a SETUP Environment are exercised through actual TS Host and private Python pipe; no Scenario or AppAgent is run.',
     'Collector authority is the trusted source-frozen Python factory, actual App/adapter/callable identities and private dispatch context, not caller CE JSON or source hashes alone.',
     'Only known single-App internal events are covered. Cross-App internal calls require a future trusted environment-wide observer and edge policy.',
     'Raw native result and formatter observation are independently frozen; wire projections are evidence, not substitutes for original Python observations.',
@@ -158,7 +180,7 @@ const report = { schemaVersion: nativeScope ? 'gaia2-phase5-1b-native-controlled
     'Host timeout/EOF revocation is tested with a controlled pending native callback, not an official business operation.',
     'wireHash is separate from historical Host/Python hashes; actual raw/effective argument and App manifest mapping is not yet implemented.'] : ['TS native driver constructor is trusted; Python local gates are controlled doubles, not owned TS receipts.']),
     'OS birth identity is independently verified at the test wrapper admission, not for each short inner compiler/test process.',
-    ...(nativeScope ? ['No official AppAgent benchmark integration or universal official tool compatibility is claimed.']
+    ...(nativeScope ? ['No official AppAgent production benchmark integration or universal official tool compatibility is claimed.']
       : ['No real cross-process Host/native binding or official AppAgent benchmark integration is claimed.']),
     'Existing production expert_agent guard remains blocked; stage 5.1b admission is still required.'],
   finishedAt: new Date().toISOString() }
