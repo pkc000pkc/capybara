@@ -23,6 +23,7 @@ from typing import Any, Callable, Mapping
 
 import gaia2_a2a_wire as wire
 from gaia2_model_retry import ModelRetryPolicy, classify_model_error, retry_delay_hint, _iso, _safe_usage
+from gaia2_deadline_notifications import DeadlineNotificationError, ScopedOSDeadline
 from are.simulation.agents.llm.llm_engine import LLMEngine
 from are.simulation.agents.llm.types import MessageRole
 
@@ -33,6 +34,7 @@ _ID = re.compile(r"[a-f0-9]{32}\Z")
 _RETRY_CODES = {"configuration_error": "SCOPED_MODEL_CONFIGURATION_ERROR",
     "rate_limit": "SCOPED_MODEL_RATE_LIMIT", "request_timeout": "SCOPED_MODEL_REQUEST_TIMEOUT",
     "transport_error": "SCOPED_MODEL_TRANSPORT_ERROR", "runtime_error": "SCOPED_MODEL_RUNTIME_ERROR"}
+_DEADLINE_TIMEOUT_POLICIES = ("fixed", "remaining")
 
 
 class ScopedModelBrokerError(RuntimeError):
@@ -198,7 +200,8 @@ class ScopedRetryModelEngine(LLMEngine):
                  before_attempt: Callable[[dict], Any] | None = None,
                  config_hash: str | None = None, emit: Callable[..., None] | None = None,
                  clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
-                 monotonic_clock: Callable[[], float] = time.monotonic):
+                 monotonic_clock: Callable[[], float] = time.monotonic,
+                 deadline_timeout_policy: str = "fixed"):
         if role not in ROLES or type(role) is not str or type(model_scope_hash) is not str or not _HASH.fullmatch(model_scope_hash):
             _fail("SCOPED_MODEL_IDENTITY_INVALID")
         if any(type(value) is not int or not 1 <= value <= 100000 for value in (max_logical_requests, max_sdk_attempts)):
@@ -207,6 +210,8 @@ class ScopedRetryModelEngine(LLMEngine):
                 or emit is not None and not callable(emit)
                 or before_attempt is not None and not callable(before_attempt)):
             _fail("SCOPED_MODEL_CALLBACK_INVALID")
+        if type(deadline_timeout_policy) is not str or deadline_timeout_policy not in _DEADLINE_TIMEOUT_POLICIES:
+            _fail("SCOPED_MODEL_DEADLINE_POLICY_INVALID")
         _pristine(sdk_completion)
         _policy_value(policy)
         super().__init__("scoped-model")
@@ -222,7 +227,8 @@ class ScopedRetryModelEngine(LLMEngine):
         self.__identities = {name: _identity(value) for name, value in self.__callbacks.items()}
         self.__sources: dict[Path, str] = {}
         for value in (type(self), LLMEngine, MessageRole, ModelRetryPolicy, classify_model_error,
-                retry_delay_hint, _safe_usage, wire.value_hash, *self.__callbacks.values()):
+                retry_delay_hint, _safe_usage, wire.value_hash, ScopedOSDeadline,
+                DeadlineNotificationError, *self.__callbacks.values()):
             # Built-in time functions have no Python source; their identity is
             # frozen, and the module's SDK/factory/guard sources remain pinned.
             if inspect.isbuiltin(value):
@@ -236,11 +242,14 @@ class ScopedRetryModelEngine(LLMEngine):
         self.__config = scoped_model_config_hash(initial, policy)
         if config_hash is not None and config_hash != self.__config:
             _fail("SCOPED_MODEL_CONFIG_CHANGED")
+        self.__deadline_timeout_policy = deadline_timeout_policy
         self.__logical_used = self.__sdk_used = 0
         self.__pending = None
         self.__busy = False
         self.__seen_permits: set[str] = set()
         self.__seen_requests: set[str] = set()
+        self.__seen_deadlines: list[ScopedOSDeadline] = []
+        self.__deadline_bindings: dict[int, tuple] = {}
         self.__last_request = self.__last_input = self.__last_output = self.__last_usage = None
         self.__last_attempts = 0
         self.__last_status = None
@@ -254,7 +263,8 @@ class ScopedRetryModelEngine(LLMEngine):
         # and rechecked on every call, but is separately frozen at first bind.
         self.__source_identity_hash = wire.value_hash(sorted(self.__sources.values()))
         self.__binding = (self.__role, self.__scope, self.__config, self.__logical_limit,
-            self.__sdk_limit, id(self.__policy), _identity(type(self).chat_completion),
+            self.__sdk_limit, id(self.__policy), self.__deadline_timeout_policy,
+            _identity(type(self).chat_completion),
             _identity(type(self).begin_request), _identity(type(self).__call__), self.__source_identity_hash)
 
     @property
@@ -276,6 +286,10 @@ class ScopedRetryModelEngine(LLMEngine):
     @property
     def max_sdk_attempts(self):
         return self.__sdk_limit
+
+    @property
+    def deadline_timeout_policy(self):
+        return self.__deadline_timeout_policy
 
     @property
     def last_usage(self):
@@ -312,7 +326,8 @@ class ScopedRetryModelEngine(LLMEngine):
             if self.__timing_failed:
                 _fail("SCOPED_MODEL_TIMING_INVALID")
             binding = (self.__role, self.__scope, self.__config, self.__logical_limit,
-                self.__sdk_limit, id(self.__policy), _identity(type(self).chat_completion),
+                self.__sdk_limit, id(self.__policy), self.__deadline_timeout_policy,
+                _identity(type(self).chat_completion),
                 _identity(type(self).begin_request), _identity(type(self).__call__), self.__source_identity_hash)
             actual_callbacks = {"sdk": self.__sdk, "factory": self.__factory, "clock": self.__clock,
                 "sleep": self.__sleep, "monotonic": self.__monotonic}
@@ -337,8 +352,44 @@ class ScopedRetryModelEngine(LLMEngine):
         except BaseException:
             _fail("SCOPED_MODEL_SOURCE_CHANGED")
 
+    def __deadline_check(self, deadline: ScopedOSDeadline | None, stage: str) -> float | None:
+        """Observe a trusted OS deadline and expose only a bounded remainder."""
+        if deadline is None:
+            return None
+        if type(deadline) is not ScopedOSDeadline:
+            _fail("SCOPED_MODEL_DEADLINE_INVALID")
+        binding = self.__deadline_bindings.get(id(deadline))
+        if binding != (deadline, _identity(deadline.check), _identity(deadline.remaining),
+                       deadline.scope_id, deadline.duration_seconds):
+            _fail("SCOPED_MODEL_DEADLINE_INVALID")
+        try:
+            remaining = deadline.check(stage=stage)
+        except DeadlineNotificationError as failure:
+            if failure.code == "OS_DEADLINE_EXPIRED":
+                _fail("SCOPED_MODEL_DEADLINE_EXPIRED")
+            _fail("SCOPED_MODEL_DEADLINE_INVALID")
+        except BaseException:
+            _fail("SCOPED_MODEL_DEADLINE_INVALID")
+        if type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining <= 0:
+            _fail("SCOPED_MODEL_DEADLINE_INVALID")
+        return float(remaining)
+
+    def __provider_kwargs(self, sdk_kwargs: dict, remaining: float | None) -> dict:
+        """Apply the trusted per-call timeout policy without changing config hash."""
+        if remaining is None or self.__deadline_timeout_policy == "fixed":
+            return sdk_kwargs
+        timeout = sdk_kwargs.get("timeout")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            _fail("SCOPED_MODEL_SDK_CONFIG_INVALID")
+        result = dict(sdk_kwargs)
+        result["timeout"] = min(float(timeout), float(remaining))
+        if result["timeout"] <= 0 or not math.isfinite(result["timeout"]):
+            _fail("SCOPED_MODEL_DEADLINE_INVALID")
+        return result
+
     def begin_request(self, *, permit_id: str, request_id: str, actual_input_hash: str,
-                      before_attempt: Callable[[dict], Any] | None = None) -> None:
+                      before_attempt: Callable[[dict], Any] | None = None,
+                      deadline: ScopedOSDeadline | None = None) -> None:
         with self.__lock:
             self.__check()
             if self.__pending is not None or self.__busy:
@@ -351,13 +402,28 @@ class ScopedRetryModelEngine(LLMEngine):
                 _fail("SCOPED_MODEL_PERMIT_REUSED")
             if self.__logical_used >= self.__logical_limit:
                 _fail("SCOPED_MODEL_LOGICAL_BUDGET_EXHAUSTED")
+            if self.__deadline_timeout_policy == "remaining" and deadline is None:
+                _fail("SCOPED_MODEL_DEADLINE_REQUIRED")
+            if deadline is not None:
+                if type(deadline) is not ScopedOSDeadline:
+                    _fail("SCOPED_MODEL_DEADLINE_INVALID")
+                if deadline.scope_id != request_id:
+                    _fail("SCOPED_MODEL_DEADLINE_SCOPE_MISMATCH")
+                if any(deadline is previous for previous in self.__seen_deadlines):
+                    _fail("SCOPED_MODEL_DEADLINE_REUSED")
+                self.__deadline_bindings[id(deadline)] = (deadline, _identity(deadline.check),
+                    _identity(deadline.remaining), deadline.scope_id, deadline.duration_seconds)
+                self.__deadline_check(deadline, "model_admission")
             guard = before_attempt if before_attempt is not None else self.__guard
             if guard is None:
                 _fail("SCOPED_MODEL_GUARD_REQUIRED")
             self.__freeze_guard(guard)
-            self.__pending = {"permitId": permit_id, "requestId": request_id, "actualInputHash": actual_input_hash}
+            self.__pending = {"request": {"permitId": permit_id, "requestId": request_id,
+                "actualInputHash": actual_input_hash}, "deadline": deadline}
             self.__seen_permits.add(permit_id)
             self.__seen_requests.add(request_id)
+            if deadline is not None:
+                self.__seen_deadlines.append(deadline)
             self.__last_request, self.__last_input = request_id, actual_input_hash
             self.__last_output = self.__last_usage = None
             self.__last_attempts, self.__last_status = 0, None
@@ -414,7 +480,8 @@ class ScopedRetryModelEngine(LLMEngine):
             self.__check()
             if self.__busy or self.__pending is None:
                 _fail("SCOPED_MODEL_PERMIT_REQUIRED")
-            request, self.__pending, self.__busy = self.__pending, None, True
+            pending, self.__pending, self.__busy = self.__pending, None, True
+            request, deadline = pending["request"], pending["deadline"]
         started, waited, attempted = False, 0.0, 0
         timing_start = None
         attempt_elapsed = 0.0
@@ -447,6 +514,7 @@ class ScopedRetryModelEngine(LLMEngine):
                 sdk_kwargs = self.__check()
                 if self.__sdk_used >= self.__sdk_limit:
                     _fail("SCOPED_MODEL_SDK_BUDGET_EXHAUSTED")
+                self.__deadline_check(deadline, "sdk_attempt_before")
                 guard_payload = {**request, "attempt": attempt}
                 try:
                     # The trusted runner independently validates the full Node
@@ -464,11 +532,17 @@ class ScopedRetryModelEngine(LLMEngine):
                 self.__last_attempts = attempted
                 attempt_start = self.__timing_now()
                 attempt_observed = True
+                # Keep the final authorization immediately adjacent to the
+                # provider call; guard/event bookkeeping must not consume the
+                # only trusted deadline observation used for this attempt.
+                remaining_deadline = self.__deadline_check(deadline, "sdk_attempt_before")
+                sdk_kwargs = self.__provider_kwargs(sdk_kwargs, remaining_deadline)
                 try:
                     result = self.__sdk(messages=_clone(converted), **sdk_kwargs)
                 except Exception as error:
                     attempt_elapsed = self.__timing_accumulate(attempt_elapsed,
                         self.__timing_delta(attempt_start))
+                    self.__deadline_check(deadline, "sdk_attempt_after")
                     try:
                         classification = classify_model_error(error)
                         now = self.__clock()
@@ -477,6 +551,7 @@ class ScopedRetryModelEngine(LLMEngine):
                         classification = {"category": "runtime_error", "retryable": False, "httpStatus": None}
                         now, hint, hint_source = 0.0, None, None
                 else:
+                    self.__deadline_check(deadline, "sdk_attempt_after")
                     self.__check()
                     success_elapsed = self.__timing_delta(attempt_start)
                     attempt_elapsed = self.__timing_accumulate(attempt_elapsed, success_elapsed)
@@ -524,7 +599,10 @@ class ScopedRetryModelEngine(LLMEngine):
                     cumulativeWaitSecondsAfterRetry=waited + delay)
                 remaining = delay
                 while remaining > 0:
+                    remaining_deadline = self.__deadline_check(deadline, "cooldown_before")
                     chunk = min(remaining, 30.0)
+                    if remaining_deadline is not None:
+                        chunk = min(chunk, remaining_deadline)
                     cooldown_start = self.__timing_now()
                     try:
                         self.__sleep(chunk)
@@ -534,6 +612,7 @@ class ScopedRetryModelEngine(LLMEngine):
                     cooldown_elapsed = self.__timing_accumulate(cooldown_elapsed,
                         self.__timing_delta(cooldown_start))
                     remaining = max(0.0, remaining - chunk)
+                    self.__deadline_check(deadline, "cooldown_after")
                     self.__check()
                     if remaining > 0:
                         self.__event("model_retry_waiting", request, **{**operational, "cumulativeWaitSeconds": waited},
@@ -589,6 +668,7 @@ class ScopedRetryModelEngine(LLMEngine):
         self.__check()
         return {"schemaVersion": "gaia2-scoped-model-engine-v1", "modelRole": self.__role,
             "modelScopeHash": self.__scope, "configHash": self.__config,
+            "deadlineTimeoutPolicy": self.__deadline_timeout_policy,
             "maxLogicalRequests": self.__logical_limit, "maxSdkAttempts": self.__sdk_limit,
             "logicalRequestsUsed": self.__logical_used, "sdkAttemptsUsed": self.__sdk_used,
             "requestActive": self.__pending is not None or self.__busy,

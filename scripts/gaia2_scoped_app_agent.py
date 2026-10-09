@@ -43,7 +43,8 @@ from are.simulation.environment import Environment
 from are.simulation.exceptions import FatalError
 from gaia2_generation_time import ScopedAREGenerationTimeOwner
 from gaia2_generation_time_ledger import ScopedGenerationTimeLedger
-from gaia2_scoped_model_broker import ScopedRetryModelEngine
+from gaia2_deadline_notifications import DeadlineNotificationError, ScopedOSDeadline
+from gaia2_scoped_model_broker import ScopedModelBrokerError, ScopedRetryModelEngine
 
 _SCOPE_KEYS = frozenset(("parentExecutionId", "parentSessionId", "environmentGeneration",
     "appId", "parentCanonicalName", "taskArgumentKey", "toolInventoryHash", "taskHash",
@@ -223,7 +224,8 @@ class ScopedAppAgentRunner:
                  model_attempt: Callable | None = None, model_finish: Callable | None = None,
                  max_logical_requests: int | None = None, log_callback: Callable | None = None,
                  generation_time_owner_factory: Callable[[], ScopedAREGenerationTimeOwner] | None = None,
-                 generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None):
+                 generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None,
+                 deadline_factory: Callable[[str], ScopedOSDeadline] | None = None):
         if (not isinstance(app, App) or not isinstance(owner, NativeAppBinding)
                 or not isinstance(env, Environment) or not isinstance(llm_engine, LLMEngine)
                 or not callable(dispatch) or env.apps.get(app.name) is not app
@@ -266,6 +268,13 @@ class ScopedAppAgentRunner:
         self.__generation_ledgers: list[ScopedGenerationTimeLedger] = []
         self.__generation_source_manifest_hash = None
         self.__generation_active = None
+        if deadline_factory is not None and not callable(deadline_factory):
+            _fatal("SCOPED_AGENT_DEADLINE_INTEGRATION_INVALID")
+        self.__deadline_factory = deadline_factory
+        self.__deadline_factory_identity = None if deadline_factory is None else _callable_identity(deadline_factory)
+        self.__deadline_active: ScopedOSDeadline | None = None
+        self.__deadlines: list[ScopedOSDeadline] = []
+        self.__deadline_bindings: dict[int, tuple] = {}
         supplied = (model_binding, model_gate, model_attempt, model_finish)
         self.__gated = any(item is not None for item in supplied)
         if self.__gated:
@@ -298,6 +307,10 @@ class ScopedAppAgentRunner:
                 and (not self.__gated or type(llm_engine) is not ScopedRetryModelEngine
                     or not callable(getattr(llm_engine, "get_last_timing", None)))):
             _fatal("SCOPED_AGENT_GENERATION_INTEGRATION_INVALID")
+        if self.__deadline_factory is not None:
+            if (not self.__gated or type(llm_engine) is not ScopedRetryModelEngine
+                    or getattr(llm_engine, "deadline_timeout_policy", "fixed") != "remaining"):
+                _fatal("SCOPED_AGENT_DEADLINE_INTEGRATION_INVALID")
         self.__model_gate, self.__model_attempt, self.__model_finish = model_gate, model_attempt, model_finish
         self.__sdk_guard_callback = self.__sdk_guard  # Stable bound callable for broker identity freezing.
         self.__active_model = None
@@ -379,6 +392,8 @@ class ScopedAppAgentRunner:
             self.__engine_binding()
         if self.__generation_time_owner_factory is not None:
             self.__collect_sources(llm_engine.get_last_timing)
+        if self.__deadline_factory is not None:
+            self.__collect_sources(self.__deadline_factory, ScopedOSDeadline, DeadlineNotificationError)
         self.__instance_snapshot = self.__snapshot_instances()
 
     def __collect_sources(self, *objects: Any) -> None:
@@ -438,7 +453,10 @@ class ScopedAppAgentRunner:
             self.__generation_owner_factory_identity,
             self.__generation_ledger_factory_identity,
             _callable_identity(self.__generation_ledger_factory) if self.__generation_ledger_factory is not None else (),
-            _callable_identity(self.__model.get_last_timing) if self.__generation_time_owner_factory is not None else ())
+            _callable_identity(self.__model.get_last_timing) if self.__generation_time_owner_factory is not None else (),
+            self.__deadline_factory_identity,
+            _callable_identity(self.__deadline_factory) if self.__deadline_factory is not None else (),
+            getattr(self.__model, "deadline_timeout_policy", None))
 
     def __engine_binding(self) -> None:
         if not self.__gated:
@@ -478,6 +496,54 @@ class ScopedAppAgentRunner:
                 != self.__generation_ledger_factory_identity):
             _fatal("SCOPED_AGENT_GENERATION_INTEGRATION_CHANGED")
 
+    def __deadline_binding(self) -> None:
+        if self.__deadline_factory is None:
+            return
+        if _callable_identity(self.__deadline_factory) != self.__deadline_factory_identity:
+            _fatal("SCOPED_AGENT_DEADLINE_INTEGRATION_CHANGED")
+        if getattr(self.__model, "deadline_timeout_policy", "fixed") != "remaining":
+            _fatal("SCOPED_AGENT_DEADLINE_INTEGRATION_CHANGED")
+
+    def __deadline_check(self, stage: str) -> float | None:
+        deadline = self.__deadline_active
+        if deadline is None:
+            return None
+        if type(deadline) is not ScopedOSDeadline:
+            _fatal("SCOPED_AGENT_DEADLINE_INVALID")
+        binding = self.__deadline_bindings.get(id(deadline))
+        if binding != (deadline, _callable_identity(deadline.check), _callable_identity(deadline.remaining),
+                       deadline.scope_id, deadline.duration_seconds):
+            _fatal("SCOPED_AGENT_DEADLINE_INVALID")
+        try:
+            remaining = deadline.check(stage=stage)
+        except DeadlineNotificationError as failure:
+            if failure.code == "OS_DEADLINE_EXPIRED":
+                _fatal("SCOPED_AGENT_DEADLINE_EXPIRED")
+            _fatal("SCOPED_AGENT_DEADLINE_INVALID")
+        except BaseException:
+            _fatal("SCOPED_AGENT_DEADLINE_INVALID")
+        if type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining <= 0:
+            _fatal("SCOPED_AGENT_DEADLINE_INVALID")
+        return float(remaining)
+
+    def __new_deadline(self, request_id: str) -> ScopedOSDeadline | None:
+        if self.__deadline_factory is None:
+            return None
+        try:
+            deadline = self.__deadline_factory(request_id)
+        except BaseException:
+            _fatal("SCOPED_AGENT_DEADLINE_FACTORY_FAILED")
+        if type(deadline) is not ScopedOSDeadline:
+            _fatal("SCOPED_AGENT_DEADLINE_INVALID")
+        if deadline.scope_id != request_id:
+            _fatal("SCOPED_AGENT_DEADLINE_SCOPE_MISMATCH")
+        if any(deadline is previous for previous in self.__deadlines):
+            _fatal("SCOPED_AGENT_DEADLINE_REUSED")
+        self.__deadlines.append(deadline)
+        self.__deadline_bindings[id(deadline)] = (deadline, _callable_identity(deadline.check),
+            _callable_identity(deadline.remaining), deadline.scope_id, deadline.duration_seconds)
+        return deadline
+
     def __log_callback(self, log):
         # The official append_agent_log method remains intact. Only its trusted
         # callback exception boundary is guarded, including pre-action logs.
@@ -498,6 +564,7 @@ class ScopedAppAgentRunner:
                 _fatal("SCOPED_AGENT_SOURCE_CHANGED")
             self.__engine_binding()
             self.__generation_binding()
+            self.__deadline_binding()
             for ref in self.__sources.values():
                 data = _regular(Path(ref["path"])).read_bytes()
                 if len(data) != ref["bytes"] or hashlib.sha256(data).hexdigest() != ref["sha256"]:
@@ -526,11 +593,11 @@ class ScopedAppAgentRunner:
             for message, identifier in zip(messages, ids)]
         return projected, ledger + appended
 
-    def __admit_model(self, safe: list[dict]) -> list[dict]:
+    def __admit_model(self, safe: list[dict], request_id: str | None = None) -> list[dict]:
         now = self.__env.time_manager.time()
         if type(now) not in (int, float) or not math.isfinite(now) or now < 0:
             _fatal("SCOPED_AGENT_MODEL_CLOCK_INVALID")
-        request = {"requestId": uuid.uuid4().hex, "iteration": self.base_agent.iterations,
+        request = {"requestId": request_id or uuid.uuid4().hex, "iteration": self.base_agent.iterations,
             "messages": safe, "clock": {"now": now, "revision": self.__gate_revision}}
         ack = self.__model_gate(_clone(request))
         _exact(ack, _GATE_KEYS)
@@ -806,13 +873,21 @@ class ScopedAppAgentRunner:
             self.__model_calls += 1
             if self.__model_calls > self.__logical_budget:
                 _fatal("SCOPED_AGENT_BUDGET_EXHAUSTED")
-            actual = self.__admit_model(safe) if self.__gated else safe
+            request_id = uuid.uuid4().hex if self.__deadline_factory is not None else None
+            self.__deadline_active = self.__new_deadline(request_id) if request_id is not None else None
+            self.__deadline_check("gate_before")
+            actual = self.__admit_model(safe, request_id=request_id) if self.__gated else safe
             if self.__gated:
                 active = self.__active_model
+                self.__deadline_check("gate_after")
                 if self.__generation_time_owner_factory is not None:
+                    self.__deadline_check("generation_admission_before")
                     self.__generation_owner_and_ledger(active)
-                self.__model.begin_request(permit_id=active["permitId"], request_id=active["requestId"],
-                    actual_input_hash=active["actualInputHash"], before_attempt=self.__sdk_guard_callback)
+                begin_kwargs = {"permit_id": active["permitId"], "request_id": active["requestId"],
+                    "actual_input_hash": active["actualInputHash"], "before_attempt": self.__sdk_guard_callback}
+                if self.__deadline_factory is not None:
+                    begin_kwargs["deadline"] = self.__deadline_active
+                self.__model.begin_request(**begin_kwargs)
                 self.__check()
             self.__actor_input_hashes.append(wire.value_hash(actual))
             self.__engine_calls += 1
@@ -849,6 +924,7 @@ class ScopedAppAgentRunner:
                         "generationLedgerReleased": generation.get("releasedSnapshot")})
                 finish = {"permitId": active["permitId"], "requestId": active["requestId"],
                     "actualInputHash": active["actualInputHash"], "outputHash": output_hash, "usage": usage}
+                self.__deadline_check("model_finish_before")
                 ack = self.__model_finish(_clone(finish))
                 _exact(ack, _FINISH_KEYS)
                 if (ack["schemaVersion"] != "capybara-scoped-model-completion-v1"
@@ -856,6 +932,7 @@ class ScopedAppAgentRunner:
                         or ack["status"] != "completed" or any(ack[key] != finish[key] for key in finish)):
                     _fatal("SCOPED_AGENT_MODEL_FINISH_INVALID")
                 self.__check()
+                self.__deadline_check("model_finish_after")
                 active["record"].update({"completed": True, "outputHash": output_hash, "usage": usage})
                 if generation is not None:
                     self.__generation_complete(generation, output_hash, usage)
@@ -865,6 +942,11 @@ class ScopedAppAgentRunner:
         except BaseException as error:
             original_failure_code = (error.message if isinstance(error, ScopedAppAgentFatal)
                 and type(getattr(error, "message", None)) is str and error.message else None)
+            if (original_failure_code is None and isinstance(error, ScopedModelBrokerError)
+                    and error.code in {"SCOPED_MODEL_DEADLINE_EXPIRED", "SCOPED_MODEL_DEADLINE_INVALID",
+                        "SCOPED_MODEL_DEADLINE_SCOPE_MISMATCH", "SCOPED_MODEL_DEADLINE_REUSED",
+                        "SCOPED_MODEL_DEADLINE_REQUIRED"}):
+                original_failure_code = error.code
             try:
                 self.__generation_abort("SCOPED_AGENT_GENERATION_FAILED")
             except BaseException:
@@ -874,6 +956,7 @@ class ScopedAppAgentRunner:
             _fatal(self.__failure_code)
         finally:
             self.__active_model = None
+            self.__deadline_active = None
 
     def __completion(self, ref: Any, dispatch_id: str) -> dict:
         _exact(ref, {"path", "sha256"})
@@ -1027,6 +1110,9 @@ class ScopedAppAgentRunner:
             "generationTimingOffsetMode": "successfulSdkElapsedSeconds" if self.__generation_time_owner_factory is not None else None,
             "generationTimingSource": "ScopedRetryModelEngine.monotonic_clock" if self.__generation_time_owner_factory is not None else None,
             "generationOwnerSourceManifestHash": self.__generation_source_manifest_hash,
+            "deadlineOptIn": self.__deadline_factory is not None,
+            "deadlineTimeoutPolicy": getattr(self.__model, "deadline_timeout_policy", None),
+            "deadlinesCreated": len(self.__deadlines),
             "originalObservationsTaken": self.__observations_taken,
             "started": self.__started, "closed": self.__closed, "completed": self.__completed and not self.__failed,
             "failed": self.__failed, "failureCode": self.__failure_code,
@@ -1048,9 +1134,10 @@ def build_scoped_app_agent(*, app: App, owner: NativeAppBinding, env: Environmen
                           model_finish: Callable | None = None, max_logical_requests: int | None = None,
                           log_callback: Callable | None = None,
                           generation_time_owner_factory: Callable[[], ScopedAREGenerationTimeOwner] | None = None,
-                          generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None) -> ScopedAppAgentRunner:
+                          generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None,
+                          deadline_factory: Callable[[str], ScopedOSDeadline] | None = None) -> ScopedAppAgentRunner:
     return ScopedAppAgentRunner(app=app, owner=owner, env=env, scope=scope,
         llm_engine=llm_engine, dispatch=dispatch, model_binding=model_binding, model_gate=model_gate,
         model_attempt=model_attempt, model_finish=model_finish, max_logical_requests=max_logical_requests,
         log_callback=log_callback, generation_time_owner_factory=generation_time_owner_factory,
-        generation_ledger_factory=generation_ledger_factory)
+        generation_ledger_factory=generation_ledger_factory, deadline_factory=deadline_factory)

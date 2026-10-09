@@ -14,7 +14,7 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
-from types import MethodType
+from types import MethodType, SimpleNamespace
 import unittest
 import uuid
 from unittest.mock import patch
@@ -24,8 +24,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / ".official-python"))
 
 import gaia2_a2a_wire as wire
+from gaia2_deadline_notifications import ScopedOSDeadline
 from gaia2_private_native_binding import NativeAppBinding, NativeBindingError
 from gaia2_scoped_app_agent import ControlledAppAgentEngine, ScopedAppAgentFatal, build_scoped_app_agent
+from gaia2_scoped_model_broker import ScopedRetryModelEngine, scoped_model_config_hash
+from gaia2_model_retry import ModelRetryPolicy
 from gaia2_generation_time import ScopedAREGenerationTimeOwner
 from gaia2_generation_time_ledger import ScopedGenerationTimeLedger
 from are.simulation.agents.agent_log import FinalAnswerLog, ObservationLog, ToolCallLog, TaskLog, LLMInputLog, LLMOutputThoughtActionLog
@@ -311,6 +314,50 @@ class Tests(unittest.TestCase):
             model_attempt=authority.attempt, model_finish=authority.finish, log_callback=log_callback)
         self.runners.append(runner)
         return runner, owner, app, env, scope, engine, dispatch, authority
+
+    def real_deadline_model_fixture(self, duration_seconds=5.0):
+        """Build the real broker path with an offline provider and trusted gate authority."""
+        _, owner, app, env, scope, _, dispatch = self.fixture()
+        class Config:
+            def __call__(self):
+                return {"model": "deadline-controlled", "custom_llm_provider": "openai",
+                    "api_key": "private-test-key", "api_base": "https://deadline.invalid",
+                    "num_retries": 0, "max_retries": 0}
+        class Provider:
+            def __init__(self):
+                self.calls = []
+            def __call__(self, **kwargs):
+                self.calls.append(copy.deepcopy(kwargs))
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                    content=action("final_answer", {"answer": "deadline completed"})))],
+                    usage={"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5})
+        class Clock:
+            def __init__(self):
+                self.now = 100.0
+            def __call__(self):
+                return self.now
+            def sleep(self, seconds):
+                self.now += seconds
+        config, provider, clock = Config(), Provider(), Clock()
+        policy = ModelRetryPolicy(max_attempts=1, backoff_base_seconds=1, backoff_max_seconds=1,
+            max_retry_wait_seconds=2, request_timeout_seconds=5)
+        config_hash = scoped_model_config_hash(config(), policy)
+        binding = {"schemaVersion": "capybara-scoped-model-scope-v1", "delegationScopeHash": wire.value_hash(scope),
+            "modelRole": "child_actor", "configHash": config_hash, "maxLogicalRequests": 2, "maxSdkAttempts": 2}
+        model_scope_hash = wire.value_hash(binding)
+        engine = ScopedRetryModelEngine(role="child_actor", model_scope_hash=model_scope_hash,
+            sdk_completion=provider, sdk_kwargs_factory=config, policy=policy, max_logical_requests=2,
+            max_sdk_attempts=2, clock=clock, sleep=clock.sleep, monotonic_clock=clock,
+            deadline_timeout_policy="remaining")
+        authority = SyntheticModelAuthority(scope, binding, dispatch.root)
+        deadline_factory = lambda request_id: ScopedOSDeadline(scope_id=request_id,
+            duration_seconds=duration_seconds, monotonic_clock=clock)
+        runner = build_scoped_app_agent(app=app, owner=owner, env=env, scope=scope,
+            llm_engine=engine, dispatch=dispatch, model_binding=binding, model_gate=authority.gate,
+            model_attempt=authority.attempt, model_finish=authority.finish,
+            deadline_factory=deadline_factory)
+        self.runners.append(runner)
+        return runner, engine, provider, authority, dispatch, clock
 
     def failed(self, runner):
         with self.assertRaises(ScopedAppAgentFatal) as caught:
@@ -1068,6 +1115,38 @@ class Tests(unittest.TestCase):
             build_scoped_app_agent(app=app, owner=owner, env=env, scope=scope, llm_engine=engine,
                 dispatch=dispatch, generation_time_owner_factory=generation_owner_factory,
                 generation_ledger_factory=generation_ledger_factory)
+
+    def test_56_deadline_opt_in_uses_real_broker_and_caps_provider_timeout(self):
+        runner, engine, provider, authority, dispatch, clock = self.real_deadline_model_fixture(duration_seconds=2.0)
+        self.assertEqual(runner.run(), "deadline completed")
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(provider.calls[0]["timeout"], 2.0)
+        self.assertEqual(len(authority.requests), 1)
+        self.assertEqual(authority.requests[0]["requestId"], authority.finishes[0]["requestId"])
+        snapshot = runner.snapshot()
+        self.assertTrue(snapshot["deadlineOptIn"])
+        self.assertEqual(snapshot["deadlineTimeoutPolicy"], "remaining")
+        self.assertEqual(snapshot["deadlinesCreated"], 1)
+        self.assertEqual(len(dispatch.calls), 1)
+
+    def test_57_deadline_expiry_before_gate_fails_without_sdk_or_native_dispatch(self):
+        runner, engine, provider, authority, dispatch, clock = self.real_deadline_model_fixture(duration_seconds=0.0)
+        with self.assertRaisesRegex(ScopedAppAgentFatal, "SCOPED_AGENT_DEADLINE_EXPIRED"):
+            runner.run()
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(authority.requests, [])
+        self.assertEqual(dispatch.calls, [])
+        self.assertTrue(runner.snapshot()["failed"])
+
+    def test_58_deadline_expiry_after_finish_ack_never_delivers_parser_result(self):
+        runner, engine, provider, authority, dispatch, clock = self.real_deadline_model_fixture(duration_seconds=2.0)
+        authority.on_finish = lambda: setattr(clock, "now", clock.now + 3.0)
+        with self.assertRaisesRegex(ScopedAppAgentFatal, "SCOPED_AGENT_DEADLINE_EXPIRED"):
+            runner.run()
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(len(authority.finishes), 1)
+        self.assertEqual(dispatch.calls, [])
+        self.assertTrue(runner.snapshot()["failed"])
 
 
 if __name__ == "__main__":

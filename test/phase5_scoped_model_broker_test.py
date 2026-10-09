@@ -18,6 +18,7 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
 import gaia2_a2a_wire as wire
 from gaia2_model_retry import ModelRetryPolicy, wrap_completion
+from gaia2_deadline_notifications import ScopedOSDeadline
 from gaia2_scoped_model_broker import (ScopedRetryModelEngine, ScopedModelBrokerError,
     model_input_hash, normalize_model_messages, scoped_model_config_hash)
 from are.simulation.agents.llm.llm_engine import LLMEngine
@@ -111,7 +112,8 @@ class Tests(unittest.TestCase):
         self.addCleanup(self.offline.stop)
         self.serial = 0
 
-    def engine(self, outcomes, role="child_actor", logical=10, sdk_limit=20, policy=None, guard=None):
+    def engine(self, outcomes, role="child_actor", logical=10, sdk_limit=20, policy=None, guard=None,
+               deadline_timeout_policy="fixed"):
         sdk, cfg, clock, emitter = FakeSdk(outcomes), TrustedConfig(), Clock(), SafeEmitter()
         guard = guard or TrustedGuard()
         policy = policy or ModelRetryPolicy(max_attempts=3, backoff_base_seconds=2,
@@ -119,14 +121,20 @@ class Tests(unittest.TestCase):
         engine = ScopedRetryModelEngine(role=role, model_scope_hash=hashlib.sha256(role.encode()).hexdigest(),
             sdk_completion=sdk, sdk_kwargs_factory=cfg, policy=policy, max_logical_requests=logical,
             max_sdk_attempts=sdk_limit, emit=emitter, clock=clock.time, sleep=clock.sleep)
+        if deadline_timeout_policy != "fixed":
+            engine = ScopedRetryModelEngine(role=role, model_scope_hash=hashlib.sha256(role.encode()).hexdigest(),
+                sdk_completion=sdk, sdk_kwargs_factory=cfg, policy=policy, max_logical_requests=logical,
+                max_sdk_attempts=sdk_limit, emit=emitter, clock=clock.time, sleep=clock.sleep,
+                deadline_timeout_policy=deadline_timeout_policy)
         return engine, sdk, cfg, clock, emitter, guard
 
-    def begin(self, fixture, messages=MESSAGES, guard=None):
+    def begin(self, fixture, messages=MESSAGES, guard=None, deadline=None):
         engine, _, _, _, _, default_guard = fixture
         self.serial += 1
         permit, request = f"{self.serial:032x}", f"{self.serial + 1000:032x}"
         engine.begin_request(permit_id=permit, request_id=request,
-            actual_input_hash=model_input_hash(messages), before_attempt=guard or default_guard)
+            actual_input_hash=model_input_hash(messages), before_attempt=guard or default_guard,
+            **({"deadline": deadline} if deadline is not None else {}))
         return permit, request
 
     def run_model(self, fixture, messages=MESSAGES, **kwargs):
@@ -318,6 +326,74 @@ class Tests(unittest.TestCase):
         self.assertEqual((scheduled["waitSeconds"], scheduled["delaySource"]), (65, "structured_cooldown"))
         self.assertEqual(len([event for event in f[4].events if event["type"] == "model_retry_waiting"]), 2)
         self.safe(f)
+
+    def test_12_deadline_admission_caps_provider_timeout_without_config_hash_drift(self):
+        f = self.engine([response()], deadline_timeout_policy="remaining")
+        deadline_clock = Clock()
+        deadline = ScopedOSDeadline(scope_id="00000000000000000000000000000001", duration_seconds=2,
+            monotonic_clock=deadline_clock.time)
+        with self.assertRaisesRegex(ScopedModelBrokerError, "SCOPED_MODEL_DEADLINE_SCOPE_MISMATCH"):
+            self.begin(f, deadline=deadline)
+        deadline_clock = Clock()
+        permit, request = f[0], None
+        self.serial += 1
+        request = f"{self.serial + 1000:032x}"
+        permit = f"{self.serial:032x}"
+        deadline = ScopedOSDeadline(scope_id=request, duration_seconds=2, monotonic_clock=deadline_clock.time)
+        before_hash = f[0].config_hash
+        f[0].begin_request(permit_id=permit, request_id=request, actual_input_hash=model_input_hash(MESSAGES),
+            before_attempt=f[5], deadline=deadline)
+        f[0](MESSAGES)
+        self.assertEqual(f[0].config_hash, before_hash)
+        self.assertEqual(f[1].calls[0]["timeout"], 2.0)
+
+    def test_13_deadline_expiry_after_sdk_attempt_fails_closed(self):
+        f = self.engine([response()], deadline_timeout_policy="remaining")
+        class StepClock:
+            def __init__(self): self.now = 100.0
+            def __call__(self):
+                self.now += 1.0
+                return self.now
+        deadline_clock = StepClock()
+        self.serial += 1
+        request = f"{self.serial + 1000:032x}"
+        permit = f"{self.serial:032x}"
+        deadline = ScopedOSDeadline(scope_id=request, duration_seconds=2, monotonic_clock=deadline_clock)
+        f[0].begin_request(permit_id=permit, request_id=request, actual_input_hash=model_input_hash(MESSAGES),
+            before_attempt=f[5], deadline=deadline)
+        with self.assertRaisesRegex(ScopedModelBrokerError, "SCOPED_MODEL_DEADLINE_EXPIRED"):
+            f[0](MESSAGES)
+
+    def test_14_deadline_expiry_during_cooldown_does_not_retry(self):
+        f = self.engine([HttpFailure(503), response()], deadline_timeout_policy="remaining")
+        deadline_clock = Clock()
+        self.serial += 1
+        request = f"{self.serial + 1000:032x}"
+        permit = f"{self.serial:032x}"
+        deadline = ScopedOSDeadline(scope_id=request, duration_seconds=1, monotonic_clock=deadline_clock.time)
+        f[3].after_sleep = lambda: setattr(deadline_clock, "now", deadline_clock.now + 1.5)
+        f[0].begin_request(permit_id=permit, request_id=request, actual_input_hash=model_input_hash(MESSAGES),
+            before_attempt=f[5], deadline=deadline)
+        with self.assertRaisesRegex(ScopedModelBrokerError, "SCOPED_MODEL_DEADLINE_EXPIRED"):
+            f[0](MESSAGES)
+        self.assertEqual(len(f[1].calls), 1)
+
+    def test_15_remaining_policy_requires_deadline_and_reused_deadline_is_rejected(self):
+        f = self.engine([response()], deadline_timeout_policy="remaining")
+        with self.assertRaisesRegex(ScopedModelBrokerError, "SCOPED_MODEL_DEADLINE_REQUIRED"):
+            self.begin(f)
+        deadline_clock = Clock()
+        self.serial += 1
+        request = f"{self.serial + 1000:032x}"
+        permit = f"{self.serial:032x}"
+        deadline = ScopedOSDeadline(scope_id=request, duration_seconds=5, monotonic_clock=deadline_clock.time)
+        f[0].begin_request(permit_id=permit, request_id=request, actual_input_hash=model_input_hash(MESSAGES),
+            before_attempt=f[5], deadline=deadline)
+        f[0](MESSAGES)
+        self.serial += 1
+        with self.assertRaisesRegex(ScopedModelBrokerError, "SCOPED_MODEL_DEADLINE_SCOPE_MISMATCH"):
+            f[0].begin_request(permit_id=f"{self.serial:032x}", request_id=f"{self.serial + 1000:032x}",
+                actual_input_hash=model_input_hash(MESSAGES), before_attempt=f[5], deadline=deadline)
 
 
 if __name__ == "__main__":

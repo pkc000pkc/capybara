@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "gaia2-phase5-2c2-3b-deadline-broker-runner-verification-v1",
+  "status": "passed_with_unrelated_baseline_failure",
+  "stage": "5.2c2.3b",
+  "route": "A",
+  "scope": "trusted_deadline_broker_and_opt_in_app_agent_runner",
+  "targetedTests": {
+    "phase5ScopedModelBroker": 15,
+    "phase5ScopedAppAgent": 58,
+    "deadlineAndNotificationPrimitive": 9,
+    "phase5RegressionWithoutPhase3": 214,
+    "phase3RegressionExcludingKnownBaselineTest": 38
+  },
+  "fullProjectPythonTests": {
+    "passed": 251,
+    "attempted": 252,
+    "knownFailure": "test.phase3_live_bridge_test.Tests.test_12_reply_does_not_end_scenario_without_turn_limit"
+  },
+  "commands": {
+    "targeted": "configured-python -m unittest test.phase5_a2a_runtime_test test.phase5_a2a_wire_test test.phase5_deadline_notifications_test test.phase5_generation_runner_test test.phase5_generation_time_ledger_test test.phase5_generation_time_test test.phase5_native_clock_test test.phase5_private_native_binding_test test.phase5_scoped_app_agent_test test.phase5_scoped_model_broker_test -q",
+    "phase3ExcludingKnownFailure": "configured-python one-off unittest suite for phase3_live_bridge_test.Tests excluding test_12_reply_does_not_end_scenario_without_turn_limit",
+    "full": "configured-python -m unittest discover -s test -p '*.py' -v"
+  },
+  "sourceRefs": [
+    {
+      "path": "scripts/gaia2_deadline_notifications.py",
+      "sha256": "703791e7c967a0ff18a5afedfcd593c9b36768745f2904f3e7f4eab1db1b6564"
+    },
+    {
+      "path": "scripts/gaia2_scoped_model_broker.py",
+      "sha256": "0cb0c9e30ba6af8d43bc904eeacb035bdf08fc6b9361065a90439b11e0a82fcf"
+    },
+    {
+      "path": "scripts/gaia2_scoped_app_agent.py",
+      "sha256": "c7c41e05c147eeab65f92b1d17683fdb5de0566758bc1023ce17ac0699f83596"
+    },
+    {
+      "path": "test/phase5_deadline_notifications_test.py",
+      "sha256": "9a401676cab788a1e726339a913fd992139c8cfd9c7dbb0c258ad1a72f3fb689"
+    },
+    {
+      "path": "test/phase5_scoped_model_broker_test.py",
+      "sha256": "ec1534d1a984119ea935c39c0b6c81ac8b8959c91436c91d9566c3073e9c2058"
+    },
+    {
+      "path": "test/phase5_scoped_app_agent_test.py",
+      "sha256": "f314deae83cf21c62221b420c9f5dbfc02e641c68dea8773a8dfc3e9ebd8d42a"
+    }
+  ],
+  "networkCalls": 0,
+  "realProviderCalls": 0,
+  "officialScenarioExecuted": false,
+  "officialAreModified": false,
+  "defaultRunnerBehaviorChanged": false,
+  "contracts": {
+    "defaultFixedTimeoutPolicyPreserved": true,
+    "remainingTimeoutIsPerSdkCallAndDoesNotChangeConfigHash": true,
+    "deadlineScopeBindsToRunnerRequestId": true,
+    "deadlineAdmissionAttemptAndCooldownChecks": true,
+    "deadlineSdkReturnCheck": true,
+    "deadlineModelFinishChecks": true,
+    "expiredDeadlineDoesNotDispatchSdk": true,
+    "expiredDeadlineDoesNotDeliverParserResult": true,
+    "deadlineMethodsAndDurationAreBound": true,
+    "freshDeadlinePerLogicalRequest": true
+  },
+  "knownBoundaries": [
+    "The runner deadline factory is a trusted parent callback with signature (request_id) -> ScopedOSDeadline; Actor input cannot provide or replace it.",
+    "Notification projection remains a parent-owned primitive; a real parent producer must authenticate Message origin and bind it to a child scope before ingest.",
+    "The full discover run retains one unrelated phase3_live_bridge test failure: its stopper thread can stop the environment before the first model callback (calls == 0); phase3 source is unchanged and the other 38 phase3 tests pass.",
+    "No official A2A/Noise Scenario, real provider call, upload, or benchmark score was produced in this controlled integration slice."
+  ]
+}
