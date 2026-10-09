@@ -34,7 +34,10 @@ function safePath(root, path, parent = root) {
 export function assertSupportedPlan(manifest) {
   const { manifestHash, ...contents } = manifest
   assert(manifestHash === digest(contents), 'manifest content hash differs')
-  assert(manifest.tasks?.length && manifest.tasks.every(task => task.phase === 'standard'), 'A2A/Noise execution is not connected until phase 5; entire run rejected before spawning')
+  const phasesSupported = manifest.mode === 'official_submission'
+    ? manifest.tasks?.length && manifest.tasks.every(task => ['standard', 'agent2agent', 'noise'].includes(task.phase))
+    : manifest.tasks?.length && manifest.tasks.every(task => task.phase === 'standard')
+  assert(phasesSupported, manifest.mode === 'official_submission' ? 'unsupported official task phase' : 'A2A/Noise execution requires the official submission profile; internal batches remain standard-only')
   assert(manifest.policy.maxCorrections === 0, 'initial batches cannot run corrections; use a separate phase 4 fresh replay plan')
   assert(new Set(manifest.tasks.map(task => task.executionId)).size === manifest.tasks.length, 'duplicate execution identity')
 }
@@ -166,14 +169,16 @@ async function delayUntil(deadline, signal) {
 }
 
 /** Manifest-driven sequential execution. A restart is a new disposable ARE environment, never a tool replay. */
-export async function runFrozenBatch({ root, manifest, settings, executeTask, signal, resume = false, retryInfrastructure = false, maxTasks = Infinity, onlyRunNumber = null } = {}) {
+export async function runFrozenBatch({ root, manifest, settings, executeTask, signal, resume = false, retryInfrastructure = false, maxTasks = Infinity, onlyRunNumber = null, onlyPhase = null } = {}) {
   root = resolve(root)
   assertPublicConfig(settings)
   assertSupportedPlan(manifest)
   assert(settings.concurrency === 1 && settings.minimal === false, 'frozen original tasks require concurrency 1 and minimal=false')
   assert(maxTasks === Infinity || Number.isInteger(maxTasks) && maxTasks > 0, 'maxTasks must be a positive integer')
   assert(onlyRunNumber === null || Number.isInteger(onlyRunNumber) && onlyRunNumber >= 1 && onlyRunNumber <= 5 && manifest.tasks.some(task => task.runNumber === onlyRunNumber), 'onlyRunNumber must be a planned integer run number in 1..5')
-  const selectedTaskIds = new Set(manifest.tasks.filter(task => onlyRunNumber === null || task.runNumber === onlyRunNumber).map(task => task.executionId))
+  assert(onlyPhase === null || ['standard', 'agent2agent', 'noise'].includes(onlyPhase), 'onlyPhase must be standard, agent2agent, or noise')
+  const selectedTaskIds = new Set(manifest.tasks.filter(task => (onlyRunNumber === null || task.runNumber === onlyRunNumber) && (onlyPhase === null || task.phase === onlyPhase)).map(task => task.executionId))
+  assert(selectedTaskIds.size > 0, 'selection does not match any planned task')
   const runRoot = safePath(root, manifest.runRoot, join(root, 'runs'))
   mkdirSync(runRoot, { recursive: true })
   const statePath = safePath(root, manifest.stateFile, runRoot)
@@ -269,7 +274,7 @@ export async function runFrozenBatch({ root, manifest, settings, executeTask, si
     const results = state.tasks.filter(task => task.status === 'completed').map((record, index) => readJson(resolve(root, record.resultPath)))
     const selectedCompleted = state.tasks.filter(record => selectedTaskIds.has(record.executionId) && record.status === 'completed').length
     const selectedResults = results.filter(result => selectedTaskIds.has(result.executionId))
-    const report = { schemaVersion: 'gaia2-batch-progress-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash, status: batchHeartbeatError ? 'infrastructure_error' : counts.completed === manifest.tasks.length ? 'evaluation_complete' : signal?.aborted ? 'interrupted' : 'incomplete', counts, plannedInitialExecutions: manifest.tasks.length, evaluatedInitialExecutions: results.length, onlyRunNumber, selectedExecutions: selectedTaskIds.size, selectedCompleted, selectedEvaluationComplete: !batchHeartbeatError && selectedCompleted === selectedTaskIds.size, selectedRealHooksReady: !batchHeartbeatError && selectedCompleted === selectedTaskIds.size && selectedResults.every(result => result.realHooksReady === true), businessSuccesses: results.filter(result => result.businessPassed).length, businessFailures: results.filter(result => !result.businessPassed).length, totalSessions: state.tasks.reduce((sum, task) => sum + task.sessions.length, 0), executedThisInvocation: executed, batchHeartbeatError, officialSubmissionReady: false, realHooksReady: !batchHeartbeatError && results.length === manifest.tasks.length && results.every(result => result.realHooksReady === true), runtimeAttestedExecutions: results.filter(result => result.runtimeAttestation).length, generatedAt: new Date().toISOString() }
+    const report = { schemaVersion: 'gaia2-batch-progress-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash, status: batchHeartbeatError ? 'infrastructure_error' : counts.completed === manifest.tasks.length ? 'evaluation_complete' : signal?.aborted ? 'interrupted' : 'incomplete', counts, plannedInitialExecutions: manifest.tasks.length, evaluatedInitialExecutions: results.length, onlyRunNumber, onlyPhase, selectedExecutions: selectedTaskIds.size, selectedCompleted, selectedEvaluationComplete: !batchHeartbeatError && selectedCompleted === selectedTaskIds.size, selectedRealHooksReady: !batchHeartbeatError && selectedCompleted === selectedTaskIds.size && selectedResults.every(result => result.realHooksReady === true), businessSuccesses: results.filter(result => result.businessPassed).length, businessFailures: results.filter(result => !result.businessPassed).length, totalSessions: state.tasks.reduce((sum, task) => sum + task.sessions.length, 0), executedThisInvocation: executed, batchHeartbeatError, officialSubmissionReady: false, realHooksReady: !batchHeartbeatError && results.length === manifest.tasks.length && results.every(result => result.realHooksReady === true), runtimeAttestedExecutions: results.filter(result => result.runtimeAttestation).length, generatedAt: new Date().toISOString() }
     terminalStatus = report.status; finishedAt = report.generatedAt; terminalReportPath = portable(relative(root, join(runRoot, 'batch-report.json')))
     heartbeat()
     if (batchHeartbeatError) { report.status = 'infrastructure_error'; report.batchHeartbeatError = true; terminalStatus = report.status }

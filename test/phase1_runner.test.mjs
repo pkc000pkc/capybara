@@ -13,8 +13,8 @@ import { spawn } from 'node:child_process'
 const settings = { processTimeoutMs: 480000000, scenarioTimeoutSeconds: 480000, modelRequestTimeoutSeconds: 60, concurrency: 1, minimal: false, maxActions: 24, heartbeatIntervalMs: 1000, modelRetry: resolveModelRetrySettings({}) }
 function project() { return mkdtempSync(join(tmpdir(), 'capybara-phase1-runner-')) }
 function clean(root) { assert.ok(root.startsWith(tmpdir()) && root.includes('capybara-phase1-runner-')); rmSync(root, { recursive: true, force: true }) }
-function plan(phases = ['standard', 'standard']) {
-  const manifest = { runId: 'controlled', runRoot: 'runs/controlled', stateFile: 'runs/controlled/run-state.json', policy: { maxCorrections: 0 }, tasks: phases.map((phase, index) => ({ phase, config: 'execution', scenarioId: `scenario-${index}`, scenarioVersion: 'are_simulation_v1', runNumber: index + 1, attemptIndex: index + 1, executionId: `task-${index}`, outputDir: `runs/controlled/outputs/task-${index}`, fixtureDir: `runs/controlled/fixtures/task-${index}`, workspaceDir: `runs/controlled/workspaces/task-${index}` })) }
+function plan(phases = ['standard', 'standard'], mode = 'internal_pass5') {
+  const manifest = { runId: 'controlled', runRoot: 'runs/controlled', stateFile: 'runs/controlled/run-state.json', mode, policy: { maxCorrections: 0 }, tasks: phases.map((phase, index) => ({ phase, config: phase === 'standard' ? 'execution' : 'mini', scenarioId: `scenario-${index}`, scenarioVersion: 'are_simulation_v1', runNumber: index + 1, attemptIndex: mode === 'official_submission' ? null : index + 1, executionId: `task-${index}`, outputDir: `runs/controlled/outputs/task-${index}`, fixtureDir: `runs/controlled/fixtures/task-${index}`, workspaceDir: `runs/controlled/workspaces/task-${index}` })) }
   return { ...manifest, manifestHash: digest(manifest) }
 }
 function good({ task }, passed = true) { return { processResult: { exitCode: 0 }, report: { scenarioId: task.scenarioId, runNumber: task.runNumber, evaluationComplete: true, businessPassed: passed, hasException: false }, events: [], artifacts: [] } }
@@ -25,6 +25,18 @@ test('official transport maps ARE local provider labels to explicit OpenAI LiteL
   assert.equal(resolveTransportProvider(null), 'openai')
   assert.equal(resolveTransportProvider(undefined), 'openai')
   assert.equal(resolveTransportProvider('azure'), 'azure')
+})
+
+test('official runner can select one enhanced phase without executing other planned phases', async () => {
+  const root = project(), manifest = plan(['standard', 'noise', 'agent2agent'], 'official_submission'), calls = []
+  try {
+    const report = await runFrozenBatch(options(root, { manifest, onlyPhase: 'noise', executeTask: args => { calls.push(args.task.phase); return good(args) } }))
+    assert.equal(report.selectedExecutions, 1)
+    assert.equal(report.selectedCompleted, 1)
+    assert.equal(report.selectedEvaluationComplete, true)
+    assert.deepEqual(calls, ['noise'])
+    assert.equal(report.counts.pending, 2)
+  } finally { clean(root) }
 })
 
 test('phase1 completed tasks including judged business failures are never rerun', async () => {
@@ -211,7 +223,7 @@ test('phase1 recovers verified dead owner and dead orphan into a new session', a
 test('phase1 preserves exhausted infrastructure failures and rejects enhancements before spawning', async () => {
   const root = project(); let calls = 0
   try {
-    await assert.rejects(runFrozenBatch(options(root, { manifest: plan(['standard', 'noise']), executeTask: () => { calls++; return {} } })), /entire run rejected/)
+    await assert.rejects(runFrozenBatch(options(root, { manifest: plan(['standard', 'noise']), executeTask: () => { calls++; return {} } })), /standard-only/)
     assert.equal(calls, 0)
     const executeTask = async () => { calls++; return { processResult: { exitCode: 0 }, report: { hasException: true, score: 0, status: 'failed' }, events: [{ type: 'model_request_failed', requestId: 'a', category: 'rate_limit', retryable: true, retryExhausted: true, httpStatus: 429 }] } }
     const first = await runFrozenBatch(options(root, { executeTask }))

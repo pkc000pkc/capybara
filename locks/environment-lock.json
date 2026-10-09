@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-environment-lock-v1",
-  "generatedAt": "2026-10-09T19:29:02.758Z",
+  "generatedAt": "2026-10-09T19:56:02.264Z",
   "timeSource": "client-system-clock-new-Date-ISO-not-authoritative-dataset-time",
   "noModelExecution": true,
   "secretConfigRead": false,
@@ -2101,8 +2101,8 @@
     },
     {
       "path": "src/phase0_audit.mjs",
-      "sha256": "5d817c93fec6253244129da1723337e7f211174e2b7ce9ac7abd8f7a181d4110",
-      "bytes": 15001
+      "sha256": "ac2dc828de706e7cfea3d705875acd10fc5a97a43ce73aa0ffb1ef5a5548023d",
+      "bytes": 15056
     },
     {
       "path": "src/phase0_dataset.mjs",
@@ -2121,8 +2121,8 @@
     },
     {
       "path": "src/phase1_cli.mjs",
-      "sha256": "d0fd5f955ff4f06f131d43643de497362ba251c50eff901aa97aace3e27a4aef",
-      "bytes": 3858
+      "sha256": "0e69a7420c72de8294536ecb024372a02312b016c9e8b357115e35679de631d0",
+      "bytes": 4340
     },
     {
       "path": "src/phase1_config.mjs",
@@ -2146,8 +2146,8 @@
     },
     {
       "path": "src/phase1_official.mjs",
-      "sha256": "00f853dd5501f05d110eb3a96732223bd068c99db1b1f2743997a3f60ab46281",
-      "bytes": 13529
+      "sha256": "fea9b5542095896099bc3a64b5f03692c4f227a074ee5901a255ee59894ece4b",
+      "bytes": 14336
     },
     {
       "path": "src/phase1_process.mjs",
@@ -2156,8 +2156,8 @@
     },
     {
       "path": "src/phase1_runner.mjs",
-      "sha256": "26f5ef15c3c7838a8495f02ae0adb87638e17e8c44db1211ac101ac745b3c12e",
-      "bytes": 23915
+      "sha256": "399bcf44ad472719811b53e5e90381bbc935d9dcd76944b93e2ab7b4d8f07a23",
+      "bytes": 24518
     },
     {
       "path": "src/phase2_audit.mjs",
@@ -2356,8 +2356,8 @@
     },
     {
       "path": "test/phase1_runner.test.mjs",
-      "sha256": "ae2902092ccb36aec7d6738729ce1a945b6ef00763a0c1bd7e500e0e74b921bb",
-      "bytes": 19678
+      "sha256": "b7d66158d30beb6e086b6c71eec837094fe9f889554c30a1f18dd57bf4efae5f",
+      "bytes": 20803
     },
     {
       "path": "test/phase2_audit.test.mjs",
@@ -2605,7 +2605,7 @@
       "bytes": 1443
     }
   ],
-  "contentTreeSha256": "35d424ae6181d6d2695f84f95af868255b1550e7d08a86bc1c991e1ef00773d5",
+  "contentTreeSha256": "ef598a4869cab07a88715551dd5c72f1bbc97d9bf679843e61ee4e4698a8df76",
   "officialCodeInputs": [
     {
       "path": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.official-python/are/__init__.py",
@@ -5455,11 +5455,11 @@
     "project": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "d21fca5294d8096bd6c155867e9ed97f64c51067",
-      "gitHead": "d21fca5294d8096bd6c155867e9ed97f64c51067",
+      "head": "efc84c94ef2d13f942199704839099a5e40a6d4f",
+      "gitHead": "efc84c94ef2d13f942199704839099a5e40a6d4f",
       "dirty": true,
-      "statusSha256": "89aab7286f4056897df20e31608a7ff0024b5cc048e76464d8e2b2a010cae923",
-      "dirtyEntryCount": 19
+      "statusSha256": "cfdb72b0b0de54677efa4065feeb6a055394c35dbc91d7b4f91ab7dbc97022f1",
+      "dirtyEntryCount": 23
     },
     "backend": {
       "status": "captured",
@@ -5473,11 +5473,11 @@
     "pluginSource": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "d21fca5294d8096bd6c155867e9ed97f64c51067",
-      "gitHead": "d21fca5294d8096bd6c155867e9ed97f64c51067",
+      "head": "efc84c94ef2d13f942199704839099a5e40a6d4f",
+      "gitHead": "efc84c94ef2d13f942199704839099a5e40a6d4f",
       "dirty": true,
-      "statusSha256": "89aab7286f4056897df20e31608a7ff0024b5cc048e76464d8e2b2a010cae923",
-      "dirtyEntryCount": 19
+      "statusSha256": "cfdb72b0b0de54677efa4065feeb6a055394c35dbc91d7b4f91ab7dbc97022f1",
+      "dirtyEntryCount": 23
     }
   },
   "hashingPolicy": {

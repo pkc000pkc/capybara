@@ -96,7 +96,10 @@ export function readNativeResult({ root, outputDir, task, session, events = [] }
 }
 
 export async function executeOfficialTask({ root, manifest, task, session, settings, signal }) {
-  assert(task.phase === 'standard' && settings.minimal === false, 'only untouched standard tasks are currently supported')
+  assert(['standard', 'agent2agent', 'noise'].includes(task.phase) && settings.minimal === false, 'unsupported official task phase')
+  if (task.phase !== 'standard') {
+    assert(manifest.mode === 'official_submission' && task.config === 'mini', 'enhanced phases require the official mini profile')
+  }
   if ((task.correctionOrdinal ?? 0) === 0) assertInitialHasNoCorrection(task)
   else assert(task.correctionOrdinal === 1 && manifest.mode === 'correction_replay' && task.correctionContext, 'correction requires a separate fresh replay plan')
   assert(!process.env.GAIA2_E2E_TOOL_ALLOWLIST, 'smoke tool allowlist cannot be inherited by original tasks')
@@ -132,7 +135,10 @@ export async function executeOfficialTask({ root, manifest, task, session, setti
   // endpoint.  LiteLLM's provider selector is separate; pass its explicit
   // transport name at the process boundary while preserving the frozen
   // manifest's model/provider identity for evidence and export.
-  const args = ['-c', runnerCode, 'run', '--dataset', datasetRoot, '--config', task.config, '--agent', 'default', '--model', manifest.models.actor.model, '--provider', resolveTransportProvider(manifest.models.actor.provider), '--endpoint', connection.baseUrl, '--judge_model', manifest.models.judge.model, '--judge_provider', resolveTransportProvider(manifest.models.judge.provider), '--judge_endpoint', connection.baseUrl, '--limit', '1', '--num_runs', '1', '--max_concurrent_scenarios', '1', '--scenario_timeout', String(settings.scenarioTimeoutSeconds), '--output_dir', output, '--trace_dump_format', 'both', '--log-level', 'INFO']
+  const augmentationArgs = task.phase === 'agent2agent'
+    ? ['--a2a_app_prop', '1.0', '--a2a_app_agent', 'default_app_agent', '--a2a_model', manifest.models.actor.model, '--a2a_model_provider', resolveTransportProvider(manifest.models.actor.provider), '--a2a_endpoint', connection.baseUrl]
+    : task.phase === 'noise' ? ['--noise'] : []
+  const args = ['-c', runnerCode, 'run', '--dataset', datasetRoot, '--config', task.config, '--agent', 'default', '--model', manifest.models.actor.model, '--provider', resolveTransportProvider(manifest.models.actor.provider), '--endpoint', connection.baseUrl, '--judge_model', manifest.models.judge.model, '--judge_provider', resolveTransportProvider(manifest.models.judge.provider), '--judge_endpoint', connection.baseUrl, '--limit', '1', '--num_runs', '1', '--max_concurrent_scenarios', '1', '--scenario_timeout', String(settings.scenarioTimeoutSeconds), '--output_dir', output, '--trace_dump_format', 'both', '--log-level', 'INFO', ...augmentationArgs]
   const hookService = await startRuntimeHookService({ root, manifest, task, session, settings, signal, entry })
   const authority = hookService.correctionAuthority
   const childEnv = { ...process.env, ...modelRuntimeEnvironment(settings), PYTHONPATH: resolve(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', OPENAI_API_KEY: connection.apiKey, GAIA2_E2E_MINIMAL: '0', GAIA2_E2E_MAX_ACTIONS: String(settings.maxActions), GAIA2_E2E_TOOL_ALLOWLIST: '', GAIA2_E2E_ATTEMPT_INDEX: String(task.attemptIndex ?? task.runNumber), GAIA2_E2E_CORRECTION_ORDINAL: String(task.correctionOrdinal ?? 0), GAIA2_CORRECTION_STRATEGY_TEXT: authority?.initializer.value ?? '', GAIA2_CORRECTION_STRATEGY_HASH: authority?.context.strategyHash ?? '', GAIA2_CORRECTION_CONTEXT_HASH: authority ? digest(authority.context) : '', GAIA2_EXECUTION_ID: task.executionId, GAIA2_SESSION_ID: session.sessionId, GAIA2_RUNTIME_EVENT_FILE: eventPath, GAIA2_HOOK_URL: hookService.endpoint, GAIA2_HOOK_TOKEN: hookService.token, GAIA2_OFFICIAL_ENTRY_REQUIRED: '1', GAIA2_OFFICIAL_ENTRY_PATH: entry.path, GAIA2_OFFICIAL_ENTRY_SHA256: entry.sha256, TMP: workspace, TEMP: workspace, TMPDIR: workspace }
