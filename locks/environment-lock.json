@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-environment-lock-v1",
-  "generatedAt": "2026-10-09T21:41:49.190Z",
+  "generatedAt": "2026-10-09T21:52:18.308Z",
   "timeSource": "client-system-clock-new-Date-ISO-not-authoritative-dataset-time",
   "noModelExecution": true,
   "secretConfigRead": false,
@@ -1876,8 +1876,8 @@
     },
     {
       "path": "scripts/gaia2_scoped_app_agent.py",
-      "sha256": "fab90e5768162e97cc640ecf20ca1ceec618db9135c239e2e6b214dc8fc4d668",
-      "bytes": 77948
+      "sha256": "9f30439339cabd25d422227ebe264f8f0905269f7f7ce97c0a0d98ba9cc3e1e2",
+      "bytes": 77992
     },
     {
       "path": "scripts/gaia2_scoped_model_broker.py",
@@ -2610,7 +2610,7 @@
       "bytes": 1443
     }
   ],
-  "contentTreeSha256": "9c46c952aa8adf9710128b5851ba72af83cbe2f17e2a01b1c5180b69aa60710b",
+  "contentTreeSha256": "83e61b2b1cdfa6f821129e6dffd2bae21eedb880c952d5eddcc9407248221b00",
   "officialCodeInputs": [
     {
       "path": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.official-python/are/__init__.py",
@@ -5470,11 +5470,11 @@
     "project": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "4c4ea612363a32a59a26097899f52475bb099915",
-      "gitHead": "4c4ea612363a32a59a26097899f52475bb099915",
+      "head": "09f452b6a47b855c95cc22900684a151827fb4f6",
+      "gitHead": "09f452b6a47b855c95cc22900684a151827fb4f6",
       "dirty": true,
-      "statusSha256": "f33c596e895d656ffba3f6218ce880fc42495bef29a64dd8b1b4dccf3a12dfd0",
-      "dirtyEntryCount": 21
+      "statusSha256": "48228f81d8eb70d9c1655d89750be652fca0999f34280615f6be1b4aa0215764",
+      "dirtyEntryCount": 16
     },
     "backend": {
       "status": "captured",
@@ -5488,11 +5488,11 @@
     "pluginSource": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "4c4ea612363a32a59a26097899f52475bb099915",
-      "gitHead": "4c4ea612363a32a59a26097899f52475bb099915",
+      "head": "09f452b6a47b855c95cc22900684a151827fb4f6",
+      "gitHead": "09f452b6a47b855c95cc22900684a151827fb4f6",
       "dirty": true,
-      "statusSha256": "f33c596e895d656ffba3f6218ce880fc42495bef29a64dd8b1b4dccf3a12dfd0",
-      "dirtyEntryCount": 21
+      "statusSha256": "48228f81d8eb70d9c1655d89750be652fca0999f34280615f6be1b4aa0215764",
+      "dirtyEntryCount": 16
     }
   },
   "hashingPolicy": {
