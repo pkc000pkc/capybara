@@ -15,7 +15,10 @@ from are.simulation.environment import Environment, EnvironmentConfig
 from are.simulation.notification_system import Message, MessageType
 from are.simulation.types import EnvironmentState
 from gaia2_deadline_notifications import ScopedArrivedNotificationProjection
-from gaia2_notification_producer import ScopedNotificationOriginRegistry
+from gaia2_notification_producer import (
+    NotificationReaderError,
+    ScopedNotificationOriginRegistry,
+)
 from gaia2_runtime_hooks import HookProtocolError
 
 
@@ -50,6 +53,9 @@ class BridgeNotificationTests(unittest.TestCase):
     def test_opt_in_path_assigns_scoped_occurrences_and_sequences(self):
         env = self.environment()
         binding, registry = self.binding()
+        reader = registry.open_reader(origin_id="origin-1", scope_id="request-1",
+                                      child_execution_id="child-1", app_id="Contacts",
+                                      time_manager=env.time_manager)
         env.notification_system.message_queue.put(message(MessageType.USER_MESSAGE, "same", 1000))
         env.notification_system.message_queue.put(message(MessageType.USER_MESSAGE, "same", 1000))
         messages = []
@@ -60,6 +66,9 @@ class BridgeNotificationTests(unittest.TestCase):
                          ["run-occurrence:1", "run-occurrence:2"])
         self.assertEqual(binding.next_sequence, 3)
         self.assertEqual(registry.snapshot()["bindings"][0]["occurrenceCount"], 2)
+        self.assertEqual([item.notification_id for item in reader.poll()],
+                         ["run-occurrence:1", "run-occurrence:2"])
+        self.assertEqual(reader.poll(), ())
         with self.assertRaises(AttributeError):
             binding.origin_id = "foreign-origin"
 
@@ -80,6 +89,9 @@ class BridgeNotificationTests(unittest.TestCase):
     def test_stop_flushes_arrived_normal_records_then_revokes_origin(self):
         env = self.environment()
         binding, registry = self.binding()
+        reader = registry.open_reader(origin_id="origin-1", scope_id="request-1",
+                                      child_execution_id="child-1", app_id="Contacts",
+                                      time_manager=env.time_manager)
         env.notification_system.message_queue.put(message(MessageType.USER_MESSAGE, "before stop", 1000))
         env.notification_system.message_queue.put(message(MessageType.ENVIRONMENT_STOP, "stop", 1001))
         messages = []
@@ -93,6 +105,8 @@ class BridgeNotificationTests(unittest.TestCase):
         env.time_manager.add_offset(1)
         with self.assertRaisesRegex(HookProtocolError, "notification_producer_origin_revoked"):
             bridge._drain_notifications(env, messages, revision, binding=binding)
+        with self.assertRaisesRegex(NotificationReaderError, "NOTIFICATION_READER_ORIGIN_REVOKED"):
+            reader.poll()
 
     def test_factory_is_trusted_once_and_never_actor_selected(self):
         binding, _ = self.binding()

@@ -30,10 +30,22 @@ import gaia2_a2a_wire as wire
 from gaia2_private_native_binding import NativeAppBinding
 from are.simulation.agents.agent_builder import AppAgentBuilder
 from are.simulation.agents.agent_config_builder import AppAgentConfigBuilder
-from are.simulation.agents.agent_log import ErrorLog, FinalAnswerLog, ObservationLog, LLMInputLog
+from are.simulation.agents.agent_log import (
+    AgentUserInterfaceLog,
+    EnvironmentNotificationLog,
+    ErrorLog,
+    FinalAnswerLog,
+    ObservationLog,
+    LLMInputLog,
+)
 from are.simulation.agents.default_agent.agent_factory import are_simulation_react_json_app_agent
 from are.simulation.agents.default_agent.app_agent import AppAgent
-from are.simulation.agents.default_agent.base_agent import BaseAgent, RunningState, TerminationStep
+from are.simulation.agents.default_agent.base_agent import (
+    BaseAgent,
+    ConditionalStep,
+    RunningState,
+    TerminationStep,
+)
 from are.simulation.agents.default_agent.tools.json_action_executor import JsonActionExecutor
 from are.simulation.agents.llm.llm_engine import LLMEngine
 from are.simulation.agents.llm.llm_engine_builder import LLMEngineBuilder
@@ -41,10 +53,20 @@ from are.simulation.agents.llm.types import MessageRole
 from are.simulation.apps.app import App
 from are.simulation.environment import Environment
 from are.simulation.exceptions import FatalError
+from are.simulation.notification_system import MessageType
 from gaia2_generation_time import ScopedAREGenerationTimeOwner
 from gaia2_generation_time_ledger import ScopedGenerationTimeLedger
-from gaia2_deadline_notifications import DeadlineNotificationError, ScopedOSDeadline
+from gaia2_deadline_notifications import (
+    DeadlineNotificationError,
+    ProjectedNotification,
+    ScopedOSDeadline,
+    message_hash,
+)
 from gaia2_scoped_model_broker import ScopedModelBrokerError, ScopedRetryModelEngine
+from gaia2_notification_producer import (
+    NotificationReaderError,
+    ScopedChildNotificationReader,
+)
 
 _SCOPE_KEYS = frozenset(("parentExecutionId", "parentSessionId", "environmentGeneration",
     "appId", "parentCanonicalName", "taskArgumentKey", "toolInventoryHash", "taskHash",
@@ -225,7 +247,8 @@ class ScopedAppAgentRunner:
                  max_logical_requests: int | None = None, log_callback: Callable | None = None,
                  generation_time_owner_factory: Callable[[], ScopedAREGenerationTimeOwner] | None = None,
                  generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None,
-                 deadline_factory: Callable[[str], ScopedOSDeadline] | None = None):
+                 deadline_factory: Callable[[str], ScopedOSDeadline] | None = None,
+                 notification_reader: ScopedChildNotificationReader | None = None):
         if (not isinstance(app, App) or not isinstance(owner, NativeAppBinding)
                 or not isinstance(env, Environment) or not isinstance(llm_engine, LLMEngine)
                 or not callable(dispatch) or env.apps.get(app.name) is not app
@@ -251,6 +274,16 @@ class ScopedAppAgentRunner:
         self.__manifest_hash = wire.value_hash(manifest)
         self.__scope = _clone(scope)
         self.__scope_hash = wire.value_hash(scope)
+        if notification_reader is not None:
+            if type(notification_reader) is not ScopedChildNotificationReader:
+                _fatal("SCOPED_AGENT_NOTIFICATION_READER_INVALID")
+            if (notification_reader.scope_id != scope["requestId"]
+                    or notification_reader.child_execution_id != scope["childExecutionId"]
+                    or notification_reader.app_id != scope["appId"]
+                    or notification_reader.time_manager is not env.time_manager):
+                _fatal("SCOPED_AGENT_NOTIFICATION_READER_SCOPE_INVALID")
+        self.__notification_reader = notification_reader
+        self.__notification_delivery_receipts: list[dict] = []
         # This integration acquires its lease after the model gate, not at
         # BaseAgent's pre-gate simulation hook. Default behavior stays None.
         if (generation_time_owner_factory is None) != (generation_ledger_factory is None):
@@ -367,6 +400,10 @@ class ScopedAppAgentRunner:
         # due notifications and revoke an obsolete child. No future queue view.
         self.base_agent.notification_system = None
         self.base_agent.simulated_generation_time_config = None
+        if self.__notification_reader is not None:
+            self.base_agent.conditional_pre_steps.append(ConditionalStep(
+                condition=None, function=self.__notification_pre_step,
+                name="scoped_child_notification_reader"))
         # Keep actual official metadata Tools, but execution never falls through
         # to them. The owner invokes its retained original adapter exactly once.
         self.base_agent.tools = {name: tool for name, tool in self.base_agent.tools.items() if name in self.__tools}
@@ -394,6 +431,9 @@ class ScopedAppAgentRunner:
             self.__collect_sources(llm_engine.get_last_timing)
         if self.__deadline_factory is not None:
             self.__collect_sources(self.__deadline_factory, ScopedOSDeadline, DeadlineNotificationError)
+        if self.__notification_reader is not None:
+            self.__collect_sources(self.__notification_reader.poll,
+                self.__notification_reader.snapshot, ScopedChildNotificationReader)
         self.__instance_snapshot = self.__snapshot_instances()
 
     def __collect_sources(self, *objects: Any) -> None:
@@ -439,6 +479,16 @@ class ScopedAppAgentRunner:
             _callable_identity(self.__dispatch), _callable_identity(getattr(self.__dispatch, "__call__", None)),
             id(self.__owner), _callable_identity(self.__owner.manifest),
             _callable_identity(self.__owner.take_agent_observation),
+            id(self.__notification_reader),
+            _callable_identity(self.__notification_reader.poll) if self.__notification_reader is not None else (),
+            _callable_identity(self.__notification_reader.snapshot) if self.__notification_reader is not None else (),
+            _callable_identity(self.__notification_reader.identity_snapshot)
+            if self.__notification_reader is not None else (),
+            self.__notification_reader.identity_snapshot()
+            if self.__notification_reader is not None else (),
+            (id(self.__notification_reader.time_manager),
+             _callable_identity(self.__notification_reader.time_manager.time))
+            if self.__notification_reader is not None else (),
             _callable_identity(base.pause_env), _callable_identity(base.resume_env),
             _callable_identity(self.__model.chat_completion), _callable_identity(type(self.__model).__call__),
             tuple((id(step), _callable_identity(step.condition), _callable_identity(step.function))
@@ -859,6 +909,106 @@ class ScopedAppAgentRunner:
         state["finishedSnapshot"] = self.__generation_verify(state, "finished")
         state["finished"] = True
 
+    def __notification_failure(self, error: NotificationReaderError) -> None:
+        mapping = {
+            "NOTIFICATION_READER_CLOSED": "SCOPED_AGENT_NOTIFICATION_READER_CLOSED",
+            "NOTIFICATION_READER_ORIGIN_REVOKED": "SCOPED_AGENT_NOTIFICATION_READER_REVOKED",
+            "NOTIFICATION_READER_CLOCK_INVALID": "SCOPED_AGENT_NOTIFICATION_READER_CLOCK_INVALID",
+            "NOTIFICATION_READER_CLOCK_CHANGED": "SCOPED_AGENT_NOTIFICATION_READER_CLOCK_CHANGED",
+            "NOTIFICATION_READER_BINDING_INVALID": "SCOPED_AGENT_NOTIFICATION_READER_BINDING_INVALID",
+            "NOTIFICATION_READER_BINDING_CHANGED": "SCOPED_AGENT_NOTIFICATION_READER_BINDING_CHANGED",
+            "NOTIFICATION_READER_LIMIT_INVALID": "SCOPED_AGENT_NOTIFICATION_READER_LIMIT_INVALID",
+        }
+        self.__failed = True
+        self.__failure_code = mapping.get(error.code, "SCOPED_AGENT_NOTIFICATION_READER_FAILED")
+        _fatal(self.__failure_code)
+
+    def __poll_child_notifications(self) -> tuple[ProjectedNotification, ...]:
+        reader = self.__notification_reader
+        if reader is None:
+            return ()
+        try:
+            prior_sequence = reader.snapshot()["lastSequence"]
+        except BaseException:
+            self.__failed = True
+            self.__failure_code = "SCOPED_AGENT_NOTIFICATION_READER_PAYLOAD_INVALID"
+            _fatal(self.__failure_code)
+        try:
+            records = reader.poll()
+        except NotificationReaderError as error:
+            self.__notification_failure(error)
+        if type(records) is not tuple or any(type(item) is not ProjectedNotification for item in records):
+            self.__failed = True
+            self.__failure_code = "SCOPED_AGENT_NOTIFICATION_READER_PAYLOAD_INVALID"
+            _fatal(self.__failure_code)
+        for item in records:
+            message = item.message
+            if (item.scope_id != self.__scope["requestId"]
+                    or type(item.notification_id) is not str or not item.notification_id
+                    or type(item.sequence) is not int or item.sequence < 1
+                    or type(prior_sequence) is not int or item.sequence <= prior_sequence
+                    or type(item.arrived_at) not in (int, float) or not math.isfinite(item.arrived_at)
+                    or item.arrived_at < 0):
+                self.__failed = True
+                self.__failure_code = "SCOPED_AGENT_NOTIFICATION_READER_SCOPE_INVALID"
+                _fatal(self.__failure_code)
+            prior_sequence = item.sequence
+            try:
+                expected_hash = message_hash(message)
+            except BaseException:
+                self.__failed = True
+                self.__failure_code = "SCOPED_AGENT_NOTIFICATION_READER_PAYLOAD_INVALID"
+                _fatal(self.__failure_code)
+            if type(item.message_hash) is not str or item.message_hash != expected_hash:
+                self.__failed = True
+                self.__failure_code = "SCOPED_AGENT_NOTIFICATION_READER_PAYLOAD_INVALID"
+                _fatal(self.__failure_code)
+            if message.message_type not in (MessageType.USER_MESSAGE, MessageType.ENVIRONMENT_NOTIFICATION):
+                self.__failed = True
+                self.__failure_code = "SCOPED_AGENT_NOTIFICATION_TYPE_INVALID"
+                _fatal(self.__failure_code)
+            if message.attachments:
+                self.__failed = True
+                self.__failure_code = "SCOPED_AGENT_NOTIFICATION_ATTACHMENT_UNSUPPORTED"
+                _fatal(self.__failure_code)
+            self.__notification_delivery_receipts.append({
+                "scopeId": item.scope_id,
+                "notificationIdHash": hashlib.sha256(item.notification_id.encode("utf-8")).hexdigest(),
+                "sequence": item.sequence,
+                "arrivedAt": item.arrived_at,
+                "messageHash": item.message_hash,
+            })
+        if records:
+            user = [item.message.message for item in records
+                    if item.message.message_type is MessageType.USER_MESSAGE]
+            environment = [
+                f"[{item.message.timestamp.strftime('%Y-%m-%d %H:%M:%S')}] {item.message.message}"
+                for item in records if item.message.message_type is MessageType.ENVIRONMENT_NOTIFICATION
+            ]
+            timestamp = self.base_agent.make_timestamp()
+            if user:
+                self.base_agent.append_agent_log(AgentUserInterfaceLog(
+                    content="\n".join(user), timestamp=timestamp,
+                    agent_id=self.base_agent.agent_id))
+            if environment:
+                self.base_agent.append_agent_log(EnvironmentNotificationLog(
+                    content="\n".join(environment), timestamp=timestamp,
+                    agent_id=self.base_agent.agent_id))
+        return records
+
+    def __notification_pre_step(self, agent) -> None:
+        self.__check()
+        self.__poll_child_notifications()
+        self.__check()
+
+    def __notification_before_action(self) -> None:
+        if self.__notification_reader is None:
+            return
+        if self.__poll_child_notifications():
+            self.__failed = True
+            self.__failure_code = "SCOPED_AGENT_NOTIFICATION_STALE"
+            _fatal(self.__failure_code)
+
     def __model_call(self, messages, stop_sequences=(), **kwargs):
         try:
             self.__check()
@@ -991,6 +1141,7 @@ class ScopedAppAgentRunner:
 
     def __execute_tool_call(self, executor, parsed_action, append_agent_log, make_timestamp):
         self.__check()
+        self.__notification_before_action()
         if self.__failed or self.__completed:
             _fatal("SCOPED_AGENT_TERMINAL")
         name = parsed_action.tool_name
@@ -1047,7 +1198,9 @@ class ScopedAppAgentRunner:
             self.__check()
         except BaseException:
             self.__failed = True
-            self.__failure_code = "SCOPED_AGENT_ACTION_FAILED"
+            if not (isinstance(self.__failure_code, str)
+                    and self.__failure_code.startswith("SCOPED_AGENT_NOTIFICATION_")):
+                self.__failure_code = "SCOPED_AGENT_ACTION_FAILED"
             _fatal(self.__failure_code)
 
     def __termination_condition(self, agent):
@@ -1117,6 +1270,9 @@ class ScopedAppAgentRunner:
             "started": self.__started, "closed": self.__closed, "completed": self.__completed and not self.__failed,
             "failed": self.__failed, "failureCode": self.__failure_code,
             "completionEvidenceRef": self.__completion_ref, "actions": self.__actions,
+            "notificationReaderAttached": self.__notification_reader is not None,
+            "notificationDeliveryReceipts": self.__notification_delivery_receipts,
+            "notificationReader": None if self.__notification_reader is None else self.__notification_reader.snapshot(),
             "appClockShared": self.app_agent.time_manager is self.__env.time_manager,
             "agentClockShared": self.base_agent.time_manager is self.__env.time_manager,
             "notificationSystemAttached": self.base_agent.notification_system is not None,
@@ -1124,6 +1280,8 @@ class ScopedAppAgentRunner:
 
     def close(self) -> None:
         self.__closed = True
+        if self.__notification_reader is not None:
+            self.__notification_reader.close()
         self.base_agent.stop()
 
 
@@ -1135,9 +1293,11 @@ def build_scoped_app_agent(*, app: App, owner: NativeAppBinding, env: Environmen
                           log_callback: Callable | None = None,
                           generation_time_owner_factory: Callable[[], ScopedAREGenerationTimeOwner] | None = None,
                           generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None,
-                          deadline_factory: Callable[[str], ScopedOSDeadline] | None = None) -> ScopedAppAgentRunner:
+                          deadline_factory: Callable[[str], ScopedOSDeadline] | None = None,
+                          notification_reader: ScopedChildNotificationReader | None = None) -> ScopedAppAgentRunner:
     return ScopedAppAgentRunner(app=app, owner=owner, env=env, scope=scope,
         llm_engine=llm_engine, dispatch=dispatch, model_binding=model_binding, model_gate=model_gate,
         model_attempt=model_attempt, model_finish=model_finish, max_logical_requests=max_logical_requests,
         log_callback=log_callback, generation_time_owner_factory=generation_time_owner_factory,
-        generation_ledger_factory=generation_ledger_factory, deadline_factory=deadline_factory)
+        generation_ledger_factory=generation_ledger_factory, deadline_factory=deadline_factory,
+        notification_reader=notification_reader)

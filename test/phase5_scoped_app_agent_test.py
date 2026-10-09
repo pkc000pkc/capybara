@@ -24,9 +24,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / ".official-python"))
 
 import gaia2_a2a_wire as wire
-from gaia2_deadline_notifications import ScopedOSDeadline
+from gaia2_deadline_notifications import ScopedArrivedNotificationProjection, ScopedOSDeadline
 from gaia2_private_native_binding import NativeAppBinding, NativeBindingError
 from gaia2_scoped_app_agent import ControlledAppAgentEngine, ScopedAppAgentFatal, build_scoped_app_agent
+from gaia2_notification_producer import ScopedNotificationOriginRegistry
 from gaia2_scoped_model_broker import ScopedRetryModelEngine, scoped_model_config_hash
 from gaia2_model_retry import ModelRetryPolicy
 from gaia2_generation_time import ScopedAREGenerationTimeOwner
@@ -64,6 +65,7 @@ class TrustedFixtureDispatch:
         self.tools = {tool["publicName"]: tool for tool in owner.manifest()["tools"]}
         self.calls, self.prepared, self.outcomes = [], [], []
         self.before_block = False
+        self.before_dispatch = None
         self.after_block = False
         self.after_commit = None
         self.ack_transform = None
@@ -75,6 +77,8 @@ class TrustedFixtureDispatch:
         self.calls.append(copy.deepcopy(request))
         if self.before_block:
             raise RuntimeError("private before block")
+        if self.before_dispatch is not None:
+            self.before_dispatch()
         tool = self.tools[request["tool"]]
         prepared = self.owner.prepare_native({"scope": self.scope, "toolId": tool["toolId"],
             "rawArguments": request["arguments"]})
@@ -273,7 +277,8 @@ class Tests(unittest.TestCase):
         self.addCleanup(lambda: [owner.close() for owner in self.owners])
         self.addCleanup(lambda: [runner.close() for runner in self.runners])
 
-    def fixture(self, app=None, responses=None, budget=10, function_dispatch=False, log_callback=None):
+    def fixture(self, app=None, responses=None, budget=10, function_dispatch=False, log_callback=None,
+                notification_reader=None, notification_reader_factory=None):
         contact = Contact("Local", "User", contact_id="contact-1", is_user=True)
         app = app or Contacts(contacts={contact.contact_id: contact})
         env = Environment(EnvironmentConfig(start_time=1000, duration=None, verbose=False))
@@ -296,10 +301,13 @@ class Tests(unittest.TestCase):
             "task": task, "deadline": 1, "maxNativeActions": budget}
         dispatcher = TrustedFixtureDispatch(owner, scope, root)
         engine = ControlledAppAgentEngine(responses or [action("final_answer", {"answer": "completed"})])
+        if notification_reader_factory is not None:
+            notification_reader = notification_reader_factory(env, scope)
         def trusted_closure(request):
             return dispatcher(request)
         runner = build_scoped_app_agent(app=app, owner=owner, env=env, scope=scope, llm_engine=engine,
-            dispatch=trusted_closure if function_dispatch else dispatcher)
+            dispatch=trusted_closure if function_dispatch else dispatcher,
+            notification_reader=notification_reader, log_callback=log_callback)
         self.runners.append(runner)
         return runner, owner, app, env, scope, engine, dispatcher
 
@@ -601,7 +609,120 @@ class Tests(unittest.TestCase):
         self.assertNotIn("hidden future", json.dumps(engine.received_messages))
         self.assertTrue(all(now <= log.timestamp <= env.time_manager.time() for log in runner.base_agent.logs))
 
-    def test_18_run_reuse_no_reset_start_logs_or_scope_input(self):
+    def test_18_scoped_reader_projects_into_child_history_without_parent_queue(self):
+        registry = ScopedNotificationOriginRegistry()
+
+        def reader_factory(env, scope):
+            projection = ScopedArrivedNotificationProjection(scope_id=scope["requestId"])
+            registry.bind_origin(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                 child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                 projection=projection)
+            return registry.open_reader(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                        child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                        time_manager=env.time_manager)
+
+        runner, _, _, env, scope, engine, dispatch = self.fixture(
+            responses=[action("final_answer", {"answer": "reader completed"})],
+            notification_reader_factory=reader_factory)
+        now = env.time_manager.time()
+        registry.publish(origin_id=scope["childExecutionId"], occurrence_id="child-occurrence-1",
+                         sequence=1, arrived_at=now,
+                         message=Message(MessageType.USER_MESSAGE, "child scoped update",
+                                         datetime.fromtimestamp(now, timezone.utc)))
+        parent_queue = tuple(env.notification_system.message_queue.list_view())
+        self.assertEqual(runner.run(), "reader completed")
+        self.assertTrue(runner.snapshot()["notificationReaderAttached"])
+        self.assertFalse(runner.snapshot()["notificationSystemAttached"])
+        self.assertEqual(runner.snapshot()["notificationReader"]["lastSequence"], 1)
+        self.assertEqual(len(runner.snapshot()["notificationDeliveryReceipts"]), 1)
+        self.assertIn("child scoped update", json.dumps(engine.received_messages, ensure_ascii=False))
+        self.assertEqual(tuple(env.notification_system.message_queue.list_view()), parent_queue)
+        self.assertEqual(len(dispatch.calls), 1)
+
+    def test_19_scoped_reader_blocks_native_action_when_notification_is_pending_at_action_gate(self):
+        registry = ScopedNotificationOriginRegistry()
+
+        def reader_factory(env, scope):
+            projection = ScopedArrivedNotificationProjection(scope_id=scope["requestId"])
+            registry.bind_origin(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                 child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                 projection=projection)
+            return registry.open_reader(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                        child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                        time_manager=env.time_manager)
+
+        runner, _, _, env, scope, engine, dispatch = self.fixture(
+            responses=[action("Contacts__get_current_user_details", {})],
+            notification_reader_factory=reader_factory)
+        now = env.time_manager.time()
+        registry.publish(origin_id=scope["childExecutionId"], occurrence_id="late-action-notification",
+                         sequence=1, arrived_at=now,
+                         message=Message(MessageType.USER_MESSAGE, "late child update",
+                                         datetime.fromtimestamp(now, timezone.utc)))
+        with self.assertRaisesRegex(ScopedAppAgentFatal, "SCOPED_AGENT_NOTIFICATION_STALE"):
+            runner._ScopedAppAgentRunner__notification_before_action()
+        self.assertEqual(runner.snapshot()["failureCode"], "SCOPED_AGENT_NOTIFICATION_STALE")
+        self.assertEqual(len(dispatch.calls), 0)
+        self.assertEqual(len(env.event_log), 0)
+        self.assertEqual(engine.calls, 0)
+
+    def test_19b_scoped_reader_stops_actual_loop_when_notification_arrives_after_model(self):
+        registry = ScopedNotificationOriginRegistry()
+        state = {"reader": None, "scope": None, "published": False}
+
+        def reader_factory(env, scope):
+            projection = ScopedArrivedNotificationProjection(scope_id=scope["requestId"])
+            registry.bind_origin(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                 child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                 projection=projection)
+            reader = registry.open_reader(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                          child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                          time_manager=env.time_manager)
+            state["reader"], state["scope"] = reader, scope
+            return reader
+
+        def publish_after_model(log):
+            if isinstance(log, LLMOutputThoughtActionLog) and not state["published"]:
+                state["published"] = True
+                now = state["reader"].time_manager.time()
+                registry.publish(origin_id=state["scope"]["childExecutionId"],
+                                 occurrence_id="loop-late-notification", sequence=1, arrived_at=now,
+                                 message=Message(MessageType.USER_MESSAGE, "loop late child update",
+                                                 datetime.fromtimestamp(now, timezone.utc)))
+
+        runner, _, _, _, _, engine, dispatch = self.fixture(
+            responses=[action("Contacts__get_current_user_details", {})],
+            log_callback=publish_after_model, notification_reader_factory=reader_factory)
+        with self.assertRaisesRegex(ScopedAppAgentFatal, "SCOPED_AGENT_NOTIFICATION_STALE"):
+            runner.run()
+        self.assertEqual(runner.snapshot()["failureCode"], "SCOPED_AGENT_NOTIFICATION_STALE")
+        self.assertEqual(engine.calls, 1)
+        self.assertEqual(len(dispatch.calls), 0)
+
+    def test_19c_scoped_reader_identity_drift_fails_before_model(self):
+        state = {}
+
+        def reader_factory(env, scope):
+            registry = ScopedNotificationOriginRegistry()
+            projection = ScopedArrivedNotificationProjection(scope_id=scope["requestId"])
+            registry.bind_origin(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                 child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                 projection=projection)
+            reader = registry.open_reader(origin_id=scope["childExecutionId"], scope_id=scope["requestId"],
+                                          child_execution_id=scope["childExecutionId"], app_id=scope["appId"],
+                                          time_manager=env.time_manager)
+            state["reader"] = reader
+            return reader
+
+        runner, _, _, _, _, engine, dispatch = self.fixture(
+            notification_reader_factory=reader_factory)
+        state["reader"]._ScopedChildNotificationReader__scope_id = "foreign-scope"
+        with self.assertRaisesRegex(ScopedAppAgentFatal, "SCOPED_AGENT_SOURCE_CHANGED"):
+            runner.run()
+        self.assertEqual(engine.calls, 0)
+        self.assertEqual(len(dispatch.calls), 0)
+
+    def test_20_run_reuse_no_reset_start_logs_or_scope_input(self):
         runner, _, _, _, _, engine, dispatch = self.fixture()
         self.assertEqual(runner.run(), "completed")
         with self.assertRaisesRegex(ScopedAppAgentFatal, "SCOPED_AGENT_RUN_REUSED"):

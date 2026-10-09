@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "gaia2-phase5-2c3c-child-notification-reader-verification-v1",
+  "status": "passed_with_production_parent_boundary",
+  "stage": "5.2c3c",
+  "route": "A",
+  "scope": "parent_owned_scoped_child_notification_reader_and_app_agent_hooks",
+  "targetedTests": {
+    "childReader": 7,
+    "bridgeNotificationWiring": 6,
+    "notificationProducer": 12,
+    "scopedAppAgent": 62,
+    "combinedReaderProducerBridge": 25,
+    "phase3LiveBridgeRegression": 39,
+    "allPhase5Regression": 243,
+    "pythonCompile": true,
+    "gitDiffCheck": true
+  },
+  "commands": {
+    "childReaderProducerBridge": "configured-python -m unittest test.phase5_child_notification_reader_test test.phase5_notification_producer_test test.phase5_bridge_notification_test -q",
+    "scopedAppAgent": "configured-python -m unittest test.phase5_scoped_app_agent_test -q",
+    "compile": "configured-python -m py_compile scripts/gaia2_notification_producer.py scripts/gaia2_scoped_app_agent.py scripts/capybara_official_bridge.py test/phase5_notification_producer_test.py test/phase5_child_notification_reader_test.py test/phase5_scoped_app_agent_test.py",
+    "diffCheck": "git diff --check"
+  },
+  "sourceRefs": [
+    {"path": "scripts/gaia2_notification_producer.py", "sha256": "40270552d66fc7d17f04ff509d6ad47c4554dcd278dd57a68008fa05b9d43c59"},
+    {"path": "scripts/capybara_official_bridge.py", "sha256": "f05ef19f5f19cdfb124435e043486895d417fa425b9d7bf36c30f9481d97e1f7"},
+    {"path": "scripts/gaia2_scoped_app_agent.py", "sha256": "1ebfc659904c502899f24c665ceaeba9be08326a5dd6e7e74faa4206a9a8f93f"},
+    {"path": "test/phase5_notification_producer_test.py", "sha256": "d23b83ceb8f99341e569eaddc0bde4098ec90ec99df6f2d01a8c43500a30f2d7"},
+    {"path": "test/phase5_child_notification_reader_test.py", "sha256": "8c4436048cc4a5566d967ce20fd75ee72135f53bd7c32adf9afe1e0df9746303"},
+    {"path": "test/phase5_bridge_notification_test.py", "sha256": "848f376baa6323ff937c0a894ab5d8593e9723536ea7b4f6c15f341273fbd285"},
+    {"path": "test/phase5_scoped_app_agent_test.py", "sha256": "e07c1c1e1163470fb8aa0da39c8f0bc06ff0c0947b648b35fd63d796a3ef0fe0"}
+  ],
+  "networkCalls": 0,
+  "realProviderCalls": 0,
+  "officialScenarioExecuted": false,
+  "officialAreModified": false,
+  "defaultRunnerBehaviorChanged": false,
+  "contracts": {
+    "readerIsNotOfficialNotificationSystem": true,
+    "parentQueueIsNotConsumedByChild": true,
+    "parentAndChildHaveIndependentExactlyOnceCursors": true,
+    "futureRecordsRemainHiddenUntilOfficialClock": true,
+    "readerScopeOriginProjectionAndClockArePinned": true,
+    "foreignOriginConstructorRelabelIsRejected": true,
+    "readerClockAndProjectionDriftFailClosed": true,
+    "projectedRecordScopeSequenceAndMessageHashAreValidated": true,
+    "notificationsEnterChildHistoryAtPreStep": true,
+    "newNotificationsBlockNativeActionBeforeDispatch": true,
+    "actual_loop_stale_notification_is_fail_closed": true,
+    "stopRevocationIsSticky": true
+  },
+  "knownBoundaries": [
+    "The parent bridge factory and child reader are an opt-in trusted integration seam; no production parent default call site installs them yet.",
+    "STOP uses immediate hard revoke: unread ordinary records are no longer readable after origin revocation. This policy must be confirmed before production routing.",
+    "No official A2A/Noise Scenario, real provider call, upload, or benchmark score was produced in this controlled wiring slice.",
+    "The official ARE package remains unmodified."
+  ]
+}

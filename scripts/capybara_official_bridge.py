@@ -22,7 +22,7 @@ from typing import Any
 import litellm
 from litellm import completion
 from gaia2_model_retry import install_model_retries
-from gaia2_deadline_notifications import ProjectedNotification
+from gaia2_deadline_notifications import DeadlineNotificationError, ProjectedNotification
 from gaia2_notification_producer import (
     NotificationProducerError,
     ScopedNotificationOriginRegistry,
@@ -55,6 +55,7 @@ class BridgeNotificationBinding:
     origin_id: str
     occurrence_prefix: str
     next_sequence: int = 1
+    parent_cursor: int = 0
 
     def __post_init__(self):
         if type(self.registry) is not ScopedNotificationOriginRegistry:
@@ -64,6 +65,8 @@ class BridgeNotificationBinding:
         if type(self.occurrence_prefix) is not str or not self.occurrence_prefix:
             raise HookProtocolError("invalid_notification_binding")
         if type(self.next_sequence) is not int or self.next_sequence < 1:
+            raise HookProtocolError("invalid_notification_binding")
+        if type(self.parent_cursor) is not int or self.parent_cursor < 0:
             raise HookProtocolError("invalid_notification_binding")
 
     def publish(self, notification, arrived_at: float) -> dict[str, Any]:
@@ -77,6 +80,21 @@ class BridgeNotificationBinding:
             raise HookProtocolError(error.code.lower()) from None
         object.__setattr__(self, "next_sequence", self.next_sequence + 1)
         return receipt
+
+    def project(self, arrived_at: float) -> tuple[ProjectedNotification, ...]:
+        """Fan out parent-visible records without consuming the child cursor."""
+        try:
+            projected = self.registry.project(origin_id=self.origin_id, are_now=arrived_at)
+        except NotificationProducerError as error:
+            raise HookProtocolError(error.code.lower()) from None
+        except DeadlineNotificationError as error:
+            raise HookProtocolError(error.code.lower()) from None
+        except BaseException:
+            raise HookProtocolError("notification_projection_failed") from None
+        visible = tuple(item for item in projected if item.sequence > self.parent_cursor)
+        if visible:
+            object.__setattr__(self, "parent_cursor", visible[-1].sequence)
+        return visible
 
 
 def configure_notification_bridge(factory) -> None:
@@ -362,7 +380,7 @@ def _drain_notifications(env, messages: list[dict[str, Any]], revision: int,
             if notification.message_type not in (MessageType.USER_MESSAGE, MessageType.ENVIRONMENT_NOTIFICATION):
                 raise HookProtocolError("unknown_notification_type")
             binding.publish(notification, now)
-            projected = binding.registry.drain(origin_id=binding.origin_id, are_now=now)
+            projected = binding.project(now)
             for item in projected:
                 revision = _append_projected_notification(messages, item, now, revision)
                 changed = True

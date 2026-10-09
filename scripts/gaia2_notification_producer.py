@@ -22,6 +22,7 @@ from typing import Any
 
 from are.simulation.notification_system import Message, MessageType
 from gaia2_deadline_notifications import (
+    DeadlineNotificationError,
     ProjectedNotification,
     ScopedArrivedNotificationProjection,
     message_hash,
@@ -34,6 +35,14 @@ SCHEMA_RECEIPT = "gaia2-scoped-notification-publish-receipt-v1"
 
 class NotificationProducerError(RuntimeError):
     """Fixed, non-sensitive producer failure codes."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+class NotificationReaderError(RuntimeError):
+    """Fixed, non-sensitive errors exposed by a scoped child reader."""
 
     def __init__(self, code: str):
         self.code = code
@@ -64,6 +73,14 @@ def _sequence(value: Any) -> int:
     if type(value) is not int or value < 1:
         _fail("NOTIFICATION_PRODUCER_SEQUENCE_INVALID")
     return value
+
+
+def _callable_identity(value: Any) -> tuple:
+    """Stable identity for a bound clock/projection method."""
+    receiver = getattr(value, "__self__", None)
+    function = getattr(value, "__func__", value)
+    return (id(receiver), id(function), id(getattr(function, "__code__", None)),
+            id(getattr(function, "__defaults__", None)), id(getattr(function, "__kwdefaults__", None)))
 
 
 @dataclass
@@ -198,6 +215,42 @@ class ScopedNotificationOriginRegistry:
                     "scopeId": binding.scope_id, "sequence": sequence,
                     "occurrenceIdHash": hashlib.sha256(occurrence_id.encode("utf-8")).hexdigest()}
 
+    def open_reader(self, *, origin_id: str, scope_id: str, child_execution_id: str,
+                    app_id: str, time_manager: Any) -> "ScopedChildNotificationReader":
+        """Create a read-only cursor for one already-bound child scope.
+
+        This is a trusted parent operation.  The returned reader has no queue
+        reference and cannot bind, publish, revoke, or reassign an origin.
+        ``time_manager`` is retained by identity so the child cannot choose a
+        wall clock or pass an arbitrary arrival time to the projection.
+        """
+        origin_id = _identifier(origin_id, "NOTIFICATION_PRODUCER_ORIGIN_INVALID")
+        scope_id = _identifier(scope_id, "NOTIFICATION_PRODUCER_SCOPE_INVALID")
+        child_execution_id = _identifier(child_execution_id, "NOTIFICATION_PRODUCER_CHILD_INVALID")
+        app_id = _identifier(app_id, "NOTIFICATION_PRODUCER_APP_INVALID")
+        if time_manager is None or not callable(getattr(time_manager, "time", None)):
+            _fail("NOTIFICATION_PRODUCER_CLOCK_INVALID")
+        with self.__lock:
+            binding = self.__resolve(origin_id)
+            if (binding.scope_id, binding.child_execution_id, binding.app_id) != (
+                    scope_id, child_execution_id, app_id):
+                _fail("NOTIFICATION_PRODUCER_READER_SCOPE_MISMATCH")
+            binding_token = self.__reader_binding_token_locked(origin_id, binding)
+        return ScopedChildNotificationReader(self, origin_id, scope_id,
+            child_execution_id, app_id, time_manager, binding_token=binding_token)
+
+    def __reader_binding_token_locked(self, origin_id: str, binding: _OriginBinding) -> tuple:
+        return (id(self), self.__binding_hash(origin_id, binding.scope_id,
+            binding.child_execution_id, binding.app_id), id(binding), id(binding.projection),
+            _callable_identity(binding.projection.project), binding.scope_id,
+            binding.child_execution_id, binding.app_id)
+
+    def _reader_binding_token(self, origin_id: str) -> tuple:
+        """Trusted internal identity check used by a previously opened reader."""
+        with self.__lock:
+            binding = self.__resolve(origin_id)
+            return self.__reader_binding_token_locked(origin_id, binding)
+
     def project(self, *, origin_id: str, are_now: float) -> tuple[ProjectedNotification, ...]:
         with self.__lock:
             binding = self.__resolve(origin_id)
@@ -220,3 +273,171 @@ class ScopedNotificationOriginRegistry:
                         "active": item.active, "lastSequence": item.last_sequence,
                         "occurrenceCount": len(item.occurrences or {})}
                         for item in self.__bindings.values()]}
+
+
+class ScopedChildNotificationReader:
+    """Parent-owned, read-only cursor over one scoped projection.
+
+    It deliberately does not implement ARE's ``BaseNotificationSystem`` and
+    has no message queue.  Each reader owns a cursor, so the parent bridge and
+    a child reader may both observe the same projected occurrence without a
+    global consume race.  The reader's clock is fixed by the trusted parent
+    and is never supplied by Actor/model input.
+    """
+
+    def __init__(self, registry: ScopedNotificationOriginRegistry, origin_id: str,
+                 scope_id: str, child_execution_id: str, app_id: str,
+                 time_manager: Any, *, binding_token: tuple | None = None):
+        if type(registry) is not ScopedNotificationOriginRegistry:
+            raise NotificationReaderError("NOTIFICATION_READER_REGISTRY_INVALID")
+        if type(binding_token) is not tuple:
+            raise NotificationReaderError("NOTIFICATION_READER_BINDING_INVALID")
+        try:
+            current_token = registry._reader_binding_token(origin_id)
+        except NotificationProducerError:
+            raise NotificationReaderError("NOTIFICATION_READER_BINDING_INVALID") from None
+        if (current_token != binding_token or current_token[5:] !=
+                (scope_id, child_execution_id, app_id)):
+            raise NotificationReaderError("NOTIFICATION_READER_BINDING_INVALID")
+        try:
+            clock = getattr(time_manager, "time", None)
+        except BaseException:
+            clock = None
+        if time_manager is None or not callable(clock):
+            raise NotificationReaderError("NOTIFICATION_READER_CLOCK_INVALID")
+        self.__registry = registry
+        self.__origin_id = origin_id
+        self.__scope_id = scope_id
+        self.__child_execution_id = child_execution_id
+        self.__app_id = app_id
+        self.__time_manager = time_manager
+        self.__clock = clock
+        self.__binding_token = binding_token
+        self.__clock_binding = (id(time_manager), _callable_identity(clock))
+        self.__cursor = 0
+        self.__read_count = 0
+        self.__closed = False
+        self.__clock_failed = False
+        self.__binding_failed = False
+        self.__clock_changed = False
+        self.__revoked = False
+        self.__lock = threading.RLock()
+
+    @property
+    def scope_id(self) -> str:
+        return self.__scope_id
+
+    @property
+    def child_execution_id(self) -> str:
+        return self.__child_execution_id
+
+    @property
+    def app_id(self) -> str:
+        return self.__app_id
+
+    @property
+    def time_manager(self) -> Any:
+        return self.__time_manager
+
+    def __now(self) -> float:
+        if self.__binding_failed:
+            raise NotificationReaderError("NOTIFICATION_READER_BINDING_CHANGED") from None
+        if self.__clock_changed:
+            raise NotificationReaderError("NOTIFICATION_READER_CLOCK_CHANGED") from None
+        if self.__clock_failed:
+            raise NotificationReaderError("NOTIFICATION_READER_CLOCK_INVALID") from None
+        try:
+            if self.__registry._reader_binding_token(self.__origin_id) != self.__binding_token:
+                self.__binding_failed = True
+                raise NotificationReaderError("NOTIFICATION_READER_BINDING_CHANGED") from None
+        except NotificationReaderError:
+            raise
+        except NotificationProducerError as error:
+            if error.code == "NOTIFICATION_PRODUCER_ORIGIN_REVOKED":
+                self.__revoked = True
+                raise NotificationReaderError("NOTIFICATION_READER_ORIGIN_REVOKED") from None
+            self.__binding_failed = True
+            raise NotificationReaderError("NOTIFICATION_READER_BINDING_CHANGED") from None
+        try:
+            clock_binding = (id(self.__time_manager), _callable_identity(self.__time_manager.time))
+        except BaseException:
+            self.__clock_changed = True
+            raise NotificationReaderError("NOTIFICATION_READER_CLOCK_CHANGED") from None
+        if (clock_binding != self.__clock_binding
+                or _callable_identity(self.__clock) != self.__clock_binding[1]):
+            self.__clock_changed = True
+            raise NotificationReaderError("NOTIFICATION_READER_CLOCK_CHANGED") from None
+        try:
+            now = self.__clock()
+        except BaseException:
+            self.__clock_failed = True
+            raise NotificationReaderError("NOTIFICATION_READER_CLOCK_INVALID") from None
+        if type(now) not in (int, float) or not math.isfinite(now) or now < 0:
+            self.__clock_failed = True
+            raise NotificationReaderError("NOTIFICATION_READER_CLOCK_INVALID") from None
+        return float(now)
+
+    def poll(self, *, limit: int | None = None) -> tuple[ProjectedNotification, ...]:
+        """Return newly arrived records and advance only this reader cursor."""
+        with self.__lock:
+            if self.__closed:
+                raise NotificationReaderError("NOTIFICATION_READER_CLOSED") from None
+            if self.__revoked:
+                raise NotificationReaderError("NOTIFICATION_READER_ORIGIN_REVOKED") from None
+            if limit is not None and (type(limit) is not int or limit < 1):
+                raise NotificationReaderError("NOTIFICATION_READER_LIMIT_INVALID") from None
+            now = self.__now()
+            try:
+                projected = self.__registry.project(origin_id=self.__origin_id, are_now=now)
+            except NotificationProducerError as error:
+                if error.code == "NOTIFICATION_PRODUCER_ORIGIN_REVOKED":
+                    self.__revoked = True
+                    raise NotificationReaderError("NOTIFICATION_READER_ORIGIN_REVOKED") from None
+                raise NotificationReaderError("NOTIFICATION_READER_PROJECTION_FAILED") from None
+            except DeadlineNotificationError as error:
+                if error.code == "NOTIFICATION_CLOCK_INVALID":
+                    self.__clock_failed = True
+                    raise NotificationReaderError("NOTIFICATION_READER_CLOCK_INVALID") from None
+                raise NotificationReaderError("NOTIFICATION_READER_PROJECTION_FAILED") from None
+            except BaseException:
+                raise NotificationReaderError("NOTIFICATION_READER_PROJECTION_FAILED") from None
+            try:
+                if self.__registry._reader_binding_token(self.__origin_id) != self.__binding_token:
+                    self.__binding_failed = True
+                    raise NotificationReaderError("NOTIFICATION_READER_BINDING_CHANGED") from None
+            except NotificationReaderError:
+                raise
+            except NotificationProducerError as error:
+                if error.code == "NOTIFICATION_PRODUCER_ORIGIN_REVOKED":
+                    self.__revoked = True
+                    raise NotificationReaderError("NOTIFICATION_READER_ORIGIN_REVOKED") from None
+                self.__binding_failed = True
+                raise NotificationReaderError("NOTIFICATION_READER_BINDING_CHANGED") from None
+            visible = tuple(item for item in projected if item.sequence > self.__cursor)
+            if limit is not None:
+                visible = visible[:limit]
+            if visible:
+                self.__cursor = visible[-1].sequence
+                self.__read_count += len(visible)
+            return visible
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.__lock:
+            return {"schemaVersion": "gaia2-scoped-child-notification-reader-v1",
+                    "scopeId": self.__scope_id, "childExecutionId": self.__child_execution_id,
+                    "appId": self.__app_id, "lastSequence": self.__cursor,
+                    "readCount": self.__read_count, "closed": self.__closed,
+                    "clockFailed": self.__clock_failed, "clockChanged": self.__clock_changed,
+                    "bindingFailed": self.__binding_failed, "originRevoked": self.__revoked,
+                    "bindingHash": self.__binding_token[1]}
+
+    def identity_snapshot(self) -> tuple:
+        """Return non-payload identity state for the trusted runner pin."""
+        with self.__lock:
+            return (id(self.__registry), self.__binding_token, self.__scope_id,
+                    self.__child_execution_id, self.__app_id, id(self.__time_manager),
+                    self.__clock_binding, _callable_identity(self.__clock))
+
+    def close(self) -> None:
+        with self.__lock:
+            self.__closed = True

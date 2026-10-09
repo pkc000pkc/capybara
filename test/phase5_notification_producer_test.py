@@ -13,6 +13,7 @@ from are.simulation.notification_system import Message, MessageType, MessageQueu
 from gaia2_deadline_notifications import ScopedArrivedNotificationProjection
 from gaia2_notification_producer import (
     NotificationProducerError,
+    NotificationReaderError,
     ScopedNotificationOriginRegistry,
 )
 
@@ -119,6 +120,59 @@ class ProducerTests(unittest.TestCase):
         with self.assertRaisesRegex(NotificationProducerError, "PROJECTION_INVALID"):
             self.registry.bind_origin(origin_id="other", scope_id="request-1",
                 child_execution_id="child", app_id="Contacts", projection=object())
+
+    def test_scoped_reader_is_fanout_exactly_once_and_deep_copied(self):
+        class Clock:
+            def __init__(self):
+                self.now = 10.0
+            def time(self):
+                return self.now
+        clock = Clock()
+        first = self.registry.open_reader(origin_id="origin-1", scope_id="request-1",
+            child_execution_id="child-1", app_id="Contacts", time_manager=clock)
+        second = self.registry.open_reader(origin_id="origin-1", scope_id="request-1",
+            child_execution_id="child-1", app_id="Contacts", time_manager=clock)
+        self.publish("one", 1, 10, msg("same"))
+        self.publish("two", 2, 10, msg("same"))
+        first_view = first.poll()
+        self.assertEqual([item.notification_id for item in first_view], ["one", "two"])
+        first_view[0].message.message = "tampered local copy"
+        self.assertEqual(first.poll(), ())
+        self.assertEqual([item.message.message for item in second.poll()], ["same", "same"])
+        self.assertEqual(second.poll(), ())
+
+    def test_scoped_reader_hides_future_and_fails_sticky_on_clock_rollback(self):
+        class Clock:
+            def __init__(self):
+                self.now = 10.0
+            def time(self):
+                return self.now
+        clock = Clock()
+        reader = self.registry.open_reader(origin_id="origin-1", scope_id="request-1",
+            child_execution_id="child-1", app_id="Contacts", time_manager=clock)
+        self.publish("future", 1, 20, msg("future"))
+        self.assertEqual(reader.poll(), ())
+        clock.now = 20.0
+        self.assertEqual([item.notification_id for item in reader.poll()], ["future"])
+        clock.now = 19.0
+        with self.assertRaisesRegex(NotificationReaderError, "NOTIFICATION_READER_CLOCK_INVALID"):
+            reader.poll()
+        clock.now = 20.0
+        with self.assertRaisesRegex(NotificationReaderError, "NOTIFICATION_READER_CLOCK_INVALID"):
+            reader.poll()
+
+    def test_reader_scope_close_and_revocation_fail_closed(self):
+        class Clock:
+            def time(self):
+                return 10.0
+        with self.assertRaisesRegex(NotificationProducerError, "READER_SCOPE_MISMATCH"):
+            self.registry.open_reader(origin_id="origin-1", scope_id="other",
+                child_execution_id="child-1", app_id="Contacts", time_manager=Clock())
+        reader = self.registry.open_reader(origin_id="origin-1", scope_id="request-1",
+            child_execution_id="child-1", app_id="Contacts", time_manager=Clock())
+        reader.close()
+        with self.assertRaisesRegex(NotificationReaderError, "NOTIFICATION_READER_CLOSED"):
+            reader.poll()
 
 
 if __name__ == "__main__":
