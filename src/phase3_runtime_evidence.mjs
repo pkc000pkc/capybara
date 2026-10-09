@@ -56,12 +56,21 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
   }
   const bytes = path => { check(files.has(path), 'unbound_evidence'); used.add(path); return files.get(path) }
   const json = path => JSON.parse(bytes(path).toString('utf8'))
+  if (attestation.officialEntryPath !== undefined) {
+    check(pathSyntax(attestation.officialEntryPath) && HASH.test(attestation.officialEntrySha256 ?? ''), 'official_entry_reference_invalid')
+    const entryBytes = bytes(attestation.officialEntryPath)
+    check(hash(entryBytes) === attestation.officialEntrySha256, 'official_entry_sha_mismatch')
+    const verified = events.find(event => event.type === 'official_entry_verified')
+    check(verified?.entrySha256 === attestation.officialEntrySha256 && verified.executionId === task.executionId
+      && verified.sessionId === session.sessionId && verified.scenarioId === task.scenarioId, 'official_entry_event_missing')
+  }
   const capabilities = json(attestation.capabilitiesPath)
   check(hash(files.get(attestation.capabilitiesPath)) === attestation.capabilitiesSha256 && Array.isArray(capabilities.plugins) && capabilities.plugins.length, 'capabilities_sha_mismatch')
   const initialization = json(attestation.initializationPath), ready = json(attestation.readyPath), hostProcess = json(attestation.hostProcessPath)
   check(processHealthy(hostProcess), 'unhealthy_host_process')
   check(initialization.schemaVersion === 'capybara-runtime-plugin-host-v1' && initialization.executionId === task.executionId && initialization.sessionId === session.sessionId, 'initialization_identity')
   check(ready.schemaVersion === 'gaia2-hook-host-ready-v1' && /^http:\/\/127\.0\.0\.1:\d+\/invoke$/.test(ready.endpoint) && Number.isInteger(ready.processId) && ready.processId === hostProcess.pid && ready.initializationHash === jsonHash(ready.initialization), 'ready_receipt_invalid')
+  if (attestation.officialEntryPath !== undefined) check(ready.entry?.schemaVersion === 'gaia2-official-entry-handshake-v1' && ready.entry.relativePath === attestation.officialEntryPath && ready.entry.sha256 === attestation.officialEntrySha256, 'ready_entry_binding')
   const { evidencePath, ...readyInitialization } = ready.initialization ?? {}
   check(typeof evidencePath === 'string' && portable(evidencePath).endsWith(`/${attestation.initializationPath}`) && digest(readyInitialization) === digest(initialization), 'ready_initialization_mismatch')
   check(Array.isArray(attestation.sourceFiles) && Array.isArray(initialization.plugins) && initialization.plugins.length === capabilities.plugins.length, 'source_inventory_invalid')
@@ -238,9 +247,13 @@ export function collectRuntimeEvidence({ root, manifest, task, session, events, 
       sourceFiles.push({ pluginId: plugin.id, relativePath: file.relativePath, ...ref(target) })
     }
   }
-  const runtimeEvidence = [...receipts, hostProcessPath, readyPath, portable(relative(root, capturedCapabilities)), ...sourceFiles.map(file => file.path)].map(path => ref(localFile(root, path)))
+  const officialEntryPath = portable(join(session.outputDir, 'official-entry/run-manifest.json'))
+  const hasOfficialEntry = existsSync(resolve(root, officialEntryPath))
+  if (hasOfficialEntry) localFile(root, officialEntryPath)
+  const runtimeEvidence = [...receipts, hostProcessPath, readyPath, ...(hasOfficialEntry ? [officialEntryPath] : []), portable(relative(root, capturedCapabilities)), ...sourceFiles.map(file => file.path)].map(path => ref(localFile(root, path)))
   const invocations = receipts.slice(1).map(path => readJson(resolve(root, path)))
-  const runtimeAttestation = { schemaVersion: 'gaia2-runtime-attestation-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, runNumber: task.runNumber, phase: task.phase, config: task.config, capabilitiesSha256: capabilityRef.sha256, capabilitiesPath: portable(relative(root, capturedCapabilities)), initializationPath: initial[0], invocationPaths: receipts.slice(1), hostProcessPath, readyPath, sourceFiles, evidenceHash: digest(runtimeEvidence), eventsHash: digest(events), summary: { invocationCount: invocations.length, modelRequestCount: events.filter(event => event.type === 'model_request').length, toolGateCount: events.filter(event => ['tool_call_started', 'tool_call_blocked'].includes(event.type)).length, typedVariableCount: Object.keys(invocations[0]?.variables ?? {}).length, persistentHarnessCount: readJson(resolve(root, initial[0])).harnesses.length, actorInputHashReconstructed: false, trainingHooksExecuted: false } }
+  const entryRef = hasOfficialEntry ? runtimeEvidence.find(item => item.path === officialEntryPath) : null
+  const runtimeAttestation = { schemaVersion: 'gaia2-runtime-attestation-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, runNumber: task.runNumber, phase: task.phase, config: task.config, capabilitiesSha256: capabilityRef.sha256, capabilitiesPath: portable(relative(root, capturedCapabilities)), initializationPath: initial[0], invocationPaths: receipts.slice(1), hostProcessPath, readyPath, sourceFiles, ...(entryRef ? { officialEntryPath, officialEntrySha256: entryRef.sha256 } : {}), evidenceHash: digest(runtimeEvidence), eventsHash: digest(events), summary: { invocationCount: invocations.length, modelRequestCount: events.filter(event => event.type === 'model_request').length, toolGateCount: events.filter(event => ['tool_call_started', 'tool_call_blocked'].includes(event.type)).length, typedVariableCount: Object.keys(invocations[0]?.variables ?? {}).length, persistentHarnessCount: readJson(resolve(root, initial[0])).harnesses.length, actorInputHashReconstructed: false, trainingHooksExecuted: false } }
   if ((task.correctionOrdinal ?? 0) === 1) {
     const correctionAuthorityPath = portable(join(session.workspaceDir, 'correction-authority/index.json'))
     const authority = readJson(localFile(root, correctionAuthorityPath))

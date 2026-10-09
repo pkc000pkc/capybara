@@ -15,6 +15,8 @@ import time
 import hashlib
 import math
 import uuid
+import re
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -242,6 +244,59 @@ def _assert_native_model_protocol() -> None:
 
 def _stable_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, default=str, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _official_entry_handshake(scenario_id: str) -> dict[str, Any] | None:
+    """Verify the Node-owned run receipt before an official child can delegate.
+
+    The guard is enabled by the real ``phase1_official`` entrypoint.  Controlled
+    unit fixtures may omit it, but they therefore never claim official-entry
+    attestation.  The receipt is immutable bytes; environment variables only
+    locate it and cannot replace the bytes or identity fields.
+    """
+    if os.environ.get("GAIA2_OFFICIAL_ENTRY_REQUIRED") != "1":
+        return None
+    path_text = os.environ.get("GAIA2_OFFICIAL_ENTRY_PATH")
+    expected_sha = os.environ.get("GAIA2_OFFICIAL_ENTRY_SHA256")
+    event_text = os.environ.get("GAIA2_RUNTIME_EVENT_FILE")
+    if (not isinstance(path_text, str) or not path_text
+            or not isinstance(expected_sha, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_sha)
+            or not isinstance(event_text, str) or not event_text):
+        raise HookProtocolError("official_entry_handshake_missing")
+    try:
+        unresolved_entry = Path(path_text)
+        unresolved_event = Path(event_text)
+        if unresolved_entry.is_symlink() or unresolved_event.is_symlink():
+            raise ValueError()
+        entry = unresolved_entry.resolve(strict=True)
+        event = unresolved_event.resolve(strict=False)
+        if entry.name != "run-manifest.json":
+            raise ValueError()
+        # The immutable receipt belongs to this exact execution output, not a
+        # sibling/previous session that merely has matching IDs.
+        if entry.parent.parent != event.parent or entry.parent.name != "official-entry":
+            raise ValueError()
+        raw = entry.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != expected_sha:
+            raise ValueError()
+        value = json.loads(raw.decode("utf-8"))
+        if (not isinstance(value, dict)
+                or set(value) != {"schemaVersion", "runId", "manifestHash", "executionId", "sessionId", "scenarioId", "scenarioVersion", "scenarioHash", "config", "runNumber", "attemptIndex", "correctionOrdinal", "phase", "launcherProcessId"}
+                or value.get("schemaVersion") != "gaia2-official-entry-handshake-v1"
+                or value.get("executionId") != os.environ.get("GAIA2_EXECUTION_ID")
+                or value.get("sessionId") != os.environ.get("GAIA2_SESSION_ID")
+                or value.get("scenarioId") != scenario_id
+                or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("manifestHash", "")))
+                or type(value.get("launcherProcessId")) is not int
+                or value["launcherProcessId"] <= 0
+                or json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n" != raw.decode("utf-8")):
+            raise ValueError()
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError, KeyError):
+        raise HookProtocolError("official_entry_handshake_invalid") from None
+    return {"schemaVersion": value["schemaVersion"], "executionId": value["executionId"],
+            "sessionId": value["sessionId"], "scenarioId": value["scenarioId"],
+            "manifestHash": value["manifestHash"], "entrySha256": expected_sha}
 
 
 def _correction_consumption(context_text: str) -> dict[str, str]:
@@ -589,6 +644,9 @@ def _native_run_with_agent(
     except HookProtocolError as error:
         _emit_runtime_event("runtime_hook_unavailable", errorCode=error.code)
         raise
+    entry_handshake = _official_entry_handshake(scenario_id)
+    if entry_handshake is not None:
+        _emit_runtime_event("official_entry_verified", **entry_handshake)
     if simulated_generation_time_mode not in ("fixed", "measured"):
         raise HookProtocolError("unsupported_generation_time_mode")
     try:
@@ -651,7 +709,9 @@ def _native_run_with_agent(
     _emit_runtime_event("official_run_started", scenarioId=scenario_id, toolCount=len(app_tools),
                         executionMode="live_plugin_host", generationTimeMode=simulated_generation_time_mode,
                         generationMeasurement="unavailable_official_litellm_metadata" if simulated_generation_time_mode == "measured" else "fixed_one_second",
-                        maxActions=max_actions, turnLimit=turn_limit)
+                        maxActions=max_actions, turnLimit=turn_limit,
+                        officialEntryVerified=entry_handshake is not None,
+                        officialEntryHash=entry_handshake["entrySha256"] if entry_handshake is not None else None)
 
     try:
         # The factory is trusted adapter configuration.  It can construct a

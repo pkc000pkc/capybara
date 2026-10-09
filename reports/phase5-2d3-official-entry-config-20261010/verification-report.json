@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "gaia2-phase-verification-v1",
+  "phase": "5.2d3",
+  "date": "2026-10-10",
+  "status": "passed_for_declared_scope",
+  "scope": "official ARE 1.2.0 submission profile guard and immutable Node-to-hook-service-to-Python entry handshake",
+  "tests": {
+    "officialSubmissionConfig": {"passed": 4, "total": 4},
+    "phase0AndOfficialConfig": {"passed": 13, "total": 13},
+    "officialEntryNode": {"passed": 3, "total": 3},
+    "officialEntryPython": {"passed": 3, "total": 3},
+    "officialHookService": {"passed": 2, "total": 2},
+    "runtimeEvidenceAndEntry": {"passed": 12, "total": 12},
+    "phase5FullPython": {"passed": 275, "total": 275},
+    "phase3LiveBridgePython": {"passed": 39, "total": 39},
+    "nodeFullSuite": {"passed": 276, "total": 276},
+    "phase0Preflight": "passed",
+    "pythonCompile": "passed",
+    "gitDiffCheck": "passed"
+  },
+  "implementation": {
+    "profileSource": "src/official_submission_config.mjs",
+    "profile": {
+      "dataset": "meta-agents-research-environments/gaia2",
+      "split": "validation",
+      "agent": "default",
+      "traceDumpFormat": "both",
+      "hfUpload": false,
+      "runsPerConfiguration": 3,
+      "standardConfigs": ["ambiguity", "adaptability", "execution", "search", "time"],
+      "agent2agent": {"config": "mini", "a2aAppProp": 1},
+      "noise": {"config": "mini", "toolAugmentation": true, "numEventsPerMinute": 10, "seed": 0}
+    },
+    "entryHandshake": {
+      "schema": "gaia2-official-entry-handshake-v1",
+      "bound": ["runId", "manifestHash", "executionId", "sessionId", "scenarioId", "scenarioVersion", "scenarioHash", "config", "runNumber", "attemptIndex", "correctionOrdinal", "phase", "launcherProcessId"],
+      "consumers": ["phase1_official.mjs", "phase3_hook_service.mjs", "phase3_hook_server.ts", "capybara_official_bridge.py", "phase3_runtime_evidence.mjs"]
+    }
+  },
+  "boundaries": {
+    "officialPhase1EntryWired": "entry receipt and identity guard only",
+    "officialRunnerExecution": "standard-only existing path; A2A and Noise not activated",
+    "officialScenario": "not_run",
+    "realProvider": "not_run",
+    "officialA2A": "not_run",
+    "officialNoise": "not_run",
+    "hfUpload": false,
+    "officialPythonModified": false,
+    "modelExecutionByThisStage": false
+  },
+  "sourceSha256": {
+    "src/official_submission_config.mjs": "aa0e07fa16494bfeee1c5e2f300890ca02320def390270ca51a9a90e9f24a641",
+    "test/official_submission_config.test.mjs": "5db8f239d2d41ba77144d22f4b33e0faa2485a680799a1856083e90968882bba",
+    "src/phase0_run.mjs": "7cbaec56c7ac0227b101e7cc3733f879b4aba0aa1ca5adbe970958106f6fae7a",
+    "gaia2-runner-manifest.json": "a04dc931df164a6059f553b86504489ed13cf5fb07b039d58e5781b808ffc498",
+    "src/phase1_official_entry.mjs": "290b1922f7a3618cafa7f297fd0fd58a51fbed0cca0af395101ccfef990d8edc",
+    "src/phase1_official.mjs": "ab0de5e101b44ac88364a671f15166543baf677725b2fc41304d176c6282ce8a",
+    "src/phase3_hook_service.mjs": "6b2946138034efe113b8d1f29815370b09113a92cf67a63713cff95cc46cd92a",
+    "src/phase3_runtime_evidence.mjs": "0a4d90ea646b278b740fb96c67c7240d2fb2b86d914ba0c998f7bc5a5a9f86f1",
+    "scripts/capybara_official_bridge.py": "47bfd5beb30441a59f754d18841fa3b0eb8aa1607eaac38fc390bd4038f44d47",
+    "scripts/phase3_hook_server.ts": "395ed513ce134e2ef6a05ad1a545d1f982b0cc257e69f18ba2001f5858fb5642",
+    "test/phase5_2d3_official_entry_test.py": "d4484e92fb82efbaf26a9d95c7ecba3ae3fe624faa7f8e549e38e1ffd804985c",
+    "test/phase5_2d3_official_entry.test.mjs": "615005dfec155671bb8204b80011d57a3858b8e09b9f957222c39ab35b4706b3",
+    "test/phase5_model_usage.test.mjs": "aacd26eeeab0a66270358df47fcbb78ae4ca8845c93ae45bcb60720c37c04638",
+    "locks/environment-lock.json": "a795f9749249c860638af8fa65d421af79ef068fc4dd1fc49ce66e62c5552b1a",
+    "locks/capability-inventory.json": "2c08fbac6b71fa568407cea7738428d36558dc80f26b70edfe0ed56aa6afa7df"
+  }
+}

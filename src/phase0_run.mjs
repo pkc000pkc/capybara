@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { resolveRuntimeSettings } from './phase1_config.mjs'
+import { assertOfficialSubmissionProtocol } from './official_submission_config.mjs'
 
 export function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical)
@@ -115,6 +116,7 @@ function seed(rootSeed, phase, config, id, runNumber) {
 export function buildRunManifest({ root, protocol, index, lockRefs, entrypoints, mode = 'internal_pass5', perCapability, miniLimit, runId = randomUUID(), rootSeed = protocol.rootSeed }) {
   validateProtocol(protocol)
   if (!protocol.modes[mode]) throw new Error(`unsupported mode ${mode}`)
+  if (mode === 'official_submission') assertOfficialSubmissionProtocol(protocol)
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(runId)) throw new Error('invalid run ID')
   if (!Number.isInteger(rootSeed) || rootSeed < 0 || rootSeed > 0xffffffff) throw new Error('rootSeed must be an unsigned 32-bit integer')
   const policy = protocol.modes[mode]

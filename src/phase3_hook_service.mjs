@@ -6,6 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { digest, fileDigest, readJson, within } from './phase0_run.mjs'
 import { runChildProcess } from './phase1_process.mjs'
 import { assertInitialHasNoCorrection, verifyCorrectionReplayAuthority } from './phase4_replay_authority.mjs'
+import { OFFICIAL_ENTRY_SCHEMA, verifyOfficialEntryManifest } from './phase1_official_entry.mjs'
 
 const portable = value => value.replaceAll('\\', '/')
 
@@ -38,19 +39,26 @@ export function prepareCorrectionReadonlyInitialization({ root, manifest, task, 
   return { ...verified, evidencePath: portable(relative(root, path)), files }
 }
 
-export async function startRuntimeHookService({ root, manifest, task, session, settings, signal }) {
+export async function startRuntimeHookService({ root, manifest, task, session, settings, signal, entry = null }) {
   const protocol = readJson(join(root, 'config/phase0-protocol.json'))
   const capabilityPath = resolve(root, manifest.lockRefs.capabilities.path)
   if (fileDigest(capabilityPath) !== manifest.lockRefs.capabilities.sha256) throw new Error('hook capability inventory differs from frozen plan')
   const capabilities = readJson(capabilityPath)
   const output = resolve(root, session.outputDir), workspace = resolve(root, session.workspaceDir)
   if (!within(resolve(root, manifest.runRoot), output) || !within(resolve(root, manifest.runRoot), workspace)) throw new Error('hook session escapes plan')
+  if (entry !== null) {
+    if (entry.schemaVersion !== OFFICIAL_ENTRY_SCHEMA || entry.value?.executionId !== task.executionId
+      || entry.value?.sessionId !== session.sessionId || entry.value?.scenarioId !== task.scenarioId
+      || entry.value?.manifestHash !== manifest.manifestHash) throw new Error('official entry handshake missing or mismatched')
+    verifyOfficialEntryManifest({ path: entry.path, sha256: entry.sha256, expected: entry.value })
+  }
   const correctionAuthority = prepareCorrectionReadonlyInitialization({ root, manifest, task, session })
   const serviceRoot = join(output, 'hook-host'); mkdirSync(serviceRoot)
   const token = randomBytes(32).toString('hex'), readyPath = join(serviceRoot, 'ready.json'), specPath = join(serviceRoot, 'spec.json')
   const options = { projectDir: root, workspaceDir: workspace, plugins: capabilities.plugins.map(({ id, snapshotRoot, files }) => ({ id, snapshotRoot, files })), executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, attemptIndex: task.attemptIndex ?? 0, runNumber: task.runNumber }
   if (correctionAuthority) options.trustedReadonlySessionInitialValues = [correctionAuthority.initializer]
-  writeFileSync(specPath, JSON.stringify({ backendRoot: protocol.runtime.backendRoot, readyPath, options }) + '\n', { flag: 'wx' })
+  writeFileSync(specPath, JSON.stringify({ backendRoot: protocol.runtime.backendRoot, readyPath, options,
+    ...(entry ? { entry: { schemaVersion: entry.schemaVersion, path: entry.path, relativePath: entry.relativePath, sha256: entry.sha256, value: entry.value } } : {}) }) + '\n', { flag: 'wx' })
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/(?:API_KEY|ACCESS_TOKEN|AUTHORIZATION|HF_TOKEN|HUGGINGFACE_TOKEN|GAIA2_HOOK_TOKEN)/i.test(key)))
   const controller = new AbortController(), abort = () => controller.abort()
   signal?.addEventListener('abort', abort, { once: true })
@@ -71,6 +79,7 @@ export async function startRuntimeHookService({ root, manifest, task, session, s
       && Array.isArray(initialized.plugins) && initialized.plugins.length === options.plugins.length
       && options.plugins.every(plugin => initialized.plugins.some(loaded => loaded.id === plugin.id && digest(loaded.files) === digest(plugin.files)))
       && initialized.harnesses?.some(harness => harness.type === 'persistent')
+      && (!entry || (ready.entry?.schemaVersion === entry.schemaVersion && ready.entry?.path === entry.path && ready.entry?.relativePath === entry.relativePath && ready.entry?.sha256 === entry.sha256))
       && (correctionAuthority ? digest(initialized.readonlySessionInitializations) === digest([{ ...correctionAuthority.initializer, pluginId: 'gaia2-evaluation', type: 'text', scope: 'session', readonly: true, valueHash: createHash('sha256').update(JSON.stringify(correctionAuthority.initializer.value)).digest('hex') }]) : !Object.hasOwn(initialized, 'readonlySessionInitializations'))
     if (!valid) throw new Error('unsafe hook host ready receipt')
   } catch {

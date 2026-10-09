@@ -38,6 +38,19 @@
   "defaultExecution": false,
   "officialSubmissionReady": false,
   "realHooksReady": false,
+  "officialSubmissionProfile": {
+    "dataset": "meta-agents-research-environments/gaia2",
+    "split": "validation",
+    "agent": "default",
+    "traceDumpFormat": "both",
+    "hfUpload": false,
+    "numRuns": 3,
+    "phases": [
+      { "phase": "standard", "configs": ["ambiguity", "adaptability", "execution", "search", "time"], "a2aAppProp": 0, "noise": false },
+      { "phase": "agent2agent", "configs": ["mini"], "a2aAppProp": 1, "noise": false },
+      { "phase": "noise", "configs": ["mini"], "a2aAppProp": 0, "noise": true, "envEvents": { "numEventsPerMinute": 10, "seed": 0 } }
+    ]
+  },
   "submissionExport": "manifest-bound-byte-preserving-portable-package-via-pinned-official-ARE-functions",
   "submissionAuditGates": ["format_valid", "coverage_complete", "evaluation_complete"],
   "officialExportValidation": "synthetic-controlled-Trace-fixtures-not-real-benchmark-results",

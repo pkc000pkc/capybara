@@ -9,6 +9,7 @@ import { startRuntimeHookService } from './phase3_hook_service.mjs'
 import { collectRuntimeEvidence } from './phase3_runtime_evidence.mjs'
 import { assertInitialHasNoCorrection } from './phase4_replay_authority.mjs'
 import { safeEvidenceGateCode } from './phase1_diagnostics.mjs'
+import { writeOfficialEntryManifest } from './phase1_official_entry.mjs'
 
 function assert(condition, message) { if (!condition) throw new Error(`Phase 1 adapter: ${message}`) }
 function portable(path) { return path.replaceAll('\\', '/') }
@@ -106,6 +107,10 @@ export async function executeOfficialTask({ root, manifest, task, session, setti
   writeFileSync(fixturePath, `${JSON.stringify(fixture)}\n`, { flag: 'wx' })
   const output = resolve(root, session.outputDir)
   const workspace = resolve(root, session.workspaceDir)
+  // The entry receipt is written before either the official child or the
+  // plugin host starts.  Both processes must consume the same immutable bytes;
+  // this is an identity handshake only, never a delegation permission.
+  const entry = writeOfficialEntryManifest({ root, manifest, task, session })
   let freshReplayFixture = null
   if (task.correctionOrdinal === 1) {
     const sourcePath = join(workspace, 'fixture-source.json')
@@ -117,9 +122,9 @@ export async function executeOfficialTask({ root, manifest, task, session, setti
   const scriptsRoot = join(root, 'scripts')
   const runnerCode = `import sys, signal; signal.SIGALRM = getattr(signal, 'SIGALRM', signal.SIGTERM); signal.alarm = getattr(signal, 'alarm', lambda _seconds: 0); sys.path.insert(0, ${JSON.stringify(scriptsRoot)}); from capybara_official_bridge import install; install(); from are.simulation.benchmark import main; main()`
   const args = ['-c', runnerCode, 'run', '--dataset', datasetRoot, '--config', task.config, '--agent', 'default', '--model', manifest.models.actor.model, '--provider', manifest.models.actor.provider, '--endpoint', connection.baseUrl, '--judge_model', manifest.models.judge.model, '--judge_provider', manifest.models.judge.provider, '--judge_endpoint', connection.baseUrl, '--limit', '1', '--num_runs', '1', '--max_concurrent_scenarios', '1', '--scenario_timeout', String(settings.scenarioTimeoutSeconds), '--output_dir', output, '--trace_dump_format', 'both', '--log-level', 'INFO']
-  const hookService = await startRuntimeHookService({ root, manifest, task, session, settings, signal })
+  const hookService = await startRuntimeHookService({ root, manifest, task, session, settings, signal, entry })
   const authority = hookService.correctionAuthority
-  const childEnv = { ...process.env, ...modelRuntimeEnvironment(settings), PYTHONPATH: resolve(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', OPENAI_API_KEY: connection.apiKey, GAIA2_E2E_MINIMAL: '0', GAIA2_E2E_MAX_ACTIONS: String(settings.maxActions), GAIA2_E2E_TOOL_ALLOWLIST: '', GAIA2_E2E_ATTEMPT_INDEX: String(task.attemptIndex ?? task.runNumber), GAIA2_E2E_CORRECTION_ORDINAL: String(task.correctionOrdinal ?? 0), GAIA2_CORRECTION_STRATEGY_TEXT: authority?.initializer.value ?? '', GAIA2_CORRECTION_STRATEGY_HASH: authority?.context.strategyHash ?? '', GAIA2_CORRECTION_CONTEXT_HASH: authority ? digest(authority.context) : '', GAIA2_EXECUTION_ID: task.executionId, GAIA2_SESSION_ID: session.sessionId, GAIA2_RUNTIME_EVENT_FILE: eventPath, GAIA2_HOOK_URL: hookService.endpoint, GAIA2_HOOK_TOKEN: hookService.token, TMP: workspace, TEMP: workspace, TMPDIR: workspace }
+  const childEnv = { ...process.env, ...modelRuntimeEnvironment(settings), PYTHONPATH: resolve(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', OPENAI_API_KEY: connection.apiKey, GAIA2_E2E_MINIMAL: '0', GAIA2_E2E_MAX_ACTIONS: String(settings.maxActions), GAIA2_E2E_TOOL_ALLOWLIST: '', GAIA2_E2E_ATTEMPT_INDEX: String(task.attemptIndex ?? task.runNumber), GAIA2_E2E_CORRECTION_ORDINAL: String(task.correctionOrdinal ?? 0), GAIA2_CORRECTION_STRATEGY_TEXT: authority?.initializer.value ?? '', GAIA2_CORRECTION_STRATEGY_HASH: authority?.context.strategyHash ?? '', GAIA2_CORRECTION_CONTEXT_HASH: authority ? digest(authority.context) : '', GAIA2_EXECUTION_ID: task.executionId, GAIA2_SESSION_ID: session.sessionId, GAIA2_RUNTIME_EVENT_FILE: eventPath, GAIA2_HOOK_URL: hookService.endpoint, GAIA2_HOOK_TOKEN: hookService.token, GAIA2_OFFICIAL_ENTRY_REQUIRED: '1', GAIA2_OFFICIAL_ENTRY_PATH: entry.path, GAIA2_OFFICIAL_ENTRY_SHA256: entry.sha256, TMP: workspace, TEMP: workspace, TMPDIR: workspace }
   let processResult, hostProcess
   try { processResult = await runChildProcess({ command: resolve(root, protocol.runtime.python), args, cwd: workspace, env: childEnv, outputDir: output, processTimeoutMs: settings.processTimeoutMs, heartbeatIntervalMs: settings.heartbeatIntervalMs, signal, secrets: [connection.apiKey, hookService.token] }) }
   finally { hostProcess = await hookService.close() }
