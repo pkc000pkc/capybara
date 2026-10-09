@@ -41,6 +41,8 @@ from are.simulation.agents.llm.types import MessageRole
 from are.simulation.apps.app import App
 from are.simulation.environment import Environment
 from are.simulation.exceptions import FatalError
+from gaia2_generation_time import ScopedAREGenerationTimeOwner
+from gaia2_generation_time_ledger import ScopedGenerationTimeLedger
 
 _SCOPE_KEYS = frozenset(("parentExecutionId", "parentSessionId", "environmentGeneration",
     "appId", "parentCanonicalName", "taskArgumentKey", "toolInventoryHash", "taskHash",
@@ -218,7 +220,9 @@ class ScopedAppAgentRunner:
                  scope: dict, llm_engine: LLMEngine, dispatch: Callable[[dict], dict],
                  model_binding: dict | None = None, model_gate: Callable | None = None,
                  model_attempt: Callable | None = None, model_finish: Callable | None = None,
-                 max_logical_requests: int | None = None, log_callback: Callable | None = None):
+                 max_logical_requests: int | None = None, log_callback: Callable | None = None,
+                 generation_time_owner_factory: Callable[[], ScopedAREGenerationTimeOwner] | None = None,
+                 generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None):
         if (not isinstance(app, App) or not isinstance(owner, NativeAppBinding)
                 or not isinstance(env, Environment) or not isinstance(llm_engine, LLMEngine)
                 or not callable(dispatch) or env.apps.get(app.name) is not app
@@ -244,6 +248,21 @@ class ScopedAppAgentRunner:
         self.__manifest_hash = wire.value_hash(manifest)
         self.__scope = _clone(scope)
         self.__scope_hash = wire.value_hash(scope)
+        # Generation-time integration is an explicit opt-in surface.  The
+        # first runner slice only binds and audits the trusted objects; it
+        # intentionally leaves the official BaseAgent simulation config at
+        # None and does not alter model-call timing yet.
+        if (generation_time_owner_factory is None) != (generation_ledger_factory is None):
+            _fatal("SCOPED_AGENT_GENERATION_INTEGRATION_INVALID")
+        if generation_time_owner_factory is not None:
+            if not callable(generation_time_owner_factory):
+                _fatal("SCOPED_AGENT_GENERATION_INTEGRATION_INVALID")
+            if not callable(generation_ledger_factory):
+                _fatal("SCOPED_AGENT_GENERATION_INTEGRATION_INVALID")
+        self.__generation_time_owner_factory = generation_time_owner_factory
+        self.__generation_ledger_factory = generation_ledger_factory
+        self.__generation_owner_factory_identity = None if generation_time_owner_factory is None else _callable_identity(generation_time_owner_factory)
+        self.__generation_ledger_factory_identity = None if generation_ledger_factory is None else _callable_identity(generation_ledger_factory)
         supplied = (model_binding, model_gate, model_attempt, model_finish)
         self.__gated = any(item is not None for item in supplied)
         if self.__gated:
@@ -344,6 +363,9 @@ class ScopedAppAgentRunner:
             BaseAgent, JsonActionExecutor, TerminationStep, LLMEngine, _InjectedEngineBuilder,
             ControlledAppAgentEngine, type(self), AppAgent, are_simulation_react_json_app_agent,
             self.executor._append_final_answer, type(self.executor).extract_action, self.__official_log_callback)
+        if self.__generation_time_owner_factory is not None:
+            self.__collect_sources(self.__generation_time_owner_factory, self.__generation_ledger_factory,
+                ScopedAREGenerationTimeOwner, ScopedGenerationTimeLedger)
         if self.__gated:
             self.__collect_sources(model_gate, model_attempt, model_finish, llm_engine.begin_request,
                 llm_engine.get_last_usage, llm_engine.snapshot)
@@ -403,7 +425,10 @@ class ScopedAppAgentRunner:
             tuple((_callable_identity(callback), _callable_identity(getattr(callback, "__call__", None)))
                 for callback in (self.__model_gate, self.__model_attempt, self.__model_finish, self.__sdk_guard_callback)),
             tuple(_callable_identity(getattr(self.__model, name, None)) for name in (
-                "begin_request", "get_last_usage", "snapshot")) if self.__gated else ())
+                "begin_request", "get_last_usage", "snapshot")) if self.__gated else (),
+            self.__generation_owner_factory_identity,
+            self.__generation_ledger_factory_identity,
+            _callable_identity(self.__generation_ledger_factory) if self.__generation_ledger_factory is not None else ())
 
     def __engine_binding(self) -> None:
         if not self.__gated:
@@ -428,6 +453,22 @@ class ScopedAppAgentRunner:
         elif self.__engine_identity_hash != snapshot["sourceIdentityHash"]:
             _fatal("SCOPED_AGENT_MODEL_BINDING_CHANGED")
 
+    def __generation_binding(self) -> None:
+        """Audit the opt-in generation integration without starting it.
+
+        The owner may acquire a lease only in the later c2.2b timing slice;
+        this first slice merely pins its environment/source identity and the
+        ledger-factory callable.  A closed/failed owner is not reusable.
+        """
+        if self.__generation_time_owner_factory is None:
+            return
+        if (_callable_identity(self.__generation_time_owner_factory)
+                != self.__generation_owner_factory_identity):
+            _fatal("SCOPED_AGENT_GENERATION_INTEGRATION_CHANGED")
+        if (_callable_identity(self.__generation_ledger_factory)
+                != self.__generation_ledger_factory_identity):
+            _fatal("SCOPED_AGENT_GENERATION_INTEGRATION_CHANGED")
+
     def __log_callback(self, log):
         # The official append_agent_log method remains intact. Only its trusted
         # callback exception boundary is guarded, including pre-action logs.
@@ -447,6 +488,7 @@ class ScopedAppAgentRunner:
             if wire.value_hash(self.__owner.manifest()) != self.__manifest_hash:
                 _fatal("SCOPED_AGENT_SOURCE_CHANGED")
             self.__engine_binding()
+            self.__generation_binding()
             for ref in self.__sources.values():
                 data = _regular(Path(ref["path"])).read_bytes()
                 if len(data) != ref["bytes"] or hashlib.sha256(data).hexdigest() != ref["sha256"]:
@@ -757,6 +799,9 @@ class ScopedAppAgentRunner:
             "modelGateEnabled": self.__gated, "modelScopeHash": self.__model_scope_hash,
             "maxLogicalRequests": self.__logical_budget, "sdkAttemptsUsed": self.__sdk_attempts,
             "modelRequests": self.__model_receipts,
+            "generationTimeOptIn": self.__generation_time_owner_factory is not None,
+            "generationTimeOwnerFactoryBound": self.__generation_time_owner_factory is not None,
+            "generationLedgerFactoryBound": self.__generation_ledger_factory is not None,
             "originalObservationsTaken": self.__observations_taken,
             "started": self.__started, "closed": self.__closed, "completed": self.__completed and not self.__failed,
             "failed": self.__failed, "failureCode": self.__failure_code,
@@ -776,8 +821,11 @@ def build_scoped_app_agent(*, app: App, owner: NativeAppBinding, env: Environmen
                           dispatch: Callable[[dict], dict], model_binding: dict | None = None,
                           model_gate: Callable | None = None, model_attempt: Callable | None = None,
                           model_finish: Callable | None = None, max_logical_requests: int | None = None,
-                          log_callback: Callable | None = None) -> ScopedAppAgentRunner:
+                          log_callback: Callable | None = None,
+                          generation_time_owner_factory: Callable[[], ScopedAREGenerationTimeOwner] | None = None,
+                          generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None) -> ScopedAppAgentRunner:
     return ScopedAppAgentRunner(app=app, owner=owner, env=env, scope=scope,
         llm_engine=llm_engine, dispatch=dispatch, model_binding=model_binding, model_gate=model_gate,
         model_attempt=model_attempt, model_finish=model_finish, max_logical_requests=max_logical_requests,
-        log_callback=log_callback)
+        log_callback=log_callback, generation_time_owner_factory=generation_time_owner_factory,
+        generation_ledger_factory=generation_ledger_factory)
