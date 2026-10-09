@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "gaia2-phase-verification-v1",
+  "phase": "5.2d1",
+  "date": "2026-10-10",
+  "status": "passed_for_declared_scope",
+  "scope": "trusted bridge delegation seam plus fixed TS-Python child identity transport; no official provider, Scenario, A2A or Noise run",
+  "tests": {
+    "bridgeDelegation": {"passed": 4, "total": 4},
+    "pythonChildIdentity": {"passed": 2, "total": 2},
+    "pythonPhase5": {"passed": 268, "total": 268},
+    "pythonPhase3LiveBridge": {"passed": 39, "total": 39},
+    "backendIdentityNativePipeClock": {"passed": 19, "total": 19},
+    "pythonCompile": "passed",
+    "typescriptTypecheck": "passed",
+    "gitDiffCheck": "passed"
+  },
+  "boundaries": {
+    "officialScenario": "not_run",
+    "realProvider": "not_run",
+    "officialA2A": "not_run",
+    "officialNoise": "not_run",
+    "officialPythonModified": false
+  },
+  "sourceSha256": {
+    "scripts/capybara_official_bridge.py": "8580d7ecc4ddf0f06c7988d79012bf3284b27f72faaef735de71a083567b4cdd",
+    "scripts/gaia2_private_native_binding.py": "b26d3cf0eabc04c71b34ec900856080388b5737b356da4d588020e24cc5bd3a5",
+    "scripts/gaia2_parent_a2a_coordinator.py": "b846f04fafd9bdd9597ddbb561cf4d5c7b93ab1996a79aaf221ae4144836398b",
+    "test/phase5_2d1_bridge_delegation_test.py": "3287a185cfffdebeea96d0f756e837fbd53fc2422a7b5f72d403963cac3aeecf",
+    "test/phase5_child_identity_transport_test.py": "9339e81f502befa83a72aea71a904d22d848a0b6177fb1ab7e752898af58ecbf",
+    "capybara-backend/src/core/plugins/runtime-delegation-registry.ts": "a4b2dbc0d5271afc10d15e95deb89deda1140b4d17085135479791885baac43c",
+    "capybara-backend/src/core/plugins/runtime-delegation-native-pipe.ts": "5a66a2c792c42b1e29cf80833722b56cdf8eccfb963a7d38a7707a4641ff1f26",
+    "capybara-backend/test/runtime-delegation-child-identity.test.ts": "625e75926a2a67e61e1ba64177f6b45a6bb448043508466ae10233f0fdb1f511"
+  }
+}

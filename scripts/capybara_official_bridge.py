@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 _notification_binding_factory = None
 _notification_binding_configured = False
+_delegation_coordinator_factory = None
+_delegation_coordinator_configured = False
 
 
 @dataclass(frozen=True)
@@ -151,6 +153,47 @@ def _notification_binding_for_run(env, scenario_id: str):
     if type(binding) is not BridgeNotificationBinding:
         raise HookProtocolError("invalid_notification_binding")
     return binding
+
+
+def configure_delegation_bridge(factory) -> None:
+    """Install the trusted per-run AppAgent coordinator factory once.
+
+    This is an adapter-owned capability, never an Actor/model input.  The
+    factory is intentionally separate from the notification factory because a
+    production parent may construct native ownership and notification
+    lifecycle together, while this bridge only consumes the resulting
+    coordinator.  Until configured, ``AppAgent__expert_agent`` stays an
+    unknown-effect action and is blocked by the historical path.
+    """
+    global _delegation_coordinator_factory, _delegation_coordinator_configured
+    if _delegation_coordinator_configured or not callable(factory):
+        raise HookProtocolError("delegation_factory_reconfiguration")
+    _delegation_coordinator_factory = factory
+    _delegation_coordinator_configured = True
+
+
+def _delegation_coordinator_for_run(env, scenario_id: str):
+    """Resolve one trusted per-run coordinator without taking Actor input."""
+    factory = _delegation_coordinator_factory
+    if factory is None:
+        return None
+    try:
+        coordinator = factory(env, scenario_id)
+    except HookProtocolError:
+        raise
+    except BaseException:
+        raise HookProtocolError("delegation_factory_failed") from None
+    # Keep the trust root explicit: the configured factory is trusted, but its
+    # result must still expose the fixed same-process coordinator protocol and
+    # be pinned to this exact official Environment.  A future production
+    # adapter may return a ParentA2ACoordinator-compatible implementation, but
+    # it cannot smuggle authority through Actor JSON or a different clock.
+    required = ("begin_child", "run_child", "close")
+    if (coordinator is None
+            or any(not callable(getattr(coordinator, name, None)) for name in required)
+            or getattr(coordinator, "environment", None) is not env):
+        raise HookProtocolError("invalid_delegation_coordinator")
+    return coordinator
 
 
 class BridgeModelProtocolError(ValueError):
@@ -577,12 +620,17 @@ def _native_run_with_agent(
     active_turn = False
     termination_reason = "technical_failure"
     failure = None
+    delegation_coordinator = None
     _emit_runtime_event("official_run_started", scenarioId=scenario_id, toolCount=len(app_tools),
                         executionMode="live_plugin_host", generationTimeMode=simulated_generation_time_mode,
                         generationMeasurement="unavailable_official_litellm_metadata" if simulated_generation_time_mode == "measured" else "fixed_one_second",
                         maxActions=max_actions, turnLimit=turn_limit)
 
     try:
+        # The factory is trusted adapter configuration.  It can construct a
+        # per-run coordinator, but no child is created until an actual
+        # AppAgent action passes the live parent before_tool gate below.
+        delegation_coordinator = _delegation_coordinator_for_run(env, scenario_id)
         while True:
             revision, changed, stopped = _drain_notifications(env, messages, revision,
                                                               binding=notification_binding)
@@ -718,10 +766,52 @@ def _native_run_with_agent(
                 revision, gate_changed, stopped = _drain_notifications(env, messages, revision,
                                                                        binding=notification_binding)
                 multiple_calls = len(calls) != 1
-                invalid = argument_error or multiple_calls or action["effect"] == "unknown" or not preflight["valid"]
+                delegation_requested = (
+                    delegation_coordinator is not None
+                    and action["canonicalName"] == "AppAgent__expert_agent"
+                )
+                invalid = (argument_error or multiple_calls
+                           or (action["effect"] == "unknown" and not delegation_requested)
+                           or not preflight["valid"])
                 stale = generation_changed or gate_changed or stopped
                 permission = before_tool["decision"]["action"]
-                if invalid or stale or permission != "allow":
+                delegation_ready = (delegation_requested and not invalid and not stale
+                                     and permission == "allow")
+                if delegation_ready:
+                    # This is the only production-like child seam in this
+                    # bridge: the coordinator receives the exact action and
+                    # trusted parent gate receipt, creates the child lazily,
+                    # runs it, and returns only its completion string.  No
+                    # provider, Scenario, or Actor-supplied coordinator is
+                    # reachable from this branch.
+                    _emit_runtime_event("delegation_started", turn=iteration, callId=call_id,
+                                        canonicalName=action["canonicalName"])
+                    try:
+                        handle = delegation_coordinator.begin_child(
+                            action=action, parent_gate=before_tool)
+                        child_result = delegation_coordinator.run_child(handle)
+                        if type(child_result) is not str:
+                            raise TypeError("child_result_not_string")
+                    except BaseException:
+                        result = {"status": "blocked", "reason": "delegation_failed",
+                                  "executed": False, "requiredAction": "replan"}
+                        outcome = {"status": "failed_before_execution", "complete": True,
+                                   "executed": False, "reason": "delegation_failed"}
+                        usage["blockedTools"] += 1
+                        _emit_runtime_event("delegation_failed", turn=iteration, callId=call_id,
+                                            canonicalName=action["canonicalName"])
+                    else:
+                        result = {"status": "succeeded", "childResult": child_result,
+                                  "delegated": True}
+                        result, result_hash = _actor_visible_tool_result(result)
+                        outcome = {"status": "succeeded", "complete": True, "executed": True,
+                                   "result": result, "resultHash": result_hash,
+                                   "delegated": True}
+                        usage["toolsExecuted"] += 1
+                        _emit_runtime_event("delegation_completed", turn=iteration, callId=call_id,
+                                            canonicalName=action["canonicalName"],
+                                            resultHash=result_hash)
+                elif invalid or stale or permission != "allow":
                     reason = ("stale_dynamic_context" if stale else "multiple_tool_calls_not_supported" if multiple_calls
                               else "authoritative_read_required" if permission == "read_back"
                               else "hook_blocked" if permission != "allow"
@@ -788,6 +878,20 @@ def _native_run_with_agent(
             termination_reason = "live_hook_failure" if isinstance(error, HookProtocolError) else "technical_failure"
         raise
     finally:
+        delegation_close_failed = False
+        if delegation_coordinator is not None:
+            try:
+                # Parent termination is an authority boundary.  The
+                # coordinator revokes native child authority before closing
+                # its reader/runner; a cleanup failure cannot be reported as a
+                # successful parent run.
+                delegation_coordinator.close("parent_close")
+            except BaseException:
+                delegation_close_failed = True
+                if failure is None:
+                    failure = HookProtocolError("delegation_close_failed")
+                    termination_reason = "live_hook_failure"
+                _emit_runtime_event("delegation_close_failed")
         _emit_runtime_event("attempt_execution_ended", terminationReason=termination_reason,
                             actionBudget=max_actions, usage=usage, evaluationAttempted=failure is None)
         final = _invoke_hook(client, "attempt_end", env, messages, revision, usage["modelRequests"],
@@ -797,6 +901,8 @@ def _native_run_with_agent(
                                                      "usage": usage})
         if final["decision"]["action"] != "allow" and failure is None:
             raise HookProtocolError("attempt_end_rejected")
+        if delegation_close_failed and failure is not None:
+            raise failure
 
     # Official evaluation runs once, after the real actor loop ends. Its result
     # is not injected into Actor memory and never used to choose actor actions.

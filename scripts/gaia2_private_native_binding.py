@@ -55,6 +55,11 @@ _SCOPE_KEYS = frozenset(("parentExecutionId", "parentSessionId", "environmentGen
     "appId", "parentCanonicalName", "taskArgumentKey", "toolInventoryHash", "taskHash",
     "parentActionId", "requestId", "childExecutionId", "childSessionId", "task",
     "deadline", "maxNativeActions"))
+_CHILD_IDENTITY_KEYS = frozenset(("schemaVersion", "scopeHash", "environmentGeneration",
+    "parentExecutionId", "parentSessionId", "appId", "parentCanonicalName",
+    "taskArgumentKey", "toolInventoryHash", "taskHash", "parentActionId",
+    "requestId", "childExecutionId", "childSessionId"))
+_CHILD_IDENTITY_SCHEMA = "gaia2-child-identity-v1"
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _TICKET = re.compile(r"[0-9a-f]{32}\Z")
 # Dataclass Apps (including Contacts/RentAFlat) are unhashable. Key by identity,
@@ -605,19 +610,64 @@ class NativeAppBinding:
             _fail("NATIVE_SCOPE_INVALID")
         return _clone(scope), wire.value_hash(scope)
 
+    def __child_identity(self, identity: Any, scope: dict, digest: str) -> dict:
+        """Validate the fixed cross-process child identity envelope.
+
+        The envelope carries only stable parent/child identity and the hash of
+        the complete scope.  It is intentionally redundant with ``scope``:
+        the redundancy makes a parent/child substitution fail at the Python
+        boundary before any ticket or native callback can be created.
+        """
+        _exact(identity, _CHILD_IDENTITY_KEYS)
+        expected = {
+            "schemaVersion": _CHILD_IDENTITY_SCHEMA,
+            "scopeHash": digest,
+            "environmentGeneration": scope["environmentGeneration"],
+            "parentExecutionId": scope["parentExecutionId"],
+            "parentSessionId": scope["parentSessionId"],
+            "appId": scope["appId"],
+            "parentCanonicalName": scope["parentCanonicalName"],
+            "taskArgumentKey": scope["taskArgumentKey"],
+            "toolInventoryHash": scope["toolInventoryHash"],
+            "taskHash": scope["taskHash"],
+            "parentActionId": scope["parentActionId"],
+            "requestId": scope["requestId"],
+            "childExecutionId": scope["childExecutionId"],
+            "childSessionId": scope["childSessionId"],
+        }
+        if identity != expected:
+            _fail("NATIVE_CHILD_IDENTITY_MISMATCH")
+        return _clone(identity)
+
+    def __scope_payload(self, payload: Any, keys: frozenset[str], *, transport: bool = False) -> tuple[dict, str, dict | None]:
+        _exact(payload, keys)
+        scope, digest = self.__scope_shape(payload["scope"])
+        identity = payload.get("identity")
+        # Legacy direct in-process callers are retained for the controlled
+        # d0 seam.  The inherited pipe handlers below always set transport=True
+        # and therefore require the fixed identity envelope.
+        if transport and identity is None:
+            _fail("NATIVE_CHILD_IDENTITY_REQUIRED")
+        checked = self.__child_identity(identity, scope, digest) if identity is not None else None
+        return scope, digest, checked
+
     def bind_child(self, payload: Any) -> dict:
-        _exact(payload, {"scope"})
+        _exact(payload, {"scope"} if "identity" not in payload else {"scope", "identity"})
         with self.__lock:
             self.__check()
             self.__now()
             scope, digest = self.__scope_shape(payload["scope"])
+            identity = self.__child_identity(payload["identity"], scope, digest) if "identity" in payload else None
             if (scope["requestId"] in self.__children or scope["parentActionId"] in self.__parent_actions
                     or len(self.__children) >= _MAX_CHILDREN
                     or any(child["scope"]["childExecutionId"] == scope["childExecutionId"]
                            or child["scope"]["childSessionId"] == scope["childSessionId"] for child in self.__children.values())):
                 _fail("NATIVE_CHILD_REUSED")
             self.__parent_actions.add(scope["parentActionId"])
-            self.__children[scope["requestId"]] = {"scope": scope, "hash": digest, "status": "running", "count": 0}
+            self.__children[scope["requestId"]] = {"scope": scope, "identity": identity or self.__child_identity({
+                "schemaVersion": _CHILD_IDENTITY_SCHEMA, "scopeHash": digest,
+                **{key: scope[key] for key in _CHILD_IDENTITY_KEYS if key not in ("schemaVersion", "scopeHash")}}, scope, digest),
+                "hash": digest, "status": "running", "count": 0}
             return {"scopeHash": digest}
 
     def __child(self, scope: Any) -> dict:
@@ -911,11 +961,43 @@ class NativeAppBinding:
             return self.__agent_observations.pop(dispatch_id)
 
     def handlers(self) -> dict[str, Callable]:
-        result = {"inspect_app": self.inspect_app, "bind_child": self.bind_child,
-            "prepare_native": self.prepare_native, "commit_native": self.commit_native,
-            "cancel_child": self.cancel_child}
+        # Pipe-facing wrappers require the fixed identity envelope.  The
+        # underlying methods continue to accept the legacy direct shape for
+        # same-process d0 callers, but transport never does.
+        def bind_child_transport(payload: Any) -> dict:
+            if type(payload) is not dict or "identity" not in payload:
+                _fail("NATIVE_CHILD_IDENTITY_REQUIRED")
+            scope, digest, identity = self.__scope_payload(payload, frozenset(("scope", "identity")), transport=True)
+            return self.bind_child({"scope": scope, "identity": identity})
+
+        def prepare_native_transport(payload: Any) -> dict:
+            if type(payload) is not dict or "identity" not in payload:
+                _fail("NATIVE_CHILD_IDENTITY_REQUIRED")
+            self.__scope_payload(payload, frozenset(("scope", "identity", "toolId", "rawArguments")), transport=True)
+            return self.prepare_native({key: value for key, value in payload.items() if key != "identity"})
+
+        def commit_native_transport(payload: Any) -> dict:
+            if type(payload) is not dict or "identity" not in payload:
+                _fail("NATIVE_CHILD_IDENTITY_REQUIRED")
+            self.__scope_payload(payload, frozenset(("scope", "identity", "ticketId", "dispatchId", "toolId", "effectiveArgumentsHash")), transport=True)
+            return self.commit_native({key: value for key, value in payload.items() if key != "identity"})
+
+        def cancel_child_transport(payload: Any) -> dict:
+            if type(payload) is not dict or "identity" not in payload:
+                _fail("NATIVE_CHILD_IDENTITY_REQUIRED")
+            self.__scope_payload(payload, frozenset(("scope", "identity")), transport=True)
+            return self.cancel_child({"scope": payload["scope"]})
+
+        result = {"inspect_app": self.inspect_app, "bind_child": bind_child_transport,
+            "prepare_native": prepare_native_transport, "commit_native": commit_native_transport,
+            "cancel_child": cancel_child_transport}
         if self.__clock_environment is not None:
-            result["observe_clock"] = self.observe_clock
+            def observe_clock_transport(payload: Any) -> dict:
+                if type(payload) is not dict or "identity" not in payload:
+                    _fail("NATIVE_CHILD_IDENTITY_REQUIRED")
+                self.__scope_payload(payload, frozenset(("scope", "identity", "ticketId", "dispatchId", "checkpoint")), transport=True)
+                return self.observe_clock({key: value for key, value in payload.items() if key != "identity"})
+            result["observe_clock"] = observe_clock_transport
         return result
 
     def close(self) -> None:
