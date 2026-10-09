@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "gaia2-phase-verification-v1",
+  "phase": "5.2d2",
+  "date": "2026-10-10",
+  "status": "passed_for_declared_scope",
+  "scope": "explicit trusted production-like child factory and TS Host/private-pipe adapter; no official provider, Scenario, A2A or Noise run",
+  "tests": {
+    "pythonProductionDelegation": {"passed": 4, "total": 4},
+    "pythonPhase5_1dAnd2d": {"passed": 8, "total": 8},
+    "pythonPhase5": {"passed": 272, "total": 272},
+    "pythonPhase3LiveBridge": {"passed": 39, "total": 39},
+    "backendRuntimeDelegation": {"passed": 105, "total": 105},
+    "backendNativePipeWithAdapter": {"passed": 11, "total": 11},
+    "pythonCompile": "passed",
+    "typescriptTypecheck": "passed",
+    "gitDiffCheck": "passed"
+  },
+  "boundaries": {
+    "defaultExpertAgent": "unknown_block",
+    "officialPhase1EntryWired": false,
+    "officialScenario": "not_run",
+    "realProvider": "not_run",
+    "officialA2A": "not_run",
+    "officialNoise": "not_run",
+    "officialPythonModified": false
+  },
+  "sourceSha256": {
+    "scripts/capybara_official_bridge.py": "7fcfe535956cf0e8b524c7b8749cf11becbb381022fb786ceca4ebfd5c61ed6b",
+    "scripts/gaia2_production_delegation.py": "afe75328f076874b2ba770b3810fcfe630f596fb62ef50cb01b76a9832e76018",
+    "scripts/gaia2_parent_a2a_coordinator.py": "b846f04fafd9bdd9597ddbb561cf4d5c7b93ab1996a79aaf221ae4144836398b",
+    "scripts/gaia2_private_native_binding.py": "b26d3cf0eabc04c71b34ec900856080388b5737b356da4d588020e24cc5bd3a5",
+    "test/phase5_2d2_production_delegation_test.py": "2456732ee336a721266b9976257e54f65ea8fc2c8c907d3dad27101611893c7e",
+    "capybara-backend/src/core/plugins/runtime-plugin-host.ts": "0850794029afb198edb9a07f006d5f3b6299e44cd5aa1c20c0b69ea9239397d7",
+    "capybara-backend/src/core/plugins/runtime-delegation-host-adapter.ts": "cd10ee048200096185f91eaad4d74fdc6faa3a9bcf7d0b48c5244511ea195116",
+    "capybara-backend/src/core/plugins/runtime-delegation-native-pipe.ts": "5a66a2c792c42b1e29cf80833722b56cdf8eccfb963a7d38a7707a4641ff1f26",
+    "capybara-backend/test/runtime-delegation-native-pipe.test.ts": "9ba69606b66142963b3e696ce7e156acec674090ab3de7e64045178726e7f691"
+  }
+}

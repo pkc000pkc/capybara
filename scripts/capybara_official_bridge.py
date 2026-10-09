@@ -172,6 +172,33 @@ def configure_delegation_bridge(factory) -> None:
     _delegation_coordinator_configured = True
 
 
+def configure_production_delegation_bridge(*, owner_factory, child_factory,
+                                           registry_factory=None,
+                                           child_deadline_seconds: float = 600.0,
+                                           max_native_actions: int = 100) -> None:
+    """Install the explicit trusted production-like child factory.
+
+    This convenience entry point keeps the official bridge's default safe:
+    without an explicit call, ``AppAgent__expert_agent`` remains an unknown
+    effect and is blocked.  The supplied factories are adapter-owned Python
+    capabilities; they are never read from Actor JSON, model output, or the
+    private pipe.  This is still a local coordinator seam, not an official
+    provider/Scenario/A2A implementation.
+    """
+    from gaia2_notification_producer import ScopedNotificationOriginRegistry
+    from gaia2_production_delegation import make_production_delegation_factory
+
+    if registry_factory is None:
+        registry_factory = ScopedNotificationOriginRegistry
+    factory = make_production_delegation_factory(
+        owner_factory=owner_factory, child_factory=child_factory,
+        registry_factory=registry_factory,
+        child_deadline_seconds=child_deadline_seconds,
+        max_native_actions=max_native_actions,
+    )
+    configure_delegation_bridge(factory)
+
+
 def _delegation_coordinator_for_run(env, scenario_id: str):
     """Resolve one trusted per-run coordinator without taking Actor input."""
     factory = _delegation_coordinator_factory
