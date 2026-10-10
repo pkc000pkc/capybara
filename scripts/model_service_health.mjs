@@ -44,7 +44,6 @@ async function request({ url, method, headers, body, timeoutMs }) {
       ok: response.ok,
       elapsedMs: Date.now() - started,
       responseBytes: Buffer.byteLength(text),
-      responsePreview: text.slice(0, 240),
     }
   } catch (error) {
     return { ok: false, elapsedMs: Date.now() - started, ...safeError(error) }
@@ -73,7 +72,8 @@ export async function checkModelService({ root: projectRoot = root, timeoutMs = 
     endpoint: connection.baseUrl,
     checks: { models, chatCompletions: completion },
     keyRecorded: false,
-    noModelExecution: false,
+    benchmarkExecution: false,
+    noBenchmarkExecution: true,
     generatedAt: new Date().toISOString(),
   }
 }
@@ -84,7 +84,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(JSON.stringify(report, null, 2))
     if (report.status !== 'healthy') process.exitCode = 2
   } catch (error) {
-    console.error(JSON.stringify({ schemaVersion: 'gaia2-model-service-health-v1', status: 'configuration_error', ...safeError(error), keyRecorded: false, noModelExecution: true }, null, 2))
+    console.error(JSON.stringify({ schemaVersion: 'gaia2-model-service-health-v1', status: 'configuration_error', ...safeError(error), keyRecorded: false, benchmarkExecution: false, noBenchmarkExecution: true }, null, 2))
     process.exitCode = 2
   }
 }

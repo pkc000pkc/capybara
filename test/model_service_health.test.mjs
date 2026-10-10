@@ -17,6 +17,7 @@ test('model service health requires both models and chat completion checks', asy
     })
     assert.equal(report.status, 'healthy')
     assert.equal(report.keyRecorded, false)
+    assert.equal(report.noBenchmarkExecution, true)
     assert.equal(calls.length, 2)
     assert.match(calls[0].url, /\/v1\/models$/)
     assert.match(calls[1].url, /\/v1\/chat\/completions$/)

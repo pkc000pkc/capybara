@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-environment-lock-v1",
-  "generatedAt": "2026-10-10T03:09:51.759Z",
+  "generatedAt": "2026-10-10T03:12:52.783Z",
   "timeSource": "client-system-clock-new-Date-ISO-not-authoritative-dataset-time",
   "noModelExecution": true,
   "secretConfigRead": false,
@@ -1896,8 +1896,8 @@
     },
     {
       "path": "scripts/model_service_health.mjs",
-      "sha256": "987a161757efb8df686f0a362aa47aecc66b5a6ca61320f058097107a4bf3fb3",
-      "bytes": 3624
+      "sha256": "46ca59bbec024c1258ffd2e904286297a6dea4b9841b7314da333561c99e5ac7",
+      "bytes": 3646
     },
     {
       "path": "scripts/official_all_smoke.mjs",
@@ -2331,8 +2331,8 @@
     },
     {
       "path": "test/model_service_health.test.mjs",
-      "sha256": "c235bce31cfccb266b12b00fe2b6df1712949659709a7f1cad294e9482ffb605",
-      "bytes": 1030
+      "sha256": "9402c05057ccb777618332badd723186646b56dda4ac97f1d95217b8d0e71c36",
+      "bytes": 1082
     },
     {
       "path": "test/official_submission_config.test.mjs",
@@ -2620,7 +2620,7 @@
       "bytes": 1443
     }
   ],
-  "contentTreeSha256": "1a292853c3cf74a9bda362a494d48de6a69e456f022a952bed225475cd8d2e0c",
+  "contentTreeSha256": "ca4318ed2715b177f3cb36dfa75ba06f7715ced09a36f6a7aaec03d5f604e1d0",
   "officialCodeInputs": [
     {
       "path": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.official-python/are/__init__.py",
@@ -5480,11 +5480,11 @@
     "project": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "d18df3a7f1c5cd9f609543ef73543394bf280cab",
-      "gitHead": "d18df3a7f1c5cd9f609543ef73543394bf280cab",
+      "head": "8b80f7830393f8c09263b5da4ba3465e23af727c",
+      "gitHead": "8b80f7830393f8c09263b5da4ba3465e23af727c",
       "dirty": true,
-      "statusSha256": "c744eb67178966ab1ba746d5c54480c6f1c4a7fbe5a8a59a9d776c08508a2622",
-      "dirtyEntryCount": 19
+      "statusSha256": "0b6f340b5ea744e97ffdd03a2e7dad6d7bee94501e2089bfb0c9aca8d885b953",
+      "dirtyEntryCount": 18
     },
     "backend": {
       "status": "captured",
@@ -5498,11 +5498,11 @@
     "pluginSource": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "d18df3a7f1c5cd9f609543ef73543394bf280cab",
-      "gitHead": "d18df3a7f1c5cd9f609543ef73543394bf280cab",
+      "head": "8b80f7830393f8c09263b5da4ba3465e23af727c",
+      "gitHead": "8b80f7830393f8c09263b5da4ba3465e23af727c",
       "dirty": true,
-      "statusSha256": "c744eb67178966ab1ba746d5c54480c6f1c4a7fbe5a8a59a9d776c08508a2622",
-      "dirtyEntryCount": 19
+      "statusSha256": "0b6f340b5ea744e97ffdd03a2e7dad6d7bee94501e2089bfb0c9aca8d885b953",
+      "dirtyEntryCount": 18
     }
   },
   "hashingPolicy": {
