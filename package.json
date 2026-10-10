@@ -7,6 +7,7 @@
     "gate1": "node scripts/gate1_smoke.mjs",
     "preflight": "node scripts/preflight_dataset.mjs",
     "real-smoke": "node scripts/real_model_smoke.mjs",
+    "model-health": "node scripts/model_service_health.mjs",
     "official-e2e": "node scripts/official_e2e_smoke.mjs",
     "official-e2e-all": "node scripts/official_all_smoke.mjs",
     "official-integrated-pilot": "node scripts/official_integrated_pilot.mjs",
