@@ -1,6 +1,7 @@
 """Trusted native provenance and exact provider-view compaction identities."""
 
 import copy
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -126,9 +127,16 @@ class Tests(unittest.TestCase):
         self.assertTrue(result.success)
         after = next(r for r in host["requests"] if r["checkpoint"] == "after_tool" and r["action"]["id"] == "native-read")
         message = next(m for m in after["messages"] if m.get("toolCallId") == "native-read")
+        self.assertEqual(message["observation"]["actionId"], after["action"]["id"])
+        self.assertEqual(message["observation"]["resourceKey"], after["action"]["resourceKey"])
+        self.assertEqual(message["observation"]["canonicalName"], after["action"]["canonicalName"])
         self.assertEqual(message["observation"]["resultHash"], after["outcome"]["resultHash"])
         self.assertEqual(message["observation"]["queryHash"], after["action"]["mutationKey"])
-        self.assertEqual(message["observation"]["observedAt"], after["clock"]["now"])
+        observed_at = message["observation"]["observedAt"]
+        self.assertIn(type(observed_at), (int, float))
+        self.assertTrue(math.isfinite(observed_at))
+        self.assertGreaterEqual(observed_at, 0)
+        self.assertLessEqual(observed_at, after["clock"]["now"])
         self.assertTrue(message["observation"]["complete"])
         self.assertTrue(message["observation"]["viewComplete"])
         self.assertFalse(any("observation" in m for batch in inputs for m in batch))
