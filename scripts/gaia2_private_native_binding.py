@@ -26,9 +26,7 @@ import os
 from pathlib import Path
 import re
 import stat
-import sys
 import threading
-import types
 import typing
 import uuid
 import weakref
@@ -37,12 +35,10 @@ from typing import Any, Callable
 
 import gaia2_a2a_wire as wire
 import gaia2_argument_preflight as preflight
+import gaia2_source_pinned_reads as source_pinned_reads
 from are.simulation.agents.default_agent.app_agent import AppAgent
 from are.simulation.agents.default_agent.default_tools import FinalAnswerTool
 from are.simulation.apps.app import App
-from are.simulation.apps import shopping as official_shopping
-from are.simulation import tool_utils as official_tool_utils
-from are.simulation import tools as official_tools
 from are.simulation.environment import Environment
 from are.simulation.time_manager import TimeManager
 from are.simulation.tool_utils import AppTool, AppToolAdapter, OperationType
@@ -75,119 +71,19 @@ _OWNERS: dict[int, weakref.ReferenceType] = {}
 _OWNER_LOCK = threading.Lock()
 _MAX_CHILDREN = 100000
 _MAX_TICKETS = 100000
-# This exception is a reviewed ARE 1.2.0 source policy, not a hash of whatever
-# happens to be installed. Every other undeclared operation remains excluded.
-_SOURCE_RETURN_PIN_ID = "are-1.2-shopping-discount-codes-read-v1"
-_SOURCE_RETURN_FILES = {
-    "simulation/apps/shopping.py": ("7436b99640628ef737418396287fe8b7fb4912bd81bfee72e251a748aaeae205", 25517),
-    "simulation/tool_utils.py": ("dfbbe5bbfebd79b9aad214843e652600a4b7604d21a73b28d82bf9686d575f7f", 20251),
-    "simulation/tools.py": ("ba32076c4ab3089ea64c0a6e83813af8e9f54dbcb11d2bf4aa96a4a6cb1cad7c", 6774),
-}
-
-
-def _code_shape(code: types.CodeType) -> tuple:
-    def constant(value: Any) -> Any:
-        if type(value) is types.CodeType:
-            return ("code", _code_shape(value))
-        if type(value) is tuple:
-            return ("tuple", tuple(constant(item) for item in value))
-        if value is None or type(value) in (bool, int, float, str, bytes):
-            return (type(value), value)
-        _fail("NATIVE_SOURCE_RETURN_CODE_INVALID")
-    return (code.co_name, code.co_qualname, code.co_argcount, code.co_posonlyargcount,
-            code.co_kwonlyargcount, code.co_nlocals, code.co_stacksize, code.co_flags,
-            code.co_code, tuple(constant(value) for value in code.co_consts),
-            code.co_names, code.co_varnames, code.co_freevars, code.co_cellvars,
-            code.co_exceptiontable)
+# Kept as private compatibility aliases; both callers share one reviewed policy.
+_SOURCE_RETURN_PIN_ID = source_pinned_reads.SOURCE_RETURN_PIN_ID
+_SOURCE_RETURN_FILES = source_pinned_reads.SOURCE_RETURN_FILES
 
 
 def _source_return_pin(app: App, tool: AppTool, *, has_are_clock: bool) -> str | None:
-    """Match fixed file bytes AND the loaded implementation/metadata.
-
-    Compilation is comparison only; it never executes the pinned source or
-    substitutes a different function for ARE's actual AppTool call chain.
-    """
-    if (not has_are_clock or sys.version_info[:2] != (3, 12)
-            or type(app) not in (official_shopping.ShoppingApp, official_shopping.Shopping)
-            or type(tool) is not AppTool or tool.class_instance is not app
-            or tool.class_name != type(app).__name__ or tool.app_name != app.name
-            or tool.func_name != "get_all_discount_codes" or tool.write_operation is not None
-            or tool.name != app.name + "__get_all_discount_codes"
-            or tool._public_name != tool.name or tool.args != []
-            or tool.return_type != "dict[str, list[str]]"
-            or tool.return_description != "Dictionary mapping discount codes to list of item IDs they apply to"
-            or tool.function_description != "Returns all the discount codes that are available with the items they apply to."
-            or tool._public_description != tool.function_description):
-        return None
-    function = tool.function
-    if (not inspect.isfunction(function)
-            or function is not official_shopping.ShoppingApp.get_all_discount_codes
-            or getattr(type(app), "get_all_discount_codes") is not function
-            or getattr(function, "__wrapped__", None) is not None
-            or getattr(function, "llm_formatter", None) is not None
-            or getattr(function, "__event_registered__", False)
-            or getattr(function, "_is_app_tool", None) is not True
-            or getattr(function, "_is_data_tool", None) is not True
-            or getattr(function, "_is_env_tool", False)
-            or getattr(function, "_is_user_tool", False)
-            or function.__defaults__ is not None or function.__kwdefaults__ is not None
-            or function.__closure__ is not None):
-        return None
-    signature = inspect.signature(function)
-    parameters = tuple(signature.parameters.values())
-    if (len(parameters) != 1 or parameters[0].name != "self"
-            or parameters[0].kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
-            or parameters[0].default is not inspect.Parameter.empty
-            or parameters[0].annotation is not inspect.Parameter.empty
-            or signature.return_annotation != dict[str, list[str]]):
-        return None
-    root = Path(__file__).resolve().parents[1] / ".official-python" / "are"
-    compiled = {}
-    try:
-        for relative, (expected_hash, expected_bytes) in _SOURCE_RETURN_FILES.items():
-            path = root / relative
-            _no_links(path)
-            data = path.read_bytes()
-            if len(data) != expected_bytes or hashlib.sha256(data).hexdigest() != expected_hash:
-                return None
-            compiled[relative] = compile(data, str(path), "exec", dont_inherit=True, optimize=0)
-        checks = (
-            (function, official_shopping, "simulation/apps/shopping.py", "ShoppingApp.get_all_discount_codes"),
-            (AppTool.__call__, official_tool_utils, "simulation/tool_utils.py", "AppTool.__call__"),
-            (AppToolAdapter.forward, official_tool_utils, "simulation/tool_utils.py", "AppToolAdapter.forward"),
-            (Tool.__call__, official_tools, "simulation/tools.py", "Tool.__call__"),
-            (official_tools.handle_agent_inputs, official_tools, "simulation/tools.py", "handle_agent_inputs"),
-            (official_tools.handle_agent_outputs, official_tools, "simulation/tools.py", "handle_agent_outputs"),
-        )
-        def find(code: types.CodeType, qualname: str) -> types.CodeType | None:
-            if code.co_qualname == qualname:
-                return code
-            for child in code.co_consts:
-                if type(child) is types.CodeType:
-                    result = find(child, qualname)
-                    if result is not None:
-                        return result
-            return None
-        for actual, module, relative, qualname in checks:
-            path = root / relative
-            if (not inspect.isfunction(actual) or actual.__globals__ is not vars(module)
-                    or Path(os.path.abspath(inspect.getsourcefile(actual))) != path
-                    or Path(os.path.abspath(module.__file__)) != path):
-                return None
-            expected = find(compiled[relative], qualname)
-            if expected is None or _code_shape(actual.__code__) != _code_shape(expected):
-                return None
-    except (OSError, ValueError, TypeError, NativeBindingError):
-        return None
-    return _SOURCE_RETURN_PIN_ID
+    return source_pinned_reads.source_return_pin(app, tool, has_are_clock=has_are_clock)
 
 
 def _source_return_state(app: App) -> None:
     # The reviewed implementation iterates only these containers/keys. Reject
     # overloaded containers whose iteration could execute an unrelated effect.
-    codes = app.discount_codes
-    if (type(codes) is not dict or any(type(key) is not str or type(value) is not dict
-            or any(type(code) is not str for code in value) for key, value in codes.items())):
+    if not source_pinned_reads.source_return_state_is_safe(app):
         _fail("NATIVE_SOURCE_RETURN_STATE_INVALID")
 
 
@@ -526,6 +422,7 @@ class NativeAppBinding:
             self.__add_source_object(Environment)
             self.__add_source_object(TimeManager)
         self.__add_source_path(Path(__file__))
+        self.__add_source_object(source_pinned_reads.source_return_pin)
         for source in trusted_source_files:
             self.__add_source_path(Path(source))
         for entry in (*self.__original_entries, self.__tools["final_answer"]):
@@ -752,7 +649,14 @@ class NativeAppBinding:
                 self.__function_snapshot(EventRegisterer.event_registered),
                 self.__function_snapshot(EventRegisterer.is_active),
                 self.__function_snapshot(EventRegisterer.is_capture_mode),
-                self.__function_snapshot(preflight.validate_tool_arguments), clock_binding)
+                self.__function_snapshot(preflight.validate_tool_arguments),
+                tuple(self.__function_snapshot(function) for function in (
+                    source_pinned_reads.source_return_pin,
+                    source_pinned_reads.source_return_state_is_safe,
+                    source_pinned_reads.shopping_getter_read_pin,
+                    source_pinned_reads._code_shape,
+                    source_pinned_reads._find_code,
+                    source_pinned_reads._no_links)), clock_binding)
 
     def __check(self) -> None:
         if self.__closed:

@@ -36,9 +36,12 @@ from gaia2_notification_producer import (
 )
 from gaia2_runtime_hooks import HookProtocolError, RuntimeHookClient
 from gaia2_argument_preflight import safe_json_value, validate_tool_arguments
+from gaia2_source_pinned_reads import shopping_getter_read_pin
 
+from are.simulation.environment import Environment
 from are.simulation.notification_system import MessageType
 from are.simulation.scenarios.scenario import ScenarioValidationResult
+from are.simulation.time_manager import TimeManager
 from are.simulation.tool_utils import OperationType
 from are.simulation.types import EnvironmentState
 
@@ -496,17 +499,32 @@ def _actor_visible_tool_result(result: Any) -> tuple[Any, str]:
     """Use the existing Actor's default=str view at the strict JSON IPC edge.
 
     Do not expose object internals or invent a richer dataclass projection.
-    Serialize once for both Actor and Hook consumers, reject non-finite JSON,
-    and retain the original result hash only when the projection agrees.
+    Serialize once for both Actor and Hook consumers. Hash that strict JSON
+    view, not the native container: JSON turns integer object keys into strings
+    whose lexical order can differ from the native integer sort order.
     """
+    def unique_object(pairs):
+        value = {}
+        for key, child in pairs:
+            if key in value:
+                # JSON key coercion must never silently erase native evidence.
+                raise ValueError("duplicate projected object key")
+            value[key] = child
+        return value
+
     try:
-        projected = json.loads(json.dumps(result, default=str, ensure_ascii=False, allow_nan=False))
-        result_hash = _stable_hash(result)
-        _close_tool_result_resources(result)
-        if _stable_hash(projected) != result_hash:
-            raise HookProtocolError("tool_result_hash_mismatch")
+        projected = json.loads(
+            json.dumps(result, default=str, ensure_ascii=False, allow_nan=False),
+            object_pairs_hook=unique_object,
+        )
+        if not safe_json_value(projected):
+            raise ValueError("unsafe projected JSON")
+        result_hash = _stable_hash(projected)
     except (TypeError, ValueError, RecursionError, OverflowError):
         raise HookProtocolError("invalid_tool_result_payload") from None
+    finally:
+        # An invalid observation does not give us ownership of a live handle.
+        _close_tool_result_resources(result)
     return projected, result_hash
 
 
@@ -681,26 +699,39 @@ def _native_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
     require JSON Schema primitives instead, so this adapter keeps the useful
     descriptions while normalising the type surface.
     """
-    raw_type = str(schema.get("type", "string"))
-    lowered = raw_type.lower()
-    if "list[" in lowered or lowered.startswith("list"):
-        json_type = "array"
-        items: dict[str, Any] = {"type": "string"}
-        if "int" in lowered and "str" not in lowered:
-            items = {"type": "integer"}
-        elif "float" in lowered and "str" not in lowered:
-            items = {"type": "number"}
-        result: dict[str, Any] = {"type": json_type, "items": items}
-    elif "dict" in lowered or "any" in lowered:
-        result = {"type": "object", "additionalProperties": True}
-    elif "bool" in lowered:
-        result = {"type": "boolean"}
-    elif "float" in lowered:
-        result = {"type": "number"}
-    elif "int" in lowered or "integer" in lowered:
-        result = {"type": "integer"}
-    else:
-        result = {"type": "string"}
+    def type_schema(label: str) -> dict[str, Any]:
+        # ARE format_type_name emits pipe unions, including unions inside list
+        # brackets. Split only the top-level union; never infer null by substring.
+        label = label.strip().lower()
+        depth = start = 0
+        members = []
+        for index, char in enumerate(label):
+            if char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+            elif char == "|" and depth == 0:
+                members.append(label[start:index].strip())
+                start = index + 1
+        members.append(label[start:].strip())
+        if len(members) > 1:
+            options = [type_schema(member) for member in members]
+            if all(set(option) == {"type"} for option in options):
+                return {"type": list(dict.fromkeys(option["type"] for option in options))}
+            return {"anyOf": options}
+        if label in ("none", "nonetype", "null"):
+            return {"type": "null"}
+        if label.startswith("list[") and label.endswith("]"):
+            return {"type": "array", "items": type_schema(label[5:-1])}
+        if label in ("list", "array"):
+            return {"type": "array", "items": {"type": "string"}}
+        if label.startswith("dict") or label in ("any", "object"):
+            return {"type": "object", "additionalProperties": True}
+        primitives = {"bool": "boolean", "boolean": "boolean", "float": "number",
+                      "number": "number", "int": "integer", "integer": "integer"}
+        return {"type": primitives.get(label, "string")}
+
+    result = type_schema(str(schema.get("type", "string")))
     if schema.get("description"):
         result["description"] = schema["description"]
     return result
@@ -715,11 +746,16 @@ def _native_openai_tool(tool) -> dict[str, Any]:
         name: _native_json_schema(value)
         for name, value in properties.items()
     }
+    for value in normalized_properties.values():
+        types = value.get("type", [])
+        if types == "string" or (isinstance(types, list) and "string" in types):
+            # Empty top-level str parameters cannot roundtrip the pinned ARE
+            # Trace parser. Nested empty strings remain valid JSON observations.
+            value["minLength"] = 1
     required = []
     defaults = {argument.name for argument in tool.args if argument.has_default}
     for name in parameters.get("required", []):
-        original = properties.get(name, {})
-        if name not in defaults and "none" not in str(original.get("type", "")).lower():
+        if name not in defaults:
             required.append(name)
     function["parameters"] = {
         "type": "object",
@@ -778,7 +814,7 @@ def _canonical(tool) -> tuple[str, str]:
     return str(tool.class_name), str(tool.func_name)
 
 
-def _action_for_tool(tool, call_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def _action_for_tool(tool, call_id: str, arguments: dict[str, Any], *, env=None) -> dict[str, Any]:
     """Classify from official metadata, never from public-name heuristics."""
     class_name, function_name = _canonical(tool)
     canonical = f"{class_name}__{function_name}"
@@ -792,7 +828,19 @@ def _action_for_tool(tool, call_id: str, arguments: dict[str, Any]) -> dict[str,
         # evidence or an innocuous read despite the outer operation metadata.
         effect = "unknown"
     elif not compatible:
-        effect = "unknown"
+        # One reviewed metadata omission is allowed only with the exact official
+        # code, container state, and this Environment's actual ARE clock. Names,
+        # data_tool markers, and an arbitrary caller-supplied clock are not proof.
+        has_are_clock = False
+        if (type(env) is Environment and type(env.time_manager) is TimeManager
+                and getattr(tool.class_instance, "time_manager", None) is env.time_manager):
+            try:
+                clock_now = env.time_manager.time()
+                has_are_clock = type(clock_now) in (int, float) and math.isfinite(clock_now) and clock_now >= 0
+            except Exception:
+                pass
+        effect = ("read" if shopping_getter_read_pin(tool.class_instance, tool,
+                    has_are_clock=has_are_clock) is not None else "unknown")
     elif class_name == "AgentUserInterface" and function_name == "send_message_to_user":
         effect = "finish"
     elif class_name == "SystemApp" and function_name == "wait_for_notification":
@@ -1559,7 +1607,7 @@ def _native_run_with_agent(
                 })
                 _emit_runtime_event("official_argument_preflight", turn=iteration, callId=call_id,
                                     **preflight)
-                action = (_action_for_tool(tool, call_id, arguments) if tool is not None else {
+                action = (_action_for_tool(tool, call_id, arguments, env=env) if tool is not None else {
                     "id": call_id, "name": name, "canonicalName": "unknown", "effect": "unknown",
                     "arguments": arguments, "mutationKey": _stable_hash({"tool": name, "arguments": arguments}),
                     "resourceKey": "unknown", "idempotent": False, "authoritativeRead": False,
