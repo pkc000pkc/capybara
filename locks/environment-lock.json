@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-environment-lock-v1",
-  "generatedAt": "2026-10-13T10:28:58.295Z",
+  "generatedAt": "2026-10-13T16:10:45.131Z",
   "timeSource": "client-system-clock-new-Date-ISO-not-authoritative-dataset-time",
   "noModelExecution": true,
   "secretConfigRead": false,
@@ -1662,7 +1662,7 @@
     ]
   },
   "packageLockSha256": "6f9c567badd221e703988d7e8d1f3190d111b45f9d396dedfb12e4dcddc64788",
-  "bridgeSha256": "182df1f33b795179f7b4bb8cd9163975bde17a01780e9ad9da8afa7fa5df60c4",
+  "bridgeSha256": "45db3b8359c6daa32bd828f14824149b94e3910aed92b380ce06674dfc97e4f8",
   "codeInputs": [
     {
       "path": "config/phase0-protocol.json",
@@ -1676,8 +1676,8 @@
     },
     {
       "path": "gaia2-runner-manifest.json",
-      "sha256": "191c5a9b7325f6dd06373ba561073d75ab0bd18d10c6ed1f8f03434f02952615",
-      "bytes": 3559
+      "sha256": "cd91b480a34e0d0d6604865c0764f7bafe1337a9c33692cdd9d02ad303bf60db",
+      "bytes": 4077
     },
     {
       "path": "package-lock.json",
@@ -1686,8 +1686,8 @@
     },
     {
       "path": "package.json",
-      "sha256": "05dc306f1c50f2a5b4a55df79cb22ef9cc0623cf2623ca30d8504cbcf14bb732",
-      "bytes": 2238
+      "sha256": "11aa6a846c0ef0b42e511b82ab3049b03dd968e866e72df71090e1fd7f7ef9ad",
+      "bytes": 2435
     },
     {
       "path": "plugins/gaia2-evaluation/capybara.plugin.json",
@@ -1791,13 +1791,13 @@
     },
     {
       "path": "schemas/run-manifest.schema.json",
-      "sha256": "701838f1796bf6c384f4ffcc3684461a1310c459a8897d1372cccb1618dfee51",
-      "bytes": 4158
+      "sha256": "43ba8f13681ae117eeb8819978ea157cb15a12c33bf77f869c96bfbf2275a414",
+      "bytes": 5448
     },
     {
       "path": "scripts/capybara_official_bridge.py",
-      "sha256": "182df1f33b795179f7b4bb8cd9163975bde17a01780e9ad9da8afa7fa5df60c4",
-      "bytes": 103758
+      "sha256": "45db3b8359c6daa32bd828f14824149b94e3910aed92b380ce06674dfc97e4f8",
+      "bytes": 103849
     },
     {
       "path": "scripts/download_dataset.mjs",
@@ -1845,9 +1845,14 @@
       "bytes": 7409
     },
     {
+      "path": "scripts/gaia2_model_http_guard.py",
+      "sha256": "0200c929053178db07a49659021f1629a49cf1d27a04b4ce2bacf314840a9a38",
+      "bytes": 19440
+    },
+    {
       "path": "scripts/gaia2_model_retry.py",
-      "sha256": "49f0d0e2381e004e340183199cae31bfd0fc788ff6868e6e6620423178d2e0a6",
-      "bytes": 13557
+      "sha256": "7f89c548133df56d8a56d3a4e5dca428629701dfdd2e79098a0ac52f3af42507",
+      "bytes": 13689
     },
     {
       "path": "scripts/gaia2_notification_producer.py",
@@ -1856,8 +1861,8 @@
     },
     {
       "path": "scripts/gaia2_official_a2a.py",
-      "sha256": "89ebacd91b8daacb32a32a8c2625da2bb60cf7fdc9c24722e3e8113a628e842e",
-      "bytes": 56037
+      "sha256": "7e41d241262d1b56d47d3cab347662b4386da2ce188e92fc6aa6a24a248643c9",
+      "bytes": 56271
     },
     {
       "path": "scripts/gaia2_parent_a2a_coordinator.py",
@@ -1886,8 +1891,8 @@
     },
     {
       "path": "scripts/gaia2_scoped_model_broker.py",
-      "sha256": "a0b1af9c18f4f59dc78339d19f81ded795ba19db0f5c2e5a06ca62be0dec07d5",
-      "bytes": 37636
+      "sha256": "0e9fbd5605857cba7ceadf9c244201dda655f9dc86e98eaf14fcda6e80983ca2",
+      "bytes": 39885
     },
     {
       "path": "scripts/gate1_smoke.mjs",
@@ -2070,14 +2075,29 @@
       "bytes": 9163
     },
     {
+      "path": "scripts/phase6_budget_report.mjs",
+      "sha256": "1895268229dece2650711ded25ce606e145ca6c3ab5ade96f8909b83c5663f1e",
+      "bytes": 3667
+    },
+    {
+      "path": "scripts/phase6_http_report.mjs",
+      "sha256": "531145bf660f04cc3c39f0ca7d912de64897750c552e7070dff6ae320f47e072",
+      "bytes": 2619
+    },
+    {
       "path": "scripts/phase6_result_audit.mjs",
-      "sha256": "bbb19e58b4382ec0e6fee677812b081fb7178e5fdf912a78003e5c17c72e117c",
-      "bytes": 9357
+      "sha256": "ddaf1bc9f5cebb9534ea54b0a59b53a44f4943cd6b4f7b5d6f8683ab6568bab2",
+      "bytes": 10373
     },
     {
       "path": "scripts/phase6_resume_plan.mjs",
       "sha256": "4973fb9a37a71ba937e0f1dcab32aa442cc1da97fb7a8c4316590537bb5c874c",
       "bytes": 5188
+    },
+    {
+      "path": "scripts/phase6_scope_gate.mjs",
+      "sha256": "213723cc15b0a115d001050a8f1c7823af45aa72ab892f6e9e8918591031d129",
+      "bytes": 2579
     },
     {
       "path": "scripts/phase7_search_protocol_probe.py",
@@ -2101,8 +2121,8 @@
     },
     {
       "path": "scripts/prepare_run.mjs",
-      "sha256": "f02ae81be41a320d243fcccd778c6452889cfec373f5a188250abe33d97a4a1d",
-      "bytes": 1982
+      "sha256": "fb8d7c7bd945c2fef7c61da50fddae881c3cfc4181d3ab0dcb01744e0cacce0e",
+      "bytes": 2050
     },
     {
       "path": "scripts/real_model_smoke.mjs",
@@ -2166,8 +2186,8 @@
     },
     {
       "path": "src/phase0_audit.mjs",
-      "sha256": "ea008974cde06c01523fc9e39deeb4b3038e6a029ee9c350becc6881d720af6f",
-      "bytes": 15507
+      "sha256": "99f69cb41593ba1b416305853300e12c16750710a9207772472e6d2f8add74a9",
+      "bytes": 15553
     },
     {
       "path": "src/phase0_dataset.mjs",
@@ -2181,8 +2201,8 @@
     },
     {
       "path": "src/phase0_run.mjs",
-      "sha256": "7cbaec56c7ac0227b101e7cc3733f879b4aba0aa1ca5adbe970958106f6fae7a",
-      "bytes": 13872
+      "sha256": "5f87048b0d333a79caedb5ed694dd2aedb6873221277d2e7ef9a5726ff2ec2b4",
+      "bytes": 14817
     },
     {
       "path": "src/phase1_cli.mjs",
@@ -2211,8 +2231,8 @@
     },
     {
       "path": "src/phase1_official.mjs",
-      "sha256": "9349c02aa80d592356e7ed6fad4454dcfb31bedbbc332df5f6a614d982b0fdb3",
-      "bytes": 14896
+      "sha256": "fa310adae2a05df7b8899af17953bde38d4e7b0bd6f80029381889434c107cca",
+      "bytes": 15008
     },
     {
       "path": "src/phase1_process.mjs",
@@ -2221,8 +2241,8 @@
     },
     {
       "path": "src/phase1_runner.mjs",
-      "sha256": "3af11387163c987006be1fea59a067b91c84ca927526f1d918113c4d25cd78f3",
-      "bytes": 27986
+      "sha256": "75c777b29b2f516b63d9b12cd7c13340416bf445d0ad4765adb0156fd318c56c",
+      "bytes": 28442
     },
     {
       "path": "src/phase12_correction_campaign.mjs",
@@ -2231,8 +2251,8 @@
     },
     {
       "path": "src/phase2_audit.mjs",
-      "sha256": "e218d45845beb5c042721bf85f22bd86b271f390265c768129e2ea29d2619695",
-      "bytes": 47967
+      "sha256": "075f4ef99338b377f8bbbf352e77951b5132d856e6a1b9d37ba18c7916276368",
+      "bytes": 48066
     },
     {
       "path": "src/phase2_cli.mjs",
@@ -2241,8 +2261,8 @@
     },
     {
       "path": "src/phase2_export.mjs",
-      "sha256": "a574eb4c03e4f6cf0927293a26ee2219c9d056e1be282bbea1470aab1308d124",
-      "bytes": 20112
+      "sha256": "ec6eb9306a300e198ef0b18bef84b5fa1e1d4993c2a47f9207955d2757d84069",
+      "bytes": 20211
     },
     {
       "path": "src/phase3_hook_service.mjs",
@@ -2251,8 +2271,8 @@
     },
     {
       "path": "src/phase3_runtime_evidence.mjs",
-      "sha256": "19648a3ecdf258f80d6283dedbef99707c4a7ff7fa9c5f94024d404a2b04a5bd",
-      "bytes": 33223
+      "sha256": "32ec9175275b6752e1277a1e76d5ab687d5cbc8c6670861eda7f9bd28666726b",
+      "bytes": 37716
     },
     {
       "path": "src/phase4_correction_attribution.mjs",
@@ -2323,6 +2343,31 @@
       "path": "src/phase5_model_usage.mjs",
       "sha256": "3b1684aaf8b744f7edc7c7d8b73dd2913a6d10f4ce86bb7f8e489bcfd1ebda76",
       "bytes": 13641
+    },
+    {
+      "path": "src/phase6_budget.mjs",
+      "sha256": "ab10da60972dc21ccb131e731fe7b8fefba14d627daa61be2834f61a85792419",
+      "bytes": 36154
+    },
+    {
+      "path": "src/phase6_http_evidence.mjs",
+      "sha256": "bf8617deacb2b8837264f3a8679f68ae11cfd33157cbf611114cc7102bfbcff6",
+      "bytes": 25946
+    },
+    {
+      "path": "src/phase6_process_identity.mjs",
+      "sha256": "377da4b268a84fae1924d009b5b5f6189a8253b0a33e22f879858ec7f934b991",
+      "bytes": 3749
+    },
+    {
+      "path": "src/phase6_scope_gate.mjs",
+      "sha256": "ade729586688b67a503ebd2f7f9b86a5c8f7ef4be7c98a22d795a6b4da426323",
+      "bytes": 12664
+    },
+    {
+      "path": "src/phase6_selection.mjs",
+      "sha256": "d78c6072ab5dd7d1d0b7f6384622865177acb5b83abfcf44754ec7c8f13dc443",
+      "bytes": 6940
     },
     {
       "path": "src/replan_controller.mjs",
@@ -2506,8 +2551,8 @@
     },
     {
       "path": "test/phase3_runtime_evidence.test.mjs",
-      "sha256": "7c1cc28236baf213625c0cf237eb9c62f664745ef2acb607224470f6004d8e38",
-      "bytes": 15584
+      "sha256": "2d9cfa54990cea4d28ae5d0419f2d2a8749df21f0bdc94bd6164201463612de0",
+      "bytes": 27957
     },
     {
       "path": "test/phase4_argument_preflight.test.mjs",
@@ -2691,8 +2736,8 @@
     },
     {
       "path": "test/phase5_observation_bridge_test.py",
-      "sha256": "bef68f084844eefd3fb5911995c9d0455c28504f81645cc2205be57e53151a34",
-      "bytes": 9362
+      "sha256": "0fbe736b0a2211601981296d193ad4ad64cfd4eec4fb66ee2fa1e84052d1353f",
+      "bytes": 9847
     },
     {
       "path": "test/phase5_official_a2a_contract_test.py",
@@ -2740,14 +2785,54 @@
       "bytes": 3717
     },
     {
+      "path": "test/phase6_budget.test.mjs",
+      "sha256": "bd4a6eb8febcd2814d0511d400f1a7dab6a1a2636d419156f77ffa6e923f0b64",
+      "bytes": 20543
+    },
+    {
+      "path": "test/phase6_http_evidence.test.mjs",
+      "sha256": "059eaccee310dd133433f17dba063180c6ce9633715fff120eaf5ab55d28a81c",
+      "bytes": 13861
+    },
+    {
+      "path": "test/phase6_http_scope.test.mjs",
+      "sha256": "fefb626c53623b2459ad0463013c045f377c1ea032ac2620a5dbfb4a17dc0419",
+      "bytes": 18861
+    },
+    {
+      "path": "test/phase6_model_attempt_boundary_test.py",
+      "sha256": "8e558aa042ced15efb3eaa185bbcacea054d6b39cd33c4e2e175858a44c0171a",
+      "bytes": 14240
+    },
+    {
+      "path": "test/phase6_model_http_guard_test.py",
+      "sha256": "42308e13bf452c1e55fd1565b0bf465d8fde62bc6b278578a8c2c032288a8c80",
+      "bytes": 36626
+    },
+    {
+      "path": "test/phase6_model_http_guard.test.mjs",
+      "sha256": "bcaf7fb94cdb51210ec20e0c2be36c7905ed0c1a9d5a75394c30219b0ab4cd26",
+      "bytes": 6656
+    },
+    {
       "path": "test/phase6_result_audit.test.mjs",
-      "sha256": "d4bc350788bd4190feda0260c02f3c011634b4cdce1f9117276d66909603e469",
-      "bytes": 1454
+      "sha256": "fc6e97411d35565ad6798e21366aec2f8a4b9ea2b1cb9ea48e2d0a4135791e21",
+      "bytes": 5484
     },
     {
       "path": "test/phase6_resume_plan.test.mjs",
       "sha256": "3fa9d2cb8ec345b74e5c293ffec074e60816ac531e68ffe8bd7fa2903e943ba9",
       "bytes": 1524
+    },
+    {
+      "path": "test/phase6_scope_gate.test.mjs",
+      "sha256": "102e9f48b25dafbb035535c1038c0056a7e5d152bd8fcf288aa7f7a780fc2d69",
+      "bytes": 4507
+    },
+    {
+      "path": "test/phase6_selection.test.mjs",
+      "sha256": "fb5baa386548344516a703b157d6f89434d9dbdffb442ab18133e908005880f2",
+      "bytes": 8413
     },
     {
       "path": "test/phase7_search_protocol_probe_test.py",
@@ -2790,7 +2875,7 @@
       "bytes": 1443
     }
   ],
-  "contentTreeSha256": "b55dd5e0a427f5943a3f0e1dd5da0949cf7bec4942107f4b138c06e702128fb0",
+  "contentTreeSha256": "dddbd6a877a145cf5870e091c603515a592c1eaa9fb054b51225a3e7c2fdd659",
   "officialCodeInputs": [
     {
       "path": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.official-python/are/__init__.py",
@@ -5665,29 +5750,29 @@
     "project": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "f445d0bc1b201813f1aaba024868bbcb462bdaa0",
-      "gitHead": "f445d0bc1b201813f1aaba024868bbcb462bdaa0",
+      "head": "971c602ccfe6e9038bd386f6d3c379e022f2baf6",
+      "gitHead": "971c602ccfe6e9038bd386f6d3c379e022f2baf6",
       "dirty": true,
-      "statusSha256": "4723f1f1694c2c8dd0483aa73e55a747062494fd853e3cf3e2d34efddf2c2379",
-      "dirtyEntryCount": 101
+      "statusSha256": "c1eba414686c2ec31eb6b791fa96c9df631d1a41598c2779eea71b106b734f11",
+      "dirtyEntryCount": 32
     },
     "backend": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-backend",
-      "head": "355c67f31d3956910b5ac40f63bb988e09971c93",
-      "gitHead": "355c67f31d3956910b5ac40f63bb988e09971c93",
+      "head": "9fd221299c10eef3e58dcfaffea891effd7df4b7",
+      "gitHead": "9fd221299c10eef3e58dcfaffea891effd7df4b7",
       "dirty": true,
-      "statusSha256": "991a2efcf3d4482988232c0f636f1d4f2f239936534f619eed95f05098b820c9",
-      "dirtyEntryCount": 17
+      "statusSha256": "a225a132ffc44b4e600f5f1a3b99881903f5ac73edc3b4f086bf42acbb7ccf79",
+      "dirtyEntryCount": 2
     },
     "pluginSource": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "f445d0bc1b201813f1aaba024868bbcb462bdaa0",
-      "gitHead": "f445d0bc1b201813f1aaba024868bbcb462bdaa0",
+      "head": "971c602ccfe6e9038bd386f6d3c379e022f2baf6",
+      "gitHead": "971c602ccfe6e9038bd386f6d3c379e022f2baf6",
       "dirty": true,
-      "statusSha256": "4723f1f1694c2c8dd0483aa73e55a747062494fd853e3cf3e2d34efddf2c2379",
-      "dirtyEntryCount": 101
+      "statusSha256": "c1eba414686c2ec31eb6b791fa96c9df631d1a41598c2779eea71b106b734f11",
+      "dirtyEntryCount": 32
     }
   },
   "hashingPolicy": {
