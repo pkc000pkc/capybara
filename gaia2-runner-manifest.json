@@ -34,7 +34,7 @@
   "modelRequestTimeoutSeconds": 60,
   "modelRetry": { "maxAttempts": 6, "backoffBaseSeconds": 2, "backoffMaxSeconds": 120, "maxRetryWaitSeconds": 3600, "scope": "actor-and-judge-model-requests-only" },
   "recovery": "durable-batch-state-clean-session-restart-not-ARE-checkpoint",
-  "stateStatuses": ["pending", "running", "completed", "retry_pending"],
+  "stateStatuses": ["pending", "running", "completed", "retry_pending", "terminal_failure"],
   "defaultExecution": false,
   "officialSubmissionReady": false,
   "realHooksReady": false,
@@ -54,5 +54,5 @@
   "submissionExport": "manifest-bound-byte-preserving-portable-package-via-pinned-official-ARE-functions",
   "submissionAuditGates": ["format_valid", "coverage_complete", "evaluation_complete"],
   "officialExportValidation": "synthetic-controlled-Trace-fixtures-not-real-benchmark-results",
-  "notes": "Phase 1 implements supervised execution, streamed logs, terminal heartbeats, model-only retries and manifest-bound clean-session recovery. Phase 2 exports independent evidence-bound records and full unchanged HF Trace into portable phase/config packages, uses pinned official reconstruction/HF schema/statistics, and audits format, selected-plan coverage and evaluation independently. Valid business failures count as evaluated; technical/missing executions never become score zero. A2A/Noise execution is still rejected before spawning. TypeScript plugin loading, real pre-tool hooks, dynamic notification consumption, correction strategy execution and full real official evaluation remain later-stage work."
+  "notes": "Phase 1 implements supervised execution, streamed logs, terminal heartbeats, model-only retries, non-retryable technical terminal_failure queue advancement, and manifest-bound clean-session recovery. Phase 2 exports independent evidence-bound records and full unchanged HF Trace into portable phase/config packages, uses pinned official reconstruction/HF schema/statistics, and audits format, selected-plan coverage and evaluation independently. Valid business failures count as evaluated; technical/missing executions never become score zero. A2A/Noise execution is still rejected before spawning. TypeScript plugin loading, real pre-tool hooks, dynamic notification consumption, correction strategy execution and full real official evaluation remain later-stage work."
 }

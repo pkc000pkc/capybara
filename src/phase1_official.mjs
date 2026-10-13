@@ -157,7 +157,7 @@ export async function executeOfficialTask({ root, manifest, task, session, setti
   } catch { processResult.loggingError = 'malformed_runtime_event_log' }
   let native
   try { native = readNativeResult({ root, outputDir: session.outputDir, task, session, events }) }
-  catch { return { processResult, events, report: null, artifacts: [], runtimeEvidenceRequired: true, runtimeAttestation: null, runtimeEvidence: [] } }
+  catch { return { processResult: { ...processResult, loggingError: 'native_result_missing' }, events, report: null, artifacts: [], runtimeEvidenceRequired: true, runtimeAttestation: null, runtimeEvidence: [] } }
   try {
     const runtime = collectRuntimeEvidence({ root, manifest, task, session, events, hostProcess })
     return { processResult, events, ...native, runtimeEvidenceRequired: true, ...runtime, ...(freshReplayFixture ? { freshReplayFixture } : {}) }

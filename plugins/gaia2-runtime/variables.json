@@ -13,6 +13,8 @@
         "max_a2a_retries": 0,
         "stale_after_ms": 60000,
         "observation_summary_limit": 12,
+        "no_progress_replan_after": 3,
+        "no_progress_stop_after": 6,
         "noise_profile": "off"
       },
       "required": true,
@@ -113,7 +115,18 @@
       "type": "object",
       "label": "GAIA2 information-noise state",
       "description": "Profile, independent seed, injection decisions, deduplicated records, conflicts, quarantined results, and schedule hash.",
-      "value": { "profile": "off", "seed": null, "decisions": [], "deduplicated": [], "conflicts": [], "quarantined": [], "schedule_hash": "" },
+      "value": { "semanticVersion": 2, "profile": "off", "seed": null, "decisions": [], "deduplicated": [], "conflicts": [], "quarantined": [], "schedule_hash": "" },
+      "required": false,
+      "readonly": false,
+      "show_in_status": true,
+      "scope": "session"
+    },
+    {
+      "key": "gaia2_progress_state",
+      "type": "object",
+      "label": "GAIA2 observable progress",
+      "description": "Finite repeated-result and blocked-action counter. A recovery recommendation never claims official completion.",
+      "value": { "steps": 0, "consecutive_no_progress": 0, "blocked_repetitions": 0, "blocked_signature": null, "last_reason": null, "recommendation": "continue", "seen_queries": [], "seen_user_ids": [] },
       "required": false,
       "readonly": false,
       "show_in_status": true,

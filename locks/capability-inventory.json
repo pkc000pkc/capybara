@@ -1,13 +1,13 @@
 {
   "schemaVersion": "gaia2-capability-inventory-v1",
-  "generatedAt": "2026-10-10T03:12:52.783Z",
+  "generatedAt": "2026-10-13T10:28:58.295Z",
   "noModelExecution": true,
   "plugins": [
     {
       "id": "gaia2-runtime",
       "sourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/plugins/gaia2-runtime",
-      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/974ed8ecc625972643f1bf351c5efccddf3994283a56a587299ec73e91a43207",
-      "treeSha256": "974ed8ecc625972643f1bf351c5efccddf3994283a56a587299ec73e91a43207",
+      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/1a3731b583c39aed31de211068c513ea28e4f8d13f60a2eaefc12550372ec69e",
+      "treeSha256": "1a3731b583c39aed31de211068c513ea28e4f8d13f60a2eaefc12550372ec69e",
       "files": [
         {
           "relativePath": "capybara.plugin.json",
@@ -21,8 +21,8 @@
         },
         {
           "relativePath": "harnesses/runtime-contract.j2",
-          "sha256": "ff24c8629a820760015caa540fa8e7aa4601698a7a15744a0c19bba897bb4cdd",
-          "bytes": 1516
+          "sha256": "8bb62f4bbbfce7bcb89466cc0421ae8be11e611dcf64f0c0e4d4e821d450b2c4",
+          "bytes": 2710
         },
         {
           "relativePath": "hooks/gaia2-a2a-guard.ts",
@@ -36,18 +36,23 @@
         },
         {
           "relativePath": "hooks/gaia2-conflict-gate.ts",
-          "sha256": "371214c5ef7289c90e4e08bb7509045e6e4afe3711e91c25790621c463fd9a5f",
-          "bytes": 2319
+          "sha256": "ac0da71bf857dce20a490590eb569665ee29dbb9f1861e8588f698fcbe11d569",
+          "bytes": 6833
         },
         {
           "relativePath": "hooks/gaia2-event-sync.ts",
-          "sha256": "60430be683e3456d1fecbdf39f43623442db01069fffd22a77e580339039b42d",
-          "bytes": 1585
+          "sha256": "ecb0c15939813e1652429413b76963bef38e73bfcd34b1eefb29f40a61cce9ec",
+          "bytes": 2211
         },
         {
           "relativePath": "hooks/gaia2-noise-classifier.ts",
-          "sha256": "11e4f36858fee89925a7c35386824709f56935874c2133755c11a5679c228f29",
-          "bytes": 2346
+          "sha256": "46611e57ba94642a36f71cc1ce15f044fc25a0691466f61ecdfcc6875455b4e1",
+          "bytes": 7477
+        },
+        {
+          "relativePath": "hooks/gaia2-observation-refresh.ts",
+          "sha256": "bbd05aadf2530357780da52d0200bc48aeebaf772609131afcfbc9321d88d4aa",
+          "bytes": 3951
         },
         {
           "relativePath": "hooks/gaia2-replan.ts",
@@ -66,8 +71,8 @@
         },
         {
           "relativePath": "variables.json",
-          "sha256": "70cf7cd640f0ff384867b3b6ecdef58bfaa7dad87184f85ff59c939f019acd92",
-          "bytes": 4891
+          "sha256": "92a3cd9e7889e697b67308dab562569322c8384be8cd38865a1a09145b3c4913",
+          "bytes": 5553
         }
       ],
       "immutablePolicy": "content-addressed-readonly-files-never-overwrite-verify-before-use",
@@ -95,7 +100,7 @@
       },
       "variables": {
         "path": "variables.json",
-        "count": 11,
+        "count": 12,
         "keys": [
           "gaia2_runtime_policy",
           "gaia2_correction_policy",
@@ -107,9 +112,10 @@
           "gaia2_replan_state",
           "gaia2_observation_state",
           "gaia2_noise_state",
+          "gaia2_progress_state",
           "gaia2_runtime_context"
         ],
-        "typedObjectCount": 10
+        "typedObjectCount": 11
       },
       "harnesses": [
         {
@@ -117,7 +123,7 @@
           "type": "persistent",
           "manifestPath": "harnesses/manifest.json",
           "entryPath": "harnesses/runtime-contract.j2",
-          "sha256": "ff24c8629a820760015caa540fa8e7aa4601698a7a15744a0c19bba897bb4cdd"
+          "sha256": "8bb62f4bbbfce7bcb89466cc0421ae8be11e611dcf64f0c0e4d4e821d450b2c4"
         }
       ],
       "hooks": [
@@ -139,21 +145,28 @@
           "name": "gaia2-conflict-gate",
           "checkpoint": "before_tool",
           "path": "hooks/gaia2-conflict-gate.ts",
-          "sha256": "371214c5ef7289c90e4e08bb7509045e6e4afe3711e91c25790621c463fd9a5f",
+          "sha256": "ac0da71bf857dce20a490590eb569665ee29dbb9f1861e8588f698fcbe11d569",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-event-sync",
           "checkpoint": "before_model",
           "path": "hooks/gaia2-event-sync.ts",
-          "sha256": "60430be683e3456d1fecbdf39f43623442db01069fffd22a77e580339039b42d",
+          "sha256": "ecb0c15939813e1652429413b76963bef38e73bfcd34b1eefb29f40a61cce9ec",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-noise-classifier",
           "checkpoint": "after_tool",
           "path": "hooks/gaia2-noise-classifier.ts",
-          "sha256": "11e4f36858fee89925a7c35386824709f56935874c2133755c11a5679c228f29",
+          "sha256": "46611e57ba94642a36f71cc1ce15f044fc25a0691466f61ecdfcc6875455b4e1",
+          "inspection": "static-resource-shape-only-not-executed"
+        },
+        {
+          "name": "gaia2-observation-refresh",
+          "checkpoint": "before_model",
+          "path": "hooks/gaia2-observation-refresh.ts",
+          "sha256": "bbd05aadf2530357780da52d0200bc48aeebaf772609131afcfbc9321d88d4aa",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
@@ -390,7 +403,7 @@
         "passed": true
       }
     ],
-    "inspectedProjectSourceCount": 99,
+    "inspectedProjectSourceCount": 114,
     "inspectedBackendSourceCount": 48,
     "projectPluginLoader": {
       "status": "session_scoped_real_backend_host",
@@ -433,7 +446,7 @@
       },
       {
         "path": "D:/gitlocals/kanli8-human/capybara-backend/src/core/plugins/runtime-plugin-host.ts",
-        "sha256": "ab7ca8db801f92fcc51f93b5b16d4c436a536908f0755b85c0a3a94d537b7482"
+        "sha256": "ff8bf2e834ce11d0a738e40088608692c12f5bea9ef64b55251ef39940fb3efd"
       }
     ],
     "gaps": [],

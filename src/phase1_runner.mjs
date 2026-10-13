@@ -42,6 +42,20 @@ export function assertSupportedPlan(manifest) {
   assert(new Set(manifest.tasks.map(task => task.executionId)).size === manifest.tasks.length, 'duplicate execution identity')
 }
 
+export function selectFrozenTaskIds(manifest, { onlyRunNumber = null, onlyPhase = null, onlyExecutionId = null } = {}) {
+  assert(onlyRunNumber === null || Number.isInteger(onlyRunNumber) && onlyRunNumber >= 1 && onlyRunNumber <= 5 && manifest.tasks.some(task => task.runNumber === onlyRunNumber), 'onlyRunNumber must be a planned integer run number in 1..5')
+  assert(onlyPhase === null || ['standard', 'agent2agent', 'noise'].includes(onlyPhase), 'onlyPhase must be standard, agent2agent, or noise')
+  if (onlyExecutionId !== null) {
+    assert(typeof onlyExecutionId === 'string' && onlyExecutionId.length > 0 && onlyExecutionId.trim() === onlyExecutionId, 'onlyExecutionId must be a non-empty exact planned execution identity')
+    const matches = manifest.tasks.filter(task => task.executionId === onlyExecutionId)
+    assert(matches.length === 1, 'onlyExecutionId must identify exactly one planned task')
+    assert((onlyRunNumber === null || matches[0].runNumber === onlyRunNumber) && (onlyPhase === null || matches[0].phase === onlyPhase), 'onlyExecutionId conflicts with onlyPhase or onlyRunNumber')
+  }
+  const selectedTaskIds = new Set(manifest.tasks.filter(task => (onlyRunNumber === null || task.runNumber === onlyRunNumber) && (onlyPhase === null || task.phase === onlyPhase) && (onlyExecutionId === null || task.executionId === onlyExecutionId)).map(task => task.executionId))
+  assert(selectedTaskIds.size > 0, 'selection does not match any planned task')
+  return selectedTaskIds
+}
+
 async function acquireOwner(runRoot) {
   const path = join(runRoot, 'run-owner.json')
   const owner = { ownerId: randomUUID(), processIdentity: await readProcessIdentity(process.pid), startedAt: new Date().toISOString() }
@@ -169,16 +183,13 @@ async function delayUntil(deadline, signal) {
 }
 
 /** Manifest-driven sequential execution. A restart is a new disposable ARE environment, never a tool replay. */
-export async function runFrozenBatch({ root, manifest, settings, executeTask, signal, resume = false, retryInfrastructure = false, maxTasks = Infinity, onlyRunNumber = null, onlyPhase = null } = {}) {
+export async function runFrozenBatch({ root, manifest, settings, executeTask, signal, resume = false, retryInfrastructure = false, maxTasks = Infinity, onlyRunNumber = null, onlyPhase = null, onlyExecutionId = null } = {}) {
   root = resolve(root)
   assertPublicConfig(settings)
   assertSupportedPlan(manifest)
   assert(settings.concurrency === 1 && settings.minimal === false, 'frozen original tasks require concurrency 1 and minimal=false')
   assert(maxTasks === Infinity || Number.isInteger(maxTasks) && maxTasks > 0, 'maxTasks must be a positive integer')
-  assert(onlyRunNumber === null || Number.isInteger(onlyRunNumber) && onlyRunNumber >= 1 && onlyRunNumber <= 5 && manifest.tasks.some(task => task.runNumber === onlyRunNumber), 'onlyRunNumber must be a planned integer run number in 1..5')
-  assert(onlyPhase === null || ['standard', 'agent2agent', 'noise'].includes(onlyPhase), 'onlyPhase must be standard, agent2agent, or noise')
-  const selectedTaskIds = new Set(manifest.tasks.filter(task => (onlyRunNumber === null || task.runNumber === onlyRunNumber) && (onlyPhase === null || task.phase === onlyPhase)).map(task => task.executionId))
-  assert(selectedTaskIds.size > 0, 'selection does not match any planned task')
+  const selectedTaskIds = selectFrozenTaskIds(manifest, { onlyRunNumber, onlyPhase, onlyExecutionId })
   const runRoot = safePath(root, manifest.runRoot, join(root, 'runs'))
   mkdirSync(runRoot, { recursive: true })
   const statePath = safePath(root, manifest.stateFile, runRoot)
@@ -210,7 +221,8 @@ export async function runFrozenBatch({ root, manifest, settings, executeTask, si
     // Reconcile the report-before-state commit window. A valid completed report is never rerun.
     for (let index = 0; index < state.tasks.length; index++) {
       const record = state.tasks[index], task = manifest.tasks[index], session = record.sessions.at(-1)
-      assert(['pending', 'running', 'completed', 'retry_pending'].includes(record.status), 'invalid task state')
+      assert(['pending', 'running', 'completed', 'retry_pending', 'terminal_failure'].includes(record.status), 'invalid task state')
+      if (record.status === 'terminal_failure') assert(record.failure?.retryable === false && record.failure?.category !== 'business_failure', 'terminal task is not a non-retryable technical failure')
       if (record.status === 'completed') { validateResult(root, manifest, task, session, record, runtimeHash); continue }
       if (record.status !== 'running') continue
       assert(session, 'running task has no session')
@@ -235,6 +247,7 @@ export async function runFrozenBatch({ root, manifest, settings, executeTask, si
       if (!selectedTaskIds.has(task.executionId)) continue
       if (signal?.aborted || executed >= maxTasks) break
       if (record.status === 'completed') continue
+      if (record.status === 'terminal_failure') continue
       if (record.status === 'retry_pending') {
         if (!record.failure?.retryable || record.failure.category !== 'interrupted' && !retryInfrastructure) break
         await resolveOrphan(root, record.sessions.at(-1))
@@ -245,7 +258,13 @@ export async function runFrozenBatch({ root, manifest, settings, executeTask, si
       record.sessions.push(session); record.status = 'running'; record.failure = null; record.resultPath = null; record.resultSha256 = null; saveState(state)
       let execution
       try { execution = await executeTask({ root, manifest, task, session, settings, signal }) }
-      catch (error) { execution = { processResult: { exitCode: null, spawnError: { code: 'ADAPTER_FAILURE' } }, report: { hasException: true, exceptionType: /^[A-Za-z0-9_]+$/.test(error.name ?? '') ? error.name : 'Error' }, events: [] } }
+      catch (error) {
+        // Keep adapter-boundary failures distinct from child-process failures.
+        // Only a fixed enum and a class name leave the process; raw messages
+        // may contain paths, credentials, or provider payloads.
+        const errorType = /^[A-Za-z0-9_]+$/.test(error?.name ?? '') ? error.name : 'Error'
+        execution = { processResult: { exitCode: null, spawnError: { code: 'ADAPTER_FAILURE' }, adapterFailure: { code: 'adapter_exception', errorType } }, report: { hasException: true, exceptionType: errorType }, events: [] }
+      }
       const processResult = execution?.processResult ?? { exitCode: null }
       let report = execution?.report ?? {}
       const evidenceRequired = runtimeEvidenceRequired(manifest, execution)
@@ -264,17 +283,34 @@ export async function runFrozenBatch({ root, manifest, settings, executeTask, si
       atomicJson(resolve(root, resultPath), result)
       record.resultPath = resultPath; record.resultSha256 = fileDigest(resolve(root, resultPath))
       if (evaluated) validateResult(root, manifest, task, session, record, runtimeHash)
-      record.status = evaluated ? 'completed' : 'retry_pending'; record.failure = failure
+      // A retryable interruption/transport failure must preserve the queue stop
+      // point, but a non-retryable technical failure is terminal for this
+      // execution and must not prevent later independent tasks from running.
+      // Terminal failures are never business results and therefore remain
+      // ineligible for pass@5 or official export.
+      const terminalFailure = !evaluated && failure?.retryable !== true && failure?.category !== 'interrupted' && failure?.category !== 'business_failure'
+      record.status = evaluated ? 'completed' : terminalFailure ? 'terminal_failure' : 'retry_pending'; record.failure = failure
       session.endedAt = result.finishedAt; session.terminationReason = evaluated ? 'judged' : failure.category
       saveState(state)
       executed++
-      if (!evaluated) break // Never loop whole scenarios as an unbounded hidden retry.
+      if (!evaluated && !terminalFailure) break // Never loop whole scenarios as an unbounded hidden retry.
     }
-    const counts = Object.fromEntries(['pending', 'running', 'completed', 'retry_pending'].map(status => [status, state.tasks.filter(task => task.status === status).length]))
+    const counts = Object.fromEntries(['pending', 'running', 'completed', 'retry_pending', 'terminal_failure'].map(status => [status, state.tasks.filter(task => task.status === status).length]))
     const results = state.tasks.filter(task => task.status === 'completed').map((record, index) => readJson(resolve(root, record.resultPath)))
     const selectedCompleted = state.tasks.filter(record => selectedTaskIds.has(record.executionId) && record.status === 'completed').length
     const selectedResults = results.filter(result => selectedTaskIds.has(result.executionId))
-    const report = { schemaVersion: 'gaia2-batch-progress-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash, status: batchHeartbeatError ? 'infrastructure_error' : counts.completed === manifest.tasks.length ? 'evaluation_complete' : signal?.aborted ? 'interrupted' : 'incomplete', counts, plannedInitialExecutions: manifest.tasks.length, evaluatedInitialExecutions: results.length, onlyRunNumber, onlyPhase, selectedExecutions: selectedTaskIds.size, selectedCompleted, selectedEvaluationComplete: !batchHeartbeatError && selectedCompleted === selectedTaskIds.size, selectedRealHooksReady: !batchHeartbeatError && selectedCompleted === selectedTaskIds.size && selectedResults.every(result => result.realHooksReady === true), businessSuccesses: results.filter(result => result.businessPassed).length, businessFailures: results.filter(result => !result.businessPassed).length, totalSessions: state.tasks.reduce((sum, task) => sum + task.sessions.length, 0), executedThisInvocation: executed, batchHeartbeatError, officialSubmissionReady: false, realHooksReady: !batchHeartbeatError && results.length === manifest.tasks.length && results.every(result => result.realHooksReady === true), runtimeAttestedExecutions: results.filter(result => result.runtimeAttestation).length, generatedAt: new Date().toISOString() }
+    const terminalFailures = counts.terminal_failure
+    const technicalFailures = terminalFailures + counts.retry_pending
+    const selectedTechnicalComplete = !batchHeartbeatError && state.tasks.filter(record => selectedTaskIds.has(record.executionId)).every(record => ['completed', 'terminal_failure'].includes(record.status))
+    const submissionBlockedReasons = []
+    if (terminalFailures > 0) submissionBlockedReasons.push('non_retryable_technical_failures')
+    if (counts.retry_pending > 0) submissionBlockedReasons.push('retry_pending_executions')
+    if (counts.pending > 0 || counts.running > 0) submissionBlockedReasons.push('unexecuted_planned_executions')
+    if (batchHeartbeatError) submissionBlockedReasons.push('batch_heartbeat_error')
+    if (!selectedTechnicalComplete) submissionBlockedReasons.push('selected_execution_set_incomplete')
+    if (!results.length || results.some(result => result.realHooksReady !== true)) submissionBlockedReasons.push('real_runtime_hooks_not_attested')
+    submissionBlockedReasons.push('full_real_official_run_and_phase_3_to_5_gates_not_attested')
+    const report = { schemaVersion: 'gaia2-batch-progress-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash, status: batchHeartbeatError ? 'infrastructure_error' : counts.completed === manifest.tasks.length ? 'evaluation_complete' : signal?.aborted ? 'interrupted' : 'incomplete', counts, plannedInitialExecutions: manifest.tasks.length, evaluatedInitialExecutions: results.length, onlyRunNumber, onlyPhase, onlyExecutionId, selectedExecutions: selectedTaskIds.size, selectedCompleted, selectedEvaluationComplete: !batchHeartbeatError && selectedCompleted === selectedTaskIds.size, selectedTechnicalComplete, selectedRealHooksReady: !batchHeartbeatError && selectedCompleted === selectedTaskIds.size && selectedResults.every(result => result.realHooksReady === true), businessSuccesses: results.filter(result => result.businessPassed).length, businessFailures: results.filter(result => !result.businessPassed).length, technicalFailures, terminalFailures, retryPending: counts.retry_pending, totalSessions: state.tasks.reduce((sum, task) => sum + task.sessions.length, 0), executedThisInvocation: executed, batchHeartbeatError, submissionBlockedReason: submissionBlockedReasons[0] ?? null, submissionBlockedReasons, officialSubmissionReady: false, realHooksReady: !batchHeartbeatError && results.length === manifest.tasks.length && results.every(result => result.realHooksReady === true), runtimeAttestedExecutions: results.filter(result => result.runtimeAttestation).length, generatedAt: new Date().toISOString() }
     terminalStatus = report.status; finishedAt = report.generatedAt; terminalReportPath = portable(relative(root, join(runRoot, 'batch-report.json')))
     heartbeat()
     if (batchHeartbeatError) { report.status = 'infrastructure_error'; report.batchHeartbeatError = true; terminalStatus = report.status }

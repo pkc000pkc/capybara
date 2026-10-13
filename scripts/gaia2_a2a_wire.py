@@ -312,6 +312,20 @@ class PrivatePipePeer:
         self._pending: dict[str, str] = {}
         self._responses: dict[str, dict[str, Any]] = {}
         self._active_handlers = 0
+        self._router: Callable[[], None] | None = None
+
+    def install_router(self, router: Callable[[], None]) -> None:
+        """Bind a trusted owner's cooperative multiplexer once, never by RPC.
+
+        The framing/authority remains per peer. The owner may service another
+        owned socket while this peer awaits a response; it must not create
+        concurrent native execution or replace a live request's routing.
+        """
+        self._ensure_open()
+        if (not callable(router) or self._router is not None or self._pending
+                or self._responses or self._active_handlers):
+            _fail("A2A_POOL_ROUTER_INVALID")
+        self._router = router
 
     def close(self, code: str = "A2A_PIPE_CLOSED") -> None:
         if self.closed:
@@ -438,7 +452,10 @@ class PrivatePipePeer:
             self._pending[request_id] = method
             self._send("request", request_id, method, payload)
             while request_id not in self._responses:
-                self._route_once()
+                if self._router is None:
+                    self._route_once()
+                else:
+                    self._router()
             response = self._responses.pop(request_id)
         except A2AWireError as error:
             self.close(error.code)

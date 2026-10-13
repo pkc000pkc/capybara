@@ -87,7 +87,7 @@ def main() -> None:
     if any(type(setup[key]) is not str or not _ID.fullmatch(setup[key])
            for key in ("environmentGeneration", "parentExecutionId", "parentSessionId")):
         _fail()
-    if setup["appId"] not in ("Contacts", "RentAFlat"):
+    if setup["appId"] not in ("Contacts", "RentAFlat", "Shopping", "ShoppingApp"):
         _fail()
     if (os.environ.get("HF_HUB_OFFLINE") != "1"
             or os.environ.get("TRANSFORMERS_OFFLINE") != "1"):
@@ -117,6 +117,7 @@ def main() -> None:
     import gaia2_private_native_binding as native_binding
     from are.simulation.apps.apartment_listing import Apartment, RentAFlat
     from are.simulation.apps.contacts import Contact, Contacts
+    from are.simulation.apps.shopping import Shopping, ShoppingApp
     from are.simulation.environment import Environment, EnvironmentConfig
     from are.simulation.types import EventRegisterer, EnvironmentState
 
@@ -134,13 +135,19 @@ def main() -> None:
         app = Contacts(contacts={
             "contact-1": Contact("Old", "Fixture", contact_id="contact-1"),
         })
-    else:
+    elif setup["appId"] == "RentAFlat":
         app = RentAFlat(apartments={
             "apt-1": Apartment(
                 name="Fixture", location="Local", zip_code="00001", price=1200.0,
                 bedrooms=1, bathrooms=1, property_type="Apartment", square_footage=500,
                 apartment_id="apt-1",
             ),
+        })
+    else:
+        cls = Shopping if setup["appId"] == "Shopping" else ShoppingApp
+        app = cls(name=setup["appId"], discount_codes={
+            "item-1": {"LOCAL10": 10.0, "LOCAL20": 20.0},
+            "item-2": {"LOCAL10": 10.0},
         })
     env.register_apps([app])
     if (env.state is not EnvironmentState.SETUP or env.thread is not None
@@ -156,6 +163,7 @@ def main() -> None:
         parent_session_id=setup["parentSessionId"],
         evidence_root=str(evidence_root),
         clock=env.time_manager.time,
+        clock_environment=env if setup["appId"] in ("Shopping", "ShoppingApp") else None,
         trusted_source_files=[__file__],
     )
     stopping = False
@@ -175,11 +183,14 @@ def main() -> None:
                 "contactCount": len(app.contacts),
                 "nameOfContact1": name if name in (None, "Old", "Changed") else "OTHER",
             })
-        else:
+        elif app.name == "RentAFlat":
             summary.update({
                 "savedCount": len(app.saved_apartments),
                 "apt1Saved": app.apartments["apt-1"].saved,
             })
+        else:
+            summary.update({"discountItemCount": len(app.discount_codes),
+                            "nativeToolCount": len(app.get_tools())})
         return summary
 
     def state_summary(payload):

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildRunManifest, digest, fileDigest, readJson } from '../src/phase0_run.mjs'
-import { auditSubmissionPackage } from '../src/phase2_audit.mjs'
+import { auditSubmissionPackage, officialA2ATraceErrors, officialNoiseTraceErrors } from '../src/phase2_audit.mjs'
 
 const sha = value => digest(value)
 function put(root, path, value) {
@@ -26,7 +26,17 @@ function fixture({ mode = 'internal_pass5', phases = ['standard', 'standard'], s
     const status = statuses[index], technical = !['success', 'failed'].includes(status), passed = status === 'success'
     const sessionId = '0001-aaaaaaaaaaaa', session = { sessionId, sessionOrdinal: 1, parentSessionId: null, outputDir: `${task.outputDir}/sessions/${sessionId}`, fixtureDir: `${task.fixtureDir}/sessions/${sessionId}`, workspaceDir: `${task.workspaceDir}/sessions/${sessionId}` }
     const tracePath = `hf/${task.executionId}.json`
-    const trace = { world_logs: [], apps: [], events: [], completed_events: [], version: 'are_simulation_v1', context: null, augmentation: null, metadata: { definition: { scenario_id: task.scenarioId, run_number: task.runNumber, config: task.config, has_exception: status === 'exception', exception_type: status === 'exception' ? 'RuntimeError' : null } } }
+    const definition = { scenario_id: task.scenarioId, run_number: task.runNumber, config: task.config, has_exception: status === 'exception', exception_type: status === 'exception' ? 'RuntimeError' : null }
+    const metadata = { definition }
+    if (task.phase === 'noise') {
+      Object.assign(definition, { has_a2a_augmentation: false, has_tool_augmentation: true, has_env_events_augmentation: true })
+      metadata.runner_config = {
+        a2a_app_prop: 0,
+        tool_augmentation_config: { tool_failure_probability: 0.1, apply_tool_name_augmentation: true, apply_tool_description_augmentation: true },
+        env_events_config: { num_env_events_per_minute: 10, env_events_seed: 0 },
+      }
+    }
+    const trace = { world_logs: [], apps: [], events: [], completed_events: [], version: 'are_simulation_v1', context: null, augmentation: null, metadata }
     const traceRef = put(root, tracePath, trace)
     const nativeOutputPath = `evidence/${task.executionId}/native-output.jsonl`, outputPath = `${task.phase}/${task.config}/output.jsonl`
     const row = { task_id: task.scenarioId, trace_id: tracePath, score: technical ? null : passed ? 1 : 0, metadata: { scenario_id: task.scenarioId, run_number: task.runNumber, phase: task.phase, config: task.config, execution_id: task.executionId, status, has_exception: status === 'exception' } }
@@ -122,6 +132,141 @@ test('phase2 repeated scenario/run in different phases is not a duplicate key', 
   const value = fixture({ mode: 'official_submission', phases: ['standard', 'agent2agent', 'noise'], statuses: ['success', 'failed', 'success'] })
   try { const audit = value.audit(); assert.equal(audit.format_valid, true); assert.equal(audit.coverage_complete, true); assert.equal(audit.evaluation_complete, true); assert.equal(audit.metrics.duplicateRows, 0) }
   finally { cleanup(value.root) }
+})
+
+test('phase2 Noise audit requires the native ARE augmentation values and seed', () => {
+  const valid = {
+    metadata: {
+      definition: { has_a2a_augmentation: false, has_tool_augmentation: true, has_env_events_augmentation: true },
+      runner_config: {
+        tool_augmentation_config: { tool_failure_probability: 0.1, apply_tool_name_augmentation: true, apply_tool_description_augmentation: true },
+        env_events_config: { num_env_events_per_minute: 10, env_events_seed: 0 },
+      },
+    },
+  }
+  assert.deepEqual(officialNoiseTraceErrors(valid, { phase: 'noise' }), [])
+  for (const mutate of [
+    trace => { trace.metadata.runner_config.tool_augmentation_config.tool_failure_probability = 0 },
+    trace => { trace.metadata.runner_config.env_events_config.env_events_seed = 7 },
+    trace => { trace.metadata.definition.has_env_events_augmentation = false },
+  ]) {
+    const trace = structuredClone(valid); mutate(trace)
+    assert.ok(officialNoiseTraceErrors(trace, { phase: 'noise' }).length > 0)
+  }
+  assert.deepEqual(officialNoiseTraceErrors(valid, { phase: 'standard' }), [])
+})
+
+test('phase2 official A2A audit requires an admitted dynamic guard receipt', () => {
+  const valid = [{
+    type: 'a2a_client_snapshot',
+    notificationReaderFactoryBound: true,
+    deadlineFactoryBound: true,
+    guard: {
+      schemaVersion: 'gaia2-official-a2a-guard-binding-v1',
+      status: 'bound',
+      admissible: true,
+      notificationBound: true,
+      deadlineBound: true,
+    },
+  }]
+  assert.deepEqual(officialA2ATraceErrors(valid, { phase: 'agent2agent' }), [])
+  for (const mutate of [
+    events => { events[0].notificationReaderFactoryBound = false },
+    events => { events[0].guard.admissible = false },
+    events => { events.push(structuredClone(events[0])) },
+  ]) {
+    const events = structuredClone(valid); mutate(events)
+    assert.ok(officialA2ATraceErrors(events, { phase: 'agent2agent' }).length > 0)
+  }
+  assert.deepEqual(officialA2ATraceErrors([], { phase: 'standard' }), [])
+})
+
+function pooledA2AEvents(usedAppIds = ['Calendar', 'Emails']) {
+  const identity = { executionId: 'pool-exec', sessionId: 'pool-session', scenarioId: 'pool-scenario' }
+  const clients = ['Calendar', 'Emails'].map(appId => ({
+    schemaVersion: 'gaia2-official-a2a-client-v1', ...identity, appId,
+    scopeHash: null, childActive: false, closed: false,
+    modelRequests: usedAppIds.includes(appId) ? 2 : 0, sdkAttempts: usedAppIds.includes(appId) ? 3 : 0,
+    notificationReaderFactoryBound: true, deadlineFactoryBound: true,
+    guard: usedAppIds.includes(appId) ? {
+      schemaVersion: 'gaia2-official-a2a-guard-binding-v1', scopeHash: 'a'.repeat(64),
+      status: 'bound', admissible: true, notificationBound: true, deadlineBound: true,
+    } : null,
+  }))
+  return [
+    { type: 'official_tool_inventory', tools: clients.map(client => ({ canonicalName: 'AppAgent__expert_agent', appName: client.appId })) },
+    { type: 'a2a_client_pool_snapshot', schemaVersion: 'gaia2-official-a2a-client-pool-v1', ...identity,
+      status: 'committed', expectedAppIds: ['Calendar', 'Emails'], usedAppIds, clients },
+    ...clients.filter(client => usedAppIds.includes(client.appId)).map(client => ({ type: 'a2a_client_snapshot', ...structuredClone(client) })),
+  ]
+}
+
+test('phase2 multi-App A2A requires one committed pool matching every official wrapper and used guard', () => {
+  const identity = { phase: 'agent2agent', executionId: 'pool-exec', scenarioId: 'pool-scenario' }
+  assert.deepEqual(officialA2ATraceErrors(pooledA2AEvents(), identity), [])
+  assert.deepEqual(officialA2ATraceErrors(pooledA2AEvents(['Calendar']), identity), [])
+  for (const mutate of [
+    events => { events[1].status = 'preparing' },
+    events => { events[1].status = 'failed' },
+    events => { events.push(structuredClone(events[1])) },
+    events => { events[1].expectedAppIds.reverse() },
+    events => { events[1].usedAppIds.push('Calendar') },
+    events => { events[0].tools.pop() },
+    events => { events[0].tools.push(structuredClone(events[0].tools[0])) },
+    events => { events[1].clients[1].appId = 'Calendar' },
+    events => { events[1].clients[0].sessionId = 'foreign' },
+    events => { events[1].clients[0].childActive = true },
+    events => { events[1].clients[0].guard.admissible = false },
+    events => { events[1].clients[0].guard.scopeHash = 'bad' },
+    events => { events[1].clients[0].deadlineFactoryBound = false },
+    events => { events.pop() },
+    events => { events.push(structuredClone(events[2])) },
+    events => { events[2].sdkAttempts += 1 },
+  ]) {
+    const events = pooledA2AEvents(); mutate(events)
+    assert.ok(officialA2ATraceErrors(events, identity).length > 0)
+  }
+})
+
+test('phase2 prepared A2A pool can record an evaluated no-delegation failure without inventing a guard', () => {
+  const identity = { phase: 'agent2agent', executionId: 'pool-exec', scenarioId: 'pool-scenario' }
+  assert.deepEqual(officialA2ATraceErrors(pooledA2AEvents([]), identity), [])
+  for (const mutate of [
+    events => { events[1].clients[0].modelRequests = 1 },
+    events => { events[1].clients[0].sdkAttempts = 1 },
+    events => { events[1].clients[0].guard = pooledA2AEvents()[1].clients[0].guard },
+    events => { events[1].clients[0].notificationReaderFactoryBound = false },
+    events => { events[0].tools = [] },
+  ]) {
+    const events = pooledA2AEvents([]); mutate(events)
+    assert.ok(officialA2ATraceErrors(events, identity).length > 0)
+  }
+  assert.ok(officialA2ATraceErrors([], identity).length > 0)
+})
+
+test('phase2 excluded unknown tools remain explicit and cannot disagree with the full pool inventory', () => {
+  const identity = { phase: 'agent2agent', executionId: 'pool-exec', scenarioId: 'pool-scenario' }
+  const valid = pooledA2AEvents()
+  for (const client of valid[1].clients) {
+    client.excludedTools = { schemaVersion: 'gaia2-private-native-excluded-tools-v1', appId: client.appId,
+      sourceManifestHash: 'b'.repeat(64), toolCount: client.appId === 'Calendar' ? 1 : 0,
+      tools: client.appId === 'Calendar' ? [{ publicName: 'Calendar__unsupported', canonicalName: 'Calendar__unsupported', reasonCode: 'NATIVE_TOOL_EFFECT_UNDECLARED' }] : [] }
+    valid.find(event => event.type === 'a2a_client_snapshot' && event.appId === client.appId).excludedTools = structuredClone(client.excludedTools)
+  }
+  valid[1].excludedTools = [structuredClone(valid[1].clients[0].excludedTools)]
+  assert.deepEqual(officialA2ATraceErrors(valid, identity), [])
+  for (const mutate of [
+    events => { events[1].excludedTools = [] },
+    events => { events[1].excludedTools[0].toolCount = 0 },
+    events => { delete events[1].excludedTools },
+    events => { events[1].clients[0].excludedTools.sourceManifestHash = 'bad' },
+    events => { events[1].clients[0].excludedTools.appId = 'foreign' },
+    events => { events[1].clients[0].excludedTools.tools[0].reasonCode = 'read' },
+    events => { delete events[2].excludedTools },
+  ]) {
+    const events = structuredClone(valid); mutate(events)
+    assert.ok(officialA2ATraceErrors(events, identity).length > 0)
+  }
 })
 
 test('phase2 missing run_number, malformed JSON, empty output and zero results fail structure', () => {

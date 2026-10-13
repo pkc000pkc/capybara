@@ -27,7 +27,12 @@ from typing import Any, Callable
 import uuid
 
 import gaia2_a2a_wire as wire
-from gaia2_private_native_binding import NativeAppBinding
+from gaia2_private_native_binding import (
+    NativeAppBinding,
+    _registry_action_hash,
+    _sealed_native_evidence,
+    _validate_native_blocked_before,
+)
 from are.simulation.agents.agent_builder import AppAgentBuilder
 from are.simulation.agents.agent_config_builder import AppAgentConfigBuilder
 from are.simulation.agents.agent_log import (
@@ -54,7 +59,7 @@ from are.simulation.apps.app import App
 from are.simulation.environment import Environment
 from are.simulation.exceptions import FatalError
 from are.simulation.notification_system import MessageType
-from gaia2_generation_time import ScopedAREGenerationTimeOwner
+from gaia2_generation_time import GenerationTimeError, ScopedAREGenerationTimeOwner
 from gaia2_generation_time_ledger import ScopedGenerationTimeLedger
 from gaia2_deadline_notifications import (
     DeadlineNotificationError,
@@ -73,6 +78,7 @@ _SCOPE_KEYS = frozenset(("parentExecutionId", "parentSessionId", "environmentGen
     "parentActionId", "requestId", "childExecutionId", "childSessionId", "task", "deadline", "maxNativeActions"))
 _ACK_KEYS = frozenset(("schemaVersion", "scopeHash", "dispatchId", "toolId", "toolKind",
     "status", "childCompleted", "completionEvidenceRef"))
+_BLOCKED_ACK_KEYS = _ACK_KEYS | {"gateDecision", "nativeRejectionEvidenceRef"}
 _MODEL_SCOPE_KEYS = frozenset(("schemaVersion", "delegationScopeHash", "modelRole", "configHash",
     "maxLogicalRequests", "maxSdkAttempts"))
 _GATE_KEYS = frozenset(("schemaVersion", "permitId", "requestId", "scopeHash", "modelScopeHash",
@@ -260,7 +266,8 @@ class ScopedAppAgentRunner:
                  generation_time_owner_factory: Callable[[], ScopedAREGenerationTimeOwner] | None = None,
                  generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None,
                  deadline_factory: Callable[[str], ScopedOSDeadline] | None = None,
-                 notification_reader: ScopedChildNotificationReader | None = None):
+                 notification_reader: ScopedChildNotificationReader | None = None,
+                 notification_pump: Callable[[str], bool] | None = None):
         if (not isinstance(app, App) or not isinstance(owner, NativeAppBinding)
                 or not isinstance(env, Environment) or not isinstance(llm_engine, LLMEngine)
                 or not callable(dispatch)
@@ -306,6 +313,11 @@ class ScopedAppAgentRunner:
                     or notification_reader.time_manager is not env.time_manager):
                 _fatal("SCOPED_AGENT_NOTIFICATION_READER_SCOPE_INVALID")
         self.__notification_reader = notification_reader
+        if notification_pump is not None and (not callable(notification_pump) or notification_reader is None):
+            _fatal("SCOPED_AGENT_NOTIFICATION_PUMP_INVALID")
+        self.__notification_pump = notification_pump
+        self.__notification_pump_identity = None if notification_pump is None else _callable_identity(notification_pump)
+        self.__sdk_safe_point_callback = self.__sdk_safe_point
         self.__notification_delivery_receipts: list[dict] = []
         # This integration acquires its lease after the model gate, not at
         # BaseAgent's pre-gate simulation hook. Default behavior stays None.
@@ -390,6 +402,7 @@ class ScopedAppAgentRunner:
         self.__completion_ref = None
         self.__seen_dispatches: set[str] = set()
         self.__actions: list[dict] = []
+        self.__blocked_actions: list[dict] = []
         self.__wrapped_task_hash = None
         self.__actor_input_hashes: list[str] = []
         self.__model_calls = 0
@@ -457,6 +470,8 @@ class ScopedAppAgentRunner:
         if self.__notification_reader is not None:
             self.__collect_sources(self.__notification_reader.poll,
                 self.__notification_reader.snapshot, ScopedChildNotificationReader)
+        if self.__notification_pump is not None:
+            self.__collect_sources(self.__notification_pump)
         self.__instance_snapshot = self.__snapshot_instances()
 
     def __collect_sources(self, *objects: Any) -> None:
@@ -503,6 +518,8 @@ class ScopedAppAgentRunner:
             id(self.__owner), _callable_identity(self.__owner.manifest),
             _callable_identity(self.__owner.take_agent_observation),
             id(self.__notification_reader),
+            _callable_identity(self.__notification_pump) if self.__notification_pump is not None else (),
+            _callable_identity(self.__sdk_safe_point_callback),
             _callable_identity(self.__notification_reader.poll) if self.__notification_reader is not None else (),
             _callable_identity(self.__notification_reader.snapshot) if self.__notification_reader is not None else (),
             _callable_identity(self.__notification_reader.identity_snapshot)
@@ -631,6 +648,9 @@ class ScopedAppAgentRunner:
         if self.__closed:
             _fatal("SCOPED_AGENT_CLOSED")
         try:
+            if (self.__notification_pump is not None and _callable_identity(self.__notification_pump)
+                    != self.__notification_pump_identity):
+                _fatal("SCOPED_AGENT_NOTIFICATION_PUMP_CHANGED")
             if self.__snapshot_instances() != self.__instance_snapshot:
                 _fatal("SCOPED_AGENT_SOURCE_CHANGED")
             if wire.value_hash(self.__owner.manifest()) != self.__manifest_hash:
@@ -787,6 +807,7 @@ class ScopedAppAgentRunner:
                 or owner_snapshot.get("failed") is not False):
             _fatal("SCOPED_AGENT_GENERATION_OWNER_INVALID")
         source_hash = owner_snapshot["sourceManifestHash"]
+        active["record"]["generationOwnerSourceRefs"] = generation_owner.source_refs()
         if self.__generation_source_manifest_hash is None:
             self.__generation_source_manifest_hash = source_hash
         elif self.__generation_source_manifest_hash != source_hash:
@@ -846,7 +867,9 @@ class ScopedAppAgentRunner:
         self.__generation_ledgers.append(generation_ledger)
         state = {"owner": generation_owner, "ledger": generation_ledger, "lease": None,
             "admitted": False, "releaseAttempted": False, "released": False,
-            "finished": False, "timing": None, "offset": None}
+            "finished": False, "timing": None, "offset": None,
+            "record": active["record"]}
+        active["record"]["generationLedgerRoot"] = str(ledger_root)
         self.__generation_active = state
         try:
             generation_ledger.admission()
@@ -863,9 +886,15 @@ class ScopedAppAgentRunner:
                 _fatal("SCOPED_AGENT_GENERATION_LEASE_INVALID")
             state["lease"] = _clone(lease)
             generation_ledger.pause_acquired(lease_id=lease["leaseId"])
+            active["record"]["generationOwnerAcquired"] = _clone(generation_owner.snapshot())
+            active["record"]["generationLedgerAcquired"] = self.__generation_verify(state, "paused")
             return state
         except BaseException:
-            self.__generation_abort("SCOPED_AGENT_GENERATION_ADMISSION_FAILED")
+            try:
+                self.__generation_abort("SCOPED_AGENT_GENERATION_ADMISSION_FAILED")
+            except BaseException:
+                # Cleanup must not replace the actual admission failure.
+                pass
             raise
 
     def __generation_timing(self) -> dict:
@@ -910,30 +939,71 @@ class ScopedAppAgentRunner:
         if type(released) is not dict or released.get("released") is not True or released.get("offset") != float(offset):
             _fatal("SCOPED_AGENT_GENERATION_RELEASE_INVALID")
         state["released"] = True
+        state["record"]["generationOwnerReleased"] = _clone(state["owner"].snapshot())
         try:
             state["ledger"].pause_released(lease_id=state["lease"]["leaseId"], offset=float(offset))
         except BaseException:
             _fatal("SCOPED_AGENT_GENERATION_LEDGER_RELEASE_FAILED")
         state["releasedSnapshot"] = self.__generation_verify(state, "released")
+        state["record"]["generationLedgerReleased"] = state["releasedSnapshot"]
 
     def __generation_abort(self, code: str) -> None:
         state = self.__generation_active
         if state is None or state["finished"]:
             return
         cleanup_error = None
-        if state["lease"] is not None and not state["released"] and not state["releaseAttempted"]:
+        if state["lease"] is not None and not state["released"]:
             try:
-                self.__generation_release(state, 0.0)
-            except ScopedAppAgentFatal as error:
+                # Cleanup may recover this owner's physical pause after a
+                # failed release, but never grants permission or revives a
+                # STOPPED environment. Its exact lease is mandatory.
+                cleaned = state["owner"].cleanup(lease_id=state["lease"]["leaseId"])
+                if type(cleaned) is not dict or cleaned.get("released") is not True:
+                    _fatal("SCOPED_AGENT_GENERATION_CLEANUP_INVALID")
+                state["released"] = True
+                state["record"]["generationOwnerReleased"] = _clone(cleaned)
+            except BaseException as error:
                 cleanup_error = error
         try:
             if state["ledger"].phase not in ("new", "finished", "failed"):
                 state["ledger"].failed(code=code)
+            if state["ledger"].phase == "failed":
+                state["record"]["generationLedgerFinal"] = self.__generation_verify(state, "failed")
         except BaseException:
             if cleanup_error is None:
                 cleanup_error = ScopedAppAgentFatal("SCOPED_AGENT_GENERATION_LEDGER_FAILURE_RECORD_FAILED")
         if cleanup_error is not None:
+            safe_code = getattr(cleanup_error, "code", None) or getattr(cleanup_error, "message", None)
+            state["record"]["generationCleanupCode"] = (safe_code if type(safe_code) is str
+                and re.fullmatch(r"[A-Z0-9_]{1,80}", safe_code) else "SCOPED_AGENT_GENERATION_CLEANUP_FAILED")
             raise cleanup_error
+
+    def __pump_notifications(self, stage: str) -> None:
+        if self.__notification_pump is None:
+            return
+        if _callable_identity(self.__notification_pump) != self.__notification_pump_identity:
+            self.__failed = True
+            self.__failure_code = "SCOPED_AGENT_NOTIFICATION_PUMP_CHANGED"
+            _fatal(self.__failure_code)
+        try:
+            stopped = self.__notification_pump(stage)
+        except BaseException:
+            self.__failed = True
+            self.__failure_code = "SCOPED_AGENT_NOTIFICATION_PUMP_FAILED"
+            _fatal(self.__failure_code)
+        if type(stopped) is not bool:
+            self.__failed = True
+            self.__failure_code = "SCOPED_AGENT_NOTIFICATION_PUMP_INVALID"
+            _fatal(self.__failure_code)
+        if stopped:
+            self.__failed = True
+            self.__failure_code = "SCOPED_AGENT_NOTIFICATION_STOPPED"
+            _fatal(self.__failure_code)
+
+    def __sdk_safe_point(self, stage: str) -> None:
+        self.__pump_notifications(stage)
+        self.__notification_before_action(pump=False)
+        self.__check()
 
     def __generation_complete(self, state: dict, output_hash: str, usage: dict | None) -> None:
         try:
@@ -1031,11 +1101,14 @@ class ScopedAppAgentRunner:
         return records
 
     def __notification_pre_step(self, agent) -> None:
+        self.__pump_notifications("pre_step")
         self.__check()
         self.__poll_child_notifications()
         self.__check()
 
-    def __notification_before_action(self) -> None:
+    def __notification_before_action(self, *, pump: bool = True) -> None:
+        if pump:
+            self.__pump_notifications("native_before")
         if self.__notification_reader is None:
             return
         if self.__poll_child_notifications():
@@ -1045,6 +1118,8 @@ class ScopedAppAgentRunner:
 
     def __model_call(self, messages, stop_sequences=(), **kwargs):
         try:
+            self.__pump_notifications("model_admission")
+            self.__notification_before_action(pump=False)
             self.__check()
             if self.__failed or self.__completed or self.__active_model is not None:
                 _fatal("SCOPED_AGENT_TERMINAL")
@@ -1071,6 +1146,8 @@ class ScopedAppAgentRunner:
                     "actual_input_hash": active["actualInputHash"], "before_attempt": self.__sdk_guard_callback}
                 if self.__deadline_factory is not None:
                     begin_kwargs["deadline"] = self.__deadline_active
+                if self.__notification_pump is not None:
+                    begin_kwargs["safe_point"] = self.__sdk_safe_point_callback
                 self.__model.begin_request(**begin_kwargs)
                 self.__check()
             self.__actor_input_hashes.append(wire.value_hash(actual))
@@ -1098,6 +1175,7 @@ class ScopedAppAgentRunner:
                     try:
                         generation["ledger"].model_returned(output_hash=output_hash,
                             timing=timing, usage=usage)
+                        active["record"]["generationLedgerReturned"] = self.__generation_verify(generation, "returned")
                     except BaseException:
                         _fatal("SCOPED_AGENT_GENERATION_LEDGER_RETURN_FAILED")
                     self.__generation_release(generation, offset)
@@ -1106,6 +1184,11 @@ class ScopedAppAgentRunner:
                         "generationOffsetMode": "successfulSdkElapsedSeconds",
                         "generationTimingSource": "ScopedRetryModelEngine.monotonic_clock",
                         "generationLedgerReleased": generation.get("releasedSnapshot")})
+                # The successful generation offset may make queued events due.
+                # Re-publish and reject the obsolete response before finish ACK
+                # or the parser can authorize any native action.
+                self.__pump_notifications("model_returned")
+                self.__notification_before_action(pump=False)
                 finish = {"permitId": active["permitId"], "requestId": active["requestId"],
                     "actualInputHash": active["actualInputHash"], "outputHash": output_hash, "usage": usage}
                 self.__deadline_check("model_finish_before")
@@ -1131,16 +1214,31 @@ class ScopedAppAgentRunner:
                         "SCOPED_MODEL_DEADLINE_SCOPE_MISMATCH", "SCOPED_MODEL_DEADLINE_REUSED",
                         "SCOPED_MODEL_DEADLINE_REQUIRED"}):
                 original_failure_code = error.code
-            try:
-                self.__generation_abort("SCOPED_AGENT_GENERATION_FAILED")
-            except BaseException:
-                self.__failure_code = "SCOPED_AGENT_GENERATION_CLEANUP_FAILED"
+            if original_failure_code is None and isinstance(error, GenerationTimeError):
+                original_failure_code = error.code
             self.__failed = True
             self.__failure_code = self.__failure_code or original_failure_code or "SCOPED_AGENT_MODEL_FAILED"
+            try:
+                self.__generation_abort(self.__failure_code)
+            except BaseException:
+                # Retain the primary source/deadline/notification failure;
+                # cleanup's fixed secondary code stays in its model record.
+                pass
             _fatal(self.__failure_code)
         finally:
-            self.__active_model = None
-            self.__deadline_active = None
+            try:
+                if self.__generation_active is not None and not self.__generation_active["finished"]:
+                    try:
+                        self.__generation_abort(self.__failure_code or "SCOPED_AGENT_GENERATION_FAILED")
+                    except BaseException:
+                        if self.__failure_code is None:
+                            self.__failed = True
+                            self.__failure_code = "SCOPED_AGENT_GENERATION_CLEANUP_FAILED"
+                            _fatal(self.__failure_code)
+            finally:
+                self.__generation_active = None
+                self.__active_model = None
+                self.__deadline_active = None
 
     def __completion(self, ref: Any, dispatch_id: str) -> dict:
         _exact(ref, {"path", "sha256"})
@@ -1173,6 +1271,83 @@ class ScopedAppAgentRunner:
             _fatal("SCOPED_AGENT_COMPLETION_INVALID")
         return _clone(ref)
 
+    def __blocked_dispatch(self, ack: dict, tool: dict, arguments: dict) -> str:
+        """Return explicit gate feedback only after verifying negative proof.
+
+        It is an internal control observation, not the tool's return value.
+        In particular this branch never consumes a native observation or a CE.
+        """
+        try:
+            _exact(ack, _BLOCKED_ACK_KEYS)
+            if (ack["schemaVersion"] != "capybara-scoped-agent-dispatch-blocked-v1"
+                    or ack["scopeHash"] != self.__scope_hash or ack["toolId"] != tool["toolId"]
+                    or ack["toolKind"] != tool["toolKind"] or ack["status"] != "blocked"
+                    or ack["childCompleted"] is not False or ack["completionEvidenceRef"] is not None
+                    or ack["gateDecision"] not in ("block", "read_back")
+                    or type(ack["dispatchId"]) is not str or str(uuid.UUID(ack["dispatchId"])) != ack["dispatchId"]
+                    or ack["dispatchId"] in self.__seen_dispatches):
+                _fatal("SCOPED_AGENT_BLOCKED_ACK_INVALID")
+            rejection = _sealed_native_evidence(ack["nativeRejectionEvidenceRef"])
+            _exact(rejection, {"schemaVersion", "environmentGeneration", "parentExecutionId", "parentSessionId",
+                "sequence", "previousHash", "kind", "data"})
+            if (rejection["schemaVersion"] != "capybara-runtime-delegation-receipt-v1" or rejection["kind"] != "native_rejected"
+                    or rejection["environmentGeneration"] != self.__scope["environmentGeneration"]
+                    or rejection["parentExecutionId"] != self.__scope["parentExecutionId"]
+                    or rejection["parentSessionId"] != self.__scope["parentSessionId"]
+                    or not _safe_uint(rejection["sequence"], 1)
+                    or rejection["previousHash"] is not None and (type(rejection["previousHash"]) is not str
+                        or not _HASH.fullmatch(rejection["previousHash"]))):
+                _fatal("SCOPED_AGENT_BLOCKED_EVIDENCE_INVALID")
+            data = rejection["data"]
+            _exact(data, {"scope", "action", "started", "nativeReturned", "resultHash", "code", "beforeEvidence",
+                          "gateDecision", "nativeDiscardEvidenceRef"})
+            if (wire.value_hash(data["scope"]) != self.__scope_hash or data["started"] is not False or data["nativeReturned"] is not False
+                    or data["code"] != "DELEGATION_BEFORE_BLOCKED" or data["gateDecision"] != ack["gateDecision"]
+                    or data["resultHash"] != hashlib.sha256(b"native_outcome_unknown").hexdigest()
+                    or type(data["action"]) is not dict or type(data["action"].get("arguments")) is not dict):
+                _fatal("SCOPED_AGENT_BLOCKED_EVIDENCE_INVALID")
+            action = data["action"]
+            arguments_hash = _registry_action_hash(action["arguments"])
+            effective_hash = wire.value_hash(action["arguments"])
+            expected = {key: value for key, value in tool.items() if key not in ("publicName", "signatureHash", "formatterSourceHash")}
+            expected.update(id=ack["dispatchId"], dispatchId=ack["dispatchId"], arguments=action["arguments"],
+                argumentsHash=arguments_hash, mutationKey=_registry_action_hash([self.__scope["environmentGeneration"],
+                    self.__scope["appId"], tool["resourceKey"], tool["canonicalName"], arguments_hash]))
+            if wire.value_hash(action) != wire.value_hash(expected):
+                _fatal("SCOPED_AGENT_BLOCKED_EVIDENCE_INVALID")
+            discarded = _sealed_native_evidence(data["nativeDiscardEvidenceRef"])
+            _exact(discarded, {"schemaVersion", "sourceManifestHash", "scopeHash", "ticketId", "dispatchId", "toolId",
+                "canonicalName", "toolKind", "effect", "rawArgumentsHash", "effectiveArgumentsHash", "gateDecision",
+                "beforeClockEvidenceRef", "beforeHookEvidenceRef", "discarded", "consumed", "nativeStarted"})
+            if (discarded["schemaVersion"] != "gaia2-private-native-discard-v1"
+                    or discarded["sourceManifestHash"] != self.__manifest_hash or discarded["scopeHash"] != self.__scope_hash
+                    or any(discarded[key] != action[key] for key in ("dispatchId", "toolId", "canonicalName", "toolKind", "effect"))
+                    or discarded["rawArgumentsHash"] != wire.value_hash(arguments)
+                    or discarded["effectiveArgumentsHash"] != effective_hash
+                    or discarded["gateDecision"] != ack["gateDecision"]
+                    or discarded["beforeHookEvidenceRef"] != data["beforeEvidence"]
+                    or discarded["discarded"] is not True or discarded["consumed"] is not False or discarded["nativeStarted"] is not False):
+                _fatal("SCOPED_AGENT_BLOCKED_EVIDENCE_INVALID")
+            clock = _validate_native_blocked_before(scope=self.__scope, action=action,
+                gate_decision=ack["gateDecision"], before_hook_ref=data["beforeEvidence"],
+                before_clock_ref=discarded["beforeClockEvidenceRef"], source_manifest_hash=self.__manifest_hash)
+            if (clock["ticketId"] != discarded["ticketId"] or clock["rawArgumentsHash"] != discarded["rawArgumentsHash"]):
+                _fatal("SCOPED_AGENT_BLOCKED_EVIDENCE_INVALID")
+        except BaseException as error:
+            _fatal(_preserved_failure_code(error, "SCOPED_AGENT_BLOCKED_EVIDENCE_INVALID"))
+        self.__check()
+        self.__seen_dispatches.add(ack["dispatchId"])
+        self.__blocked_actions.append({"dispatchId": ack["dispatchId"], "toolId": tool["toolId"],
+            "toolKind": tool["toolKind"], "status": "blocked", "gateDecision": ack["gateDecision"],
+            "nativeRejectionEvidenceRef": _clone(ack["nativeRejectionEvidenceRef"])})
+        if ack["gateDecision"] == "read_back":
+            return ("Capybara gate feedback (not a native tool result): read_back. This action was blocked before execution; "
+                    "no tool return or mutation occurred. Re-plan and obtain a complete fresh authoritative read of the "
+                    "same query identified in the current evidence ledger before considering this action again.")
+        return ("Capybara gate feedback (not a native tool result): block. This action was blocked before execution; "
+                "no tool return or mutation occurred. Re-plan using fresh evidence or a permitted safe exit; "
+                "do not automatically replay the blocked action.")
+
     def __execute_tool_call(self, executor, parsed_action, append_agent_log, make_timestamp):
         self.__check()
         self.__notification_before_action()
@@ -1188,6 +1363,8 @@ class ScopedAppAgentRunner:
             _fatal("SCOPED_AGENT_FINAL_ARGUMENT_INVALID")
         try:
             ack = self.__dispatch({"tool": name, "arguments": copy.deepcopy(arguments)})
+            if type(ack) is dict and ack.get("status") == "blocked":
+                return self.__blocked_dispatch(ack, tool, arguments)
             _exact(ack, _ACK_KEYS)
             if (ack["schemaVersion"] != "capybara-scoped-agent-dispatch-v1" or ack["scopeHash"] != self.__scope_hash
                     or ack["toolId"] != tool["toolId"] or ack["toolKind"] != tool["toolKind"]
@@ -1307,8 +1484,9 @@ class ScopedAppAgentRunner:
             "originalObservationsTaken": self.__observations_taken,
             "started": self.__started, "closed": self.__closed, "completed": self.__completed and not self.__failed,
             "failed": self.__failed, "failureCode": self.__failure_code,
-            "completionEvidenceRef": self.__completion_ref, "actions": self.__actions,
+            "completionEvidenceRef": self.__completion_ref, "actions": self.__actions, "blockedActions": self.__blocked_actions,
             "notificationReaderAttached": self.__notification_reader is not None,
+            "notificationPumpAttached": self.__notification_pump is not None,
             "notificationDeliveryReceipts": self.__notification_delivery_receipts,
             "notificationReader": None if self.__notification_reader is None else self.__notification_reader.snapshot(),
             "appClockShared": self.app_agent.time_manager is self.__env.time_manager,
@@ -1317,10 +1495,13 @@ class ScopedAppAgentRunner:
             "wrapperRegisteredInEnvironment": any(app is self.app_agent for app in self.__env.apps.values())})
 
     def close(self) -> None:
-        self.__closed = True
-        if self.__notification_reader is not None:
-            self.__notification_reader.close()
-        self.base_agent.stop()
+        try:
+            self.__generation_abort("SCOPED_AGENT_GENERATION_CLOSED")
+        finally:
+            self.__closed = True
+            if self.__notification_reader is not None:
+                self.__notification_reader.close()
+            self.base_agent.stop()
 
 
 def build_scoped_app_agent(*, app: App, owner: NativeAppBinding, env: Environment,
@@ -1332,10 +1513,11 @@ def build_scoped_app_agent(*, app: App, owner: NativeAppBinding, env: Environmen
                           generation_time_owner_factory: Callable[[], ScopedAREGenerationTimeOwner] | None = None,
                           generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None,
                           deadline_factory: Callable[[str], ScopedOSDeadline] | None = None,
-                          notification_reader: ScopedChildNotificationReader | None = None) -> ScopedAppAgentRunner:
+                          notification_reader: ScopedChildNotificationReader | None = None,
+                          notification_pump: Callable[[str], bool] | None = None) -> ScopedAppAgentRunner:
     return ScopedAppAgentRunner(app=app, owner=owner, env=env, scope=scope,
         llm_engine=llm_engine, dispatch=dispatch, model_binding=model_binding, model_gate=model_gate,
         model_attempt=model_attempt, model_finish=model_finish, max_logical_requests=max_logical_requests,
         log_callback=log_callback, generation_time_owner_factory=generation_time_owner_factory,
         generation_ledger_factory=generation_ledger_factory, deadline_factory=deadline_factory,
-        notification_reader=notification_reader)
+        notification_reader=notification_reader, notification_pump=notification_pump)

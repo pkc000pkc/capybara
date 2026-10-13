@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url'
 import { validateSchema } from './phase0_audit.mjs'
 import { buildRunManifest, digest, fileDigest, readJson, within } from './phase0_run.mjs'
 import { runtimeEvidenceRequired, validateRuntimeEvidence } from './phase3_runtime_evidence.mjs'
+import { officialA2ARuntimeEvidenceErrors } from './phase5_a2a_evidence.mjs'
+export { officialA2ARuntimeEvidenceErrors, verifyOfficialA2ARuntimeEvidence } from './phase5_a2a_evidence.mjs'
 
 const phases = ['standard', 'agent2agent', 'noise']
 const configs = ['execution', 'search', 'adaptability', 'time', 'ambiguity', 'mini']
@@ -14,8 +16,139 @@ const keyOf = item => JSON.stringify([item.phase, item.config, item.scenarioId, 
 const identityOf = row => ({ phase: row.metadata?.phase, config: row.metadata?.config, scenarioId: row.metadata?.scenario_id, runNumber: row.metadata?.run_number })
 const officialText = text => text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
 const hfFieldTypes = { scenario_id: 'string', run_number: 'integer', task_id: 'string', score: 'number', status: 'string', data: 'string', run_type: 'string', config: 'string', phase_name: 'string', a2a_app_prop: 'number', has_app_noise: 'boolean', has_env_noise: 'boolean', run_config: 'string', has_exception: 'boolean', exception_type: 'string', exception_message: 'string', rationale: 'string' }
+const officialNoise = Object.freeze({
+  toolFailureProbability: 0.1,
+  applyToolNameAugmentation: true,
+  applyToolDescriptionAugmentation: true,
+  numEnvEventsPerMinute: 10,
+  envEventsSeed: 0,
+})
 function hfSchemaValid(row) {
   return object(row) && digest(Object.keys(row).sort()) === digest(Object.keys(hfFieldTypes).sort()) && Object.entries(hfFieldTypes).every(([field, type]) => row[field] === null || (type === 'integer' ? Number.isInteger(row[field]) : typeof row[field] === type && (type !== 'number' || Number.isFinite(row[field]))))
+}
+
+/**
+ * Validate the actual ARE Noise configuration recorded in the native trace.
+ *
+ * The phase flag and HF booleans are only labels.  A trace is Noise evidence
+ * only when ARE records both augmentation objects with the pinned values from
+ * `create_noise_configs()` in ARE 1.2.0.  Keeping this check in the independent
+ * exporter audit prevents a sidecar or metadata-only run from being treated as
+ * an official Noise execution.
+ */
+export function officialNoiseTraceErrors(trace, identity) {
+  if (identity?.phase !== 'noise') return []
+  const errors = []
+  const definition = trace?.metadata?.definition
+  const runner = trace?.metadata?.runner_config
+  if (!object(definition) || definition.has_a2a_augmentation !== false) errors.push('noise_a2a_augmentation_mismatch')
+  if (!object(definition) || definition.has_tool_augmentation !== true) errors.push('noise_tool_augmentation_missing')
+  if (!object(definition) || definition.has_env_events_augmentation !== true) errors.push('noise_env_events_augmentation_missing')
+  const tool = runner?.tool_augmentation_config
+  if (!object(tool) || tool.tool_failure_probability !== officialNoise.toolFailureProbability || tool.apply_tool_name_augmentation !== officialNoise.applyToolNameAugmentation || tool.apply_tool_description_augmentation !== officialNoise.applyToolDescriptionAugmentation) errors.push('noise_tool_config_mismatch')
+  const env = runner?.env_events_config
+  if (!object(env) || env.num_env_events_per_minute !== officialNoise.numEnvEventsPerMinute || env.env_events_seed !== officialNoise.envEventsSeed) errors.push('noise_env_config_mismatch')
+  return errors
+}
+
+/**
+ * Validate the trusted dynamic guard receipt for a native official A2A run.
+ * A phase label or ``a2a_app_prop`` HF field alone is insufficient evidence:
+ * the child must have been constructed with both parent-owned notification and
+ * OS-deadline capabilities, and the guard must have admitted that exact scope.
+ */
+function a2aGuardErrors(snapshot) {
+  const guard = snapshot.guard
+  const version2 = guard?.schemaVersion === 'gaia2-official-a2a-guard-binding-v2'
+  if (!object(guard) || !['gaia2-official-a2a-guard-binding-v1', 'gaia2-official-a2a-guard-binding-v2'].includes(guard.schemaVersion)) return ['a2a_guard_receipt_missing']
+  if (snapshot.notificationReaderFactoryBound !== true || snapshot.deadlineFactoryBound !== true) return ['a2a_dynamic_factory_unbound']
+  if (guard.admissible !== true || guard.status !== 'bound' || guard.notificationBound !== true || guard.deadlineBound !== true) return ['a2a_dynamic_guard_not_admitted']
+  if (version2 && (snapshot.notificationPumpRequired !== true || snapshot.generationTimeRequired !== true
+    || snapshot.notificationPumpFactoryBound !== true || snapshot.generationTimeFactoryBound !== true
+    || guard.notificationPumpRequired !== true || guard.generationTimeRequired !== true
+    || guard.notificationPumpBound !== true || guard.generationTimeBound !== true)) return ['a2a_production_dynamic_guard_unbound']
+  if (!version2 && (snapshot.notificationPumpRequired === true || snapshot.generationTimeRequired === true)) return ['a2a_production_dynamic_guard_downgraded']
+  return []
+}
+
+function excludedToolSnapshotValid(snapshot, appId) {
+  return object(snapshot) && snapshot.schemaVersion === 'gaia2-private-native-excluded-tools-v1'
+    && snapshot.appId === appId && hashPattern.test(snapshot.sourceManifestHash ?? '')
+    && Number.isSafeInteger(snapshot.toolCount) && snapshot.toolCount >= 0 && Array.isArray(snapshot.tools)
+    && snapshot.toolCount === snapshot.tools.length
+    && snapshot.tools.every(tool => object(tool) && typeof tool.publicName === 'string' && tool.publicName
+      && typeof tool.canonicalName === 'string' && tool.canonicalName && tool.reasonCode === 'NATIVE_TOOL_EFFECT_UNDECLARED')
+    && new Set(snapshot.tools.map(tool => tool.publicName)).size === snapshot.tools.length
+}
+
+export function officialA2ATraceErrors(events, identity, options = {}) {
+  if (identity?.phase !== 'agent2agent') return []
+  if (!Array.isArray(events)) return ['a2a_events_invalid']
+  const snapshots = events.filter(event => object(event) && event.type === 'a2a_client_snapshot')
+  const pools = events.filter(event => object(event) && event.type === 'a2a_client_pool_snapshot')
+  // Historical single-App captures retain the strict original guard gate.
+  // Multiple snapshots without a trusted all-or-nothing pool are not accepted.
+  if (!pools.length) {
+    if (snapshots.some(snapshot => snapshot.guard?.schemaVersion === 'gaia2-official-a2a-guard-binding-v2' || snapshot.notificationPumpRequired === true || snapshot.generationTimeRequired === true)) return ['a2a_production_pool_missing']
+    return snapshots.length === 1 ? a2aGuardErrors(snapshots[0]) : ['a2a_client_snapshot_missing_or_duplicate']
+  }
+  if (pools.length !== 1) return ['a2a_client_pool_duplicate']
+  const pool = pools[0]
+  const validAppId = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,119}$/.test(value)
+  const appSet = (value, allowEmpty = false) => Array.isArray(value) && (allowEmpty || value.length > 0)
+    && value.length <= 64 && value.every(validAppId) && new Set(value).size === value.length && digest(value) === digest([...value].sort())
+  if (pool.schemaVersion !== 'gaia2-official-a2a-client-pool-v1' || pool.status !== 'committed'
+    || !appSet(pool.expectedAppIds) || !appSet(pool.usedAppIds, true) || !Array.isArray(pool.clients)
+    || pool.usedAppIds.some(id => !pool.expectedAppIds.includes(id))) return ['a2a_client_pool_invalid']
+  const inventories = events.filter(event => object(event) && event.type === 'official_tool_inventory')
+  const appIds = inventories.length === 1 && Array.isArray(inventories[0].tools)
+    ? inventories[0].tools.filter(tool => object(tool) && tool.canonicalName === 'AppAgent__expert_agent').map(tool => tool.appName).sort() : null
+  if (!appSet(appIds) || digest(appIds) !== digest(pool.expectedAppIds)) return ['a2a_client_pool_inventory_mismatch']
+  const ids = pool.clients.map(client => client?.appId)
+  if (digest(ids) !== digest(pool.expectedAppIds)) return ['a2a_client_pool_owners_mismatch']
+  if (snapshots.length !== pool.usedAppIds.length || digest(snapshots.map(client => client.appId).sort()) !== digest(pool.usedAppIds)) return ['a2a_client_snapshot_missing_or_duplicate']
+  const fields = ['schemaVersion', 'executionId', 'sessionId', 'scenarioId', 'appId', 'scopeHash', 'childActive', 'closed', 'modelRequests', 'sdkAttempts', 'notificationReaderFactoryBound', 'deadlineFactoryBound', 'guard', 'excludedTools', 'notificationPumpFactoryBound', 'generationTimeFactoryBound', 'notificationPumpRequired', 'generationTimeRequired', 'childScopeHashes', 'failed', 'failureCode']
+  const project = snapshot => Object.fromEntries(fields.map(field => [field, snapshot[field]]))
+  const errors = []
+  if (Object.hasOwn(pool, 'excludedTools')) {
+    if (!Array.isArray(pool.excludedTools) || pool.clients.some(client => !excludedToolSnapshotValid(client?.excludedTools, client?.appId))
+      || digest(pool.excludedTools) !== digest(pool.clients.filter(client => client.excludedTools?.toolCount > 0).map(client => client.excludedTools))) errors.push('a2a_excluded_tool_inventory_invalid')
+  } else if (pool.clients.some(client => Object.hasOwn(client, 'excludedTools'))) errors.push('a2a_excluded_tool_inventory_invalid')
+  for (const client of pool.clients) {
+    if (!object(client) || client.schemaVersion !== 'gaia2-official-a2a-client-v1'
+      || client.executionId !== pool.executionId || client.sessionId !== pool.sessionId
+      || identity.executionId !== undefined && client.executionId !== identity.executionId
+      || identity.scenarioId !== undefined && client.scenarioId !== identity.scenarioId
+      || typeof client.scenarioId !== 'string' || !client.scenarioId || typeof client.sessionId !== 'string' || !client.sessionId
+      || client.childActive !== false || client.closed !== false || client.scopeHash !== null
+      || !Number.isSafeInteger(client.modelRequests) || client.modelRequests < 0
+      || !Number.isSafeInteger(client.sdkAttempts) || client.sdkAttempts < 0) {
+      errors.push('a2a_client_pool_identity_or_state_invalid'); continue
+    }
+    if (client.notificationReaderFactoryBound !== true || client.deadlineFactoryBound !== true) errors.push('a2a_dynamic_factory_unbound')
+    const production = client.notificationPumpRequired === true || client.generationTimeRequired === true || client.guard?.schemaVersion === 'gaia2-official-a2a-guard-binding-v2'
+    if (production && (client.notificationPumpRequired !== true || client.generationTimeRequired !== true
+      || client.notificationPumpFactoryBound !== true || client.generationTimeFactoryBound !== true
+      || client.failed !== false || client.failureCode !== null
+      || !Array.isArray(client.childScopeHashes) || !client.childScopeHashes.every(value => hashPattern.test(value))
+      || new Set(client.childScopeHashes).size !== client.childScopeHashes.length)) errors.push('a2a_production_client_invalid')
+    if (pool.usedAppIds.includes(client.appId)) {
+      errors.push(...a2aGuardErrors(client))
+      if (!hashPattern.test(client.guard?.scopeHash ?? '')) errors.push('a2a_guard_scope_invalid')
+      if (production && client.guard?.scopeHash !== client.childScopeHashes?.at(-1)) errors.push('a2a_guard_last_scope_mismatch')
+      const event = snapshots.find(value => value.appId === client.appId)
+      if (digest(project(event)) !== digest(project(client))) errors.push('a2a_client_pool_snapshot_conflict')
+    } else if (client.guard !== null || client.modelRequests !== 0 || client.sdkAttempts !== 0 || production && client.childScopeHashes.length !== 0) {
+      errors.push('a2a_unused_client_activity')
+    }
+  }
+  if (pool.clients.some(client => client.notificationPumpRequired === true || client.generationTimeRequired === true || client.guard?.schemaVersion === 'gaia2-official-a2a-guard-binding-v2')) {
+    errors.push(...officialA2ARuntimeEvidenceErrors(events, identity, options))
+  }
+  // A valid official run may choose not to delegate and still receive score
+  // zero. Preserve that evaluated failure without fabricating a child guard;
+  // unused prepared owners must show no child or model activity.
+  return [...new Set(errors)]
 }
 
 /** Resolve only regular package files. Windows absolute paths are rejected on every host. */
@@ -77,6 +210,7 @@ function traceErrors(trace, identity, executionId) {
   if (!object(trace.metadata) || !object(definition)) return [...errors, 'trace_metadata_invalid']
   if (definition.scenario_id !== identity.scenarioId || definition.run_number !== identity.runNumber) errors.push('trace_identity_mismatch')
   for (const [field, expected] of [['config', identity.config], ['phase', identity.phase], ['execution_id', executionId]]) if (definition[field] !== undefined && definition[field] !== null && definition[field] !== expected) errors.push('trace_identity_mismatch')
+  errors.push(...officialNoiseTraceErrors(trace, identity))
   return errors
 }
 
@@ -95,7 +229,7 @@ export function auditSubmissionPackage({ packageRoot, officialCheck = null } = {
     if (gate === 'evaluation') evaluation = false
     issues.push({ gate, code, ...detail })
   }
-  const metrics = { targetCount: 0, rowCount: 0, uniqueRowCount: 0, duplicateRows: 0, unknownRows: 0, missingRows: 0, structurallyValidRows: 0, evaluatedRows: 0, successCount: 0, businessFailureCount: 0, technicalCount: 0, provenanceValidRows: 0, runtimeAttestedRows: 0, realHookRows: 0, officialReconstructedCount: null }
+  const metrics = { targetCount: 0, rowCount: 0, uniqueRowCount: 0, duplicateRows: 0, unknownRows: 0, missingRows: 0, structurallyValidRows: 0, evaluatedRows: 0, successCount: 0, businessFailureCount: 0, technicalCount: 0, provenanceValidRows: 0, runtimeAttestedRows: 0, realHookRows: 0, a2aConfiguredRows: 0, a2aGuardRows: 0, a2aNoDelegationRows: 0, a2aExcludedToolRows: 0, officialReconstructedCount: null }
   let manifest = null, sidecar = null
   const json = (path, gate, code) => { try { return readJson(packagePath(root, path)) } catch { issue(gate, code, { path }); return null } }
   try {
@@ -123,7 +257,7 @@ export function auditSubmissionPackage({ packageRoot, officialCheck = null } = {
   const expected = new Map((manifest?.tasks ?? []).map(task => [keyOf(task), task]))
   const expectedById = new Map((manifest?.tasks ?? []).map(task => [task.executionId, task]))
   const records = new Map(), files = new Map()
-  let state = null, runtime = null, provenanceBaseValid = Boolean(manifest && sidecar)
+  let state = null, runtime = null, capturedEnvironment = null, provenanceBaseValid = Boolean(manifest && sidecar)
   const evidence = (ref, label) => {
     if (!object(ref) || !hashPattern.test(ref.sha256 ?? '')) { issue('evaluation', 'invalid_evidence_reference', { evidence: label }); return null }
     try {
@@ -155,6 +289,7 @@ export function auditSubmissionPackage({ packageRoot, officialCheck = null } = {
           const restored = buildRunManifest({ root, protocol, index, lockRefs: manifest.lockRefs, entrypoints: manifest.entrypoints, mode: manifest.mode, runId: manifest.runId, perCapability: manifest.selection.perCapability ?? undefined, miniLimit: manifest.selection.miniLimit ?? undefined, rootSeed: manifest.rootSeed })
           for (const key of ['planFingerprint', 'dataset', 'models', 'policy', 'requestedRuntime', 'tasks', 'selection', 'runRoot', 'stateFile']) if (digest(manifest[key]) !== digest(restored[key])) throw new Error('captured_plan')
           const environment = readJson(captured.environment)
+          capturedEnvironment = environment
           if (!manifest.entrypoints.entries.every(entry => environment.codeInputs.some(file => file.path === entry.path && file.sha256 === entry.sha256))) throw new Error('captured_entrypoint')
         } catch { issue('evaluation', 'captured_plan_reconstruction_mismatch'); provenanceBaseValid = false }
       }
@@ -266,6 +401,24 @@ export function auditSubmissionPackage({ packageRoot, officialCheck = null } = {
           if (!refersToTrace) throw new Error('native_trace_identity')
         } catch { issue('evaluation', 'native_judgment_or_trace_binding_mismatch', { executionId: task.executionId }); continue }
         if (!events.every(event => object(event) && event.executionId === task.executionId && event.sessionId === record.sessionId)) { issue('evaluation', 'foreign_runtime_event', { executionId: task.executionId }); continue }
+        // This gate is intentionally limited to native official submissions;
+        // synthetic fixtures and controlled contract tests do not claim A2A.
+        if (manifest.mode === 'official_submission' && sidecar.evidenceKind === 'native_runtime' && task.phase === 'agent2agent') {
+          const a2aCopies = new Map((record.runtimeEvidence ?? []).map(ref => [ref.sourcePath, ref]))
+          const a2aErrors = officialA2ATraceErrors(events, task, { environmentLock: capturedEnvironment, readEvidence: sourcePath => {
+            const ref = a2aCopies.get(sourcePath)
+            if (!ref || files.get(ref.path) !== ref.sha256) throw new Error('a2a_evidence_unbound')
+            const path = evidence(ref, 'a2a_runtime_evidence')
+            if (!path) throw new Error('a2a_evidence_unbound')
+            return readFileSync(path)
+          } })
+          if (a2aErrors.length) { for (const code of a2aErrors) issue('evaluation', code, { executionId: task.executionId }); continue }
+          metrics.a2aConfiguredRows++
+          const pool = events.find(event => event.type === 'a2a_client_pool_snapshot')
+          if (pool?.excludedTools?.length) metrics.a2aExcludedToolRows++
+          if (pool && pool.usedAppIds.length === 0) metrics.a2aNoDelegationRows++
+          else metrics.a2aGuardRows++
+        }
         try {
           const sourceRefs = result.runtimeEvidence ?? [], copies = record.runtimeEvidence ?? []
           if (!Array.isArray(sourceRefs) || !Array.isArray(copies) || sourceRefs.length !== copies.length) throw new Error('runtime_evidence_count')
@@ -327,6 +480,7 @@ export function auditSubmissionPackage({ packageRoot, officialCheck = null } = {
   return finish()
 
   function finish() {
-    return { schemaVersion: 'gaia2-submission-audit-v1', format_valid: format, coverage_complete: coverage, evaluation_complete: evaluation, officialSubmissionReady: false, realHooksReady: evaluation && metrics.targetCount > 0 && metrics.realHookRows === metrics.targetCount, issues, metrics, mode: manifest?.mode ?? null, evidenceKind: sidecar?.evidenceKind ?? 'unverified_external', syntheticFixtureOnly: sidecar?.syntheticFixtureOnly === true, officialCheckPassed: officialCheck?.status === 'passed' && officialCheck?.traceValidationPassed === true && officialCheck?.hfSchemaValid === true, readinessBlockers: ['full_real_official_run_and_phase_3_to_5_gates_not_attested', ...(metrics.realHookRows !== metrics.targetCount || metrics.targetCount === 0 ? ['real_runtime_hooks_not_attested'] : []), ...(manifest?.mode !== 'official_submission' ? ['not_official_submission_mode'] : []), ...(manifest?.selection?.fullOfficialCoverage !== true ? ['not_full_official_coverage_plan'] : []), ...(sidecar?.evidenceKind !== 'native_runtime' ? ['not_native_runtime_evidence'] : []), ...(officialCheck === null ? ['official_reconstruction_not_checked'] : [])] }
+    const expectedA2a = manifest?.mode === 'official_submission' ? (manifest.tasks ?? []).filter(task => task.phase === 'agent2agent').length : 0
+    return { schemaVersion: 'gaia2-submission-audit-v1', format_valid: format, coverage_complete: coverage, evaluation_complete: evaluation, officialSubmissionReady: false, realHooksReady: evaluation && metrics.targetCount > 0 && metrics.realHookRows === metrics.targetCount, issues, metrics, mode: manifest?.mode ?? null, evidenceKind: sidecar?.evidenceKind ?? 'unverified_external', syntheticFixtureOnly: sidecar?.syntheticFixtureOnly === true, officialCheckPassed: officialCheck?.status === 'passed' && officialCheck?.traceValidationPassed === true && officialCheck?.hfSchemaValid === true, readinessBlockers: ['full_real_official_run_and_phase_3_to_5_gates_not_attested', ...(metrics.realHookRows !== metrics.targetCount || metrics.targetCount === 0 ? ['real_runtime_hooks_not_attested'] : []), ...(expectedA2a > 0 && metrics.a2aConfiguredRows !== expectedA2a ? ['official_a2a_configuration_not_attested'] : []), ...(metrics.a2aExcludedToolRows > 0 ? ['official_native_tool_coverage_incomplete'] : []), ...(manifest?.mode !== 'official_submission' ? ['not_official_submission_mode'] : []), ...(manifest?.selection?.fullOfficialCoverage !== true ? ['not_full_official_coverage_plan'] : []), ...(sidecar?.evidenceKind !== 'native_runtime' ? ['not_native_runtime_evidence'] : []), ...(officialCheck === null ? ['official_reconstruction_not_checked'] : [])] }
   }
 }

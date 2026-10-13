@@ -27,10 +27,14 @@ export function runtimeFixture({ root = mkdtempSync(join(tmpdir(), 'capybara-run
   const initialization = { schemaVersion: 'capybara-runtime-plugin-host-v1', executionId: task.executionId, sessionId, plugins: [{ id: 'runtime', files, inventoryHash: rawHash(files.map(({ relativePath, sha256 }) => ({ relativePath, sha256 }))) }], harnesses: [{ id: 'runtime:contract', type: 'persistent', sourceSha256: hash('Visible context') }], runtimeHooks: Object.entries(names).sort(([a], [b]) => a.localeCompare(b)).map(([id, checkpoint]) => ({ id, checkpoint, sourceSha256: files.find(file => file.relativePath === `hooks/${id}.ts`).sha256 })), trainingHooks: [{ id: 'gaia2-correction', checkpoint: 'after_evaluation', sourceSha256: files.find(file => file.relativePath.startsWith('training-hooks/')).sha256 }], variablesHash: rawHash(values) }
   const evidenceDir = `${session.workspaceDir}/plugin-runtime`, initialPath = `${evidenceDir}/000001-initialized.json`
   put(initialPath, initialization)
-  const hostProcess = { schemaVersion: 'gaia2-process-result-v1', exitCode: 0, signal: null, timedOut: false, interrupted: false, terminationErrors: [], finishedAt: new Date().toISOString(), pid: 123 }
+  const hostProcess = { schemaVersion: 'gaia2-process-result-v1', exitCode: 0, signal: null, timedOut: false, interrupted: false, childExited: true, childClosed: true, terminationErrors: [], finishedAt: new Date().toISOString(), pid: 123 }
   put(`${session.outputDir}/hook-host/process-result.json`, hostProcess)
   const readyInitialization = { ...initialization, evidencePath: join(root, initialPath) }
-  put(`${session.outputDir}/hook-host/ready.json`, { schemaVersion: 'gaia2-hook-host-ready-v1', endpoint: 'http://127.0.0.1:9000/invoke', processId: 123, initialization: readyInitialization, initializationHash: rawHash(readyInitialization) })
+  const ready = { schemaVersion: 'gaia2-hook-host-ready-v1', endpoint: 'http://127.0.0.1:9000/invoke', processId: 123, initialization: readyInitialization, initializationHash: rawHash(readyInitialization) }
+  put(`${session.outputDir}/hook-host/ready.json`, ready)
+  put(`${session.outputDir}/hook-host/lifecycle-start.json`, { schemaVersion: 'gaia2-hook-lifecycle-v1', phase: 'start', executionId: task.executionId, sessionId, scenarioId: task.scenarioId, startedAt: new Date().toISOString() })
+  put(`${session.outputDir}/hook-host/lifecycle-ready.json`, { schemaVersion: 'gaia2-hook-lifecycle-v1', phase: 'ready', executionId: task.executionId, sessionId, processId: ready.processId, endpoint: ready.endpoint, readySha256: hash(JSON.stringify(ready)), readyAt: new Date().toISOString() })
+  put(`${session.outputDir}/hook-host/lifecycle-closed.json`, { schemaVersion: 'gaia2-hook-lifecycle-v1', phase: 'closed', executionId: task.executionId, sessionId, exitCode: 0, signal: null, timedOut: false, interrupted: false, childExited: true, childClosed: true, manualInspectionRequired: false, terminationErrors: 0, closedAt: new Date().toISOString() })
   const action = { id: 'call-1', name: 'tool_read', canonicalName: 'app.read', effect: 'read', arguments: {}, authoritativeRead: true }
   const events = [], invocations = []
   const emit = (type, fields = {}) => events.push({ type, executionId: task.executionId, sessionId, ...fields })

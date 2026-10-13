@@ -54,6 +54,13 @@ export async function startRuntimeHookService({ root, manifest, task, session, s
   }
   const correctionAuthority = prepareCorrectionReadonlyInitialization({ root, manifest, task, session })
   const serviceRoot = join(output, 'hook-host'); mkdirSync(serviceRoot)
+  const lifecycle = (name, value) => {
+    // Lifecycle receipts are immutable, redacted boundary evidence. They are
+    // intentionally separate from the supervised process receipts because a
+    // startup failure can happen before the child creates heartbeat/final files.
+    try { writeFileSync(join(serviceRoot, name), `${JSON.stringify(value)}\n`, { flag: 'wx' }) } catch { /* preserve the original failure */ }
+  }
+  lifecycle('lifecycle-start.json', { schemaVersion: 'gaia2-hook-lifecycle-v1', phase: 'start', executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, startedAt: new Date().toISOString() })
   const token = randomBytes(32).toString('hex'), readyPath = join(serviceRoot, 'ready.json'), specPath = join(serviceRoot, 'spec.json')
   const options = { projectDir: root, workspaceDir: workspace, plugins: capabilities.plugins.map(({ id, snapshotRoot, files }) => ({ id, snapshotRoot, files })), executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, attemptIndex: task.attemptIndex ?? 0, runNumber: task.runNumber,
     // The A2A listener is a private, loopback-only transport.  It is present
@@ -89,9 +96,11 @@ export async function startRuntimeHookService({ root, manifest, task, session, s
         && ready.a2a.host === '127.0.0.1' && Number.isInteger(ready.a2a.port) && ready.a2a.port > 0
         && /^[a-f0-9]{64}$/.test(ready.a2a.channelId) && /^[a-f0-9]{64}$/.test(ready.a2a.bindingHash)))
     if (!valid) throw new Error('unsafe hook host ready receipt')
+    lifecycle('lifecycle-ready.json', { schemaVersion: 'gaia2-hook-lifecycle-v1', phase: 'ready', executionId: task.executionId, sessionId: session.sessionId, processId: ready.processId, endpoint: ready.endpoint, readySha256: createHash('sha256').update(JSON.stringify(ready)).digest('hex'), readyAt: new Date().toISOString() })
   } catch {
     controller.abort()
     const cleanup = await processPromise
+    lifecycle('lifecycle-failure.json', { schemaVersion: 'gaia2-hook-lifecycle-v1', phase: 'startup_failure', executionId: task.executionId, sessionId: session.sessionId, code: 'hook_host_startup_failed', childExited: cleanup?.childExited === true, childClosed: cleanup?.childClosed === true, interrupted: cleanup?.interrupted === true, manualInspectionRequired: cleanup?.manualInspectionRequired === true, terminationErrors: Array.isArray(cleanup?.terminationErrors) ? cleanup.terminationErrors.length : null, failedAt: new Date().toISOString() })
     signal?.removeEventListener('abort', abort)
     if (!cleanup?.childExited || !cleanup?.childClosed || cleanup.manualInspectionRequired || cleanup.terminationErrors?.length) throw new Error('real plugin host startup failed; supervised cleanup unresolved; manual inspection required')
     throw new Error('real plugin host startup failed; supervised cleanup completed')
@@ -110,6 +119,7 @@ export async function startRuntimeHookService({ root, manifest, task, session, s
       const result = await Promise.race([processPromise, sleep(10000, null, { ref: false }).then(() => null)])
       if (!result) controller.abort()
       const final = result ?? await processPromise
+      lifecycle('lifecycle-closed.json', { schemaVersion: 'gaia2-hook-lifecycle-v1', phase: 'closed', executionId: task.executionId, sessionId: session.sessionId, exitCode: Number.isInteger(final?.exitCode) ? final.exitCode : null, signal: typeof final?.signal === 'string' ? final.signal : null, timedOut: final?.timedOut === true, interrupted: final?.interrupted === true, childExited: final?.childExited === true, childClosed: final?.childClosed === true, manualInspectionRequired: final?.manualInspectionRequired === true, terminationErrors: Array.isArray(final?.terminationErrors) ? final.terminationErrors.length : null, closedAt: new Date().toISOString() })
       signal?.removeEventListener('abort', abort)
       return final
     },

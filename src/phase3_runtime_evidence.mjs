@@ -3,6 +3,8 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSy
 import { dirname, isAbsolute, join, posix, relative, resolve, win32 } from 'node:path'
 import { digest, fileDigest, readJson, within } from './phase0_run.mjs'
 import { assertInitialHasNoCorrection, verifyCorrectionReplayAuthority } from './phase4_replay_authority.mjs'
+import { verifyOfficialA2ARuntimeEvidence } from './phase5_a2a_evidence.mjs'
+import { informationNoiseTransitionErrors } from './phase5_information_noise_evidence.mjs'
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const hash = value => createHash('sha256').update(value).digest('hex')
@@ -70,6 +72,17 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
   check(processHealthy(hostProcess), 'unhealthy_host_process')
   check(initialization.schemaVersion === 'capybara-runtime-plugin-host-v1' && initialization.executionId === task.executionId && initialization.sessionId === session.sessionId, 'initialization_identity')
   check(ready.schemaVersion === 'gaia2-hook-host-ready-v1' && /^http:\/\/127\.0\.0\.1:\d+\/invoke$/.test(ready.endpoint) && Number.isInteger(ready.processId) && ready.processId === hostProcess.pid && ready.initializationHash === jsonHash(ready.initialization), 'ready_receipt_invalid')
+  if (attestation.lifecyclePaths !== undefined) {
+    check(Array.isArray(attestation.lifecyclePaths) && attestation.lifecyclePaths.length === 3, 'lifecycle_inventory_invalid')
+    const allowed = new Set(attestation.lifecyclePaths), expected = ['lifecycle-start.json', 'lifecycle-ready.json', 'lifecycle-closed.json']
+    check(expected.every(name => [...allowed].some(path => path.endsWith(`/${name}`))), 'lifecycle_inventory_incomplete')
+    for (const path of attestation.lifecyclePaths) check(pathSyntax(path) && path.startsWith(`${portable(session.outputDir)}/hook-host/`), 'lifecycle_path_invalid')
+    const lifecycle = Object.fromEntries(attestation.lifecyclePaths.map(path => [path.slice(path.lastIndexOf('/') + 1), json(path)]))
+    check(lifecycle['lifecycle-start.json']?.schemaVersion === 'gaia2-hook-lifecycle-v1' && lifecycle['lifecycle-start.json'].phase === 'start', 'lifecycle_start_invalid')
+    check(lifecycle['lifecycle-ready.json']?.schemaVersion === 'gaia2-hook-lifecycle-v1' && lifecycle['lifecycle-ready.json'].phase === 'ready' && lifecycle['lifecycle-ready.json'].processId === ready.processId && lifecycle['lifecycle-ready.json'].readySha256 === hash(JSON.stringify(ready)), 'lifecycle_ready_invalid')
+    check(lifecycle['lifecycle-closed.json']?.schemaVersion === 'gaia2-hook-lifecycle-v1' && lifecycle['lifecycle-closed.json'].phase === 'closed' && lifecycle['lifecycle-closed.json'].childExited === hostProcess.childExited && lifecycle['lifecycle-closed.json'].childClosed === hostProcess.childClosed, 'lifecycle_closed_invalid')
+    for (const receipt of Object.values(lifecycle)) check(receipt.executionId === task.executionId && receipt.sessionId === session.sessionId, 'lifecycle_identity')
+  }
   if (attestation.officialEntryPath !== undefined) check(ready.entry?.schemaVersion === 'gaia2-official-entry-handshake-v1' && ready.entry.relativePath === attestation.officialEntryPath && ready.entry.sha256 === attestation.officialEntrySha256, 'ready_entry_binding')
   const { evidencePath, ...readyInitialization } = ready.initialization ?? {}
   check(typeof evidencePath === 'string' && portable(evidencePath).endsWith(`/${attestation.initializationPath}`) && digest(readyInitialization) === digest(initialization), 'ready_initialization_mismatch')
@@ -178,6 +191,9 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
     const rank = { allow: 0, read_back: 1, block: 2 }
     for (const hook of receipt.hookReceipts) if (hook.decision) check(hook.matched && object(hook.decision) && typeof hook.decision.reason === 'string' && Object.hasOwn(rank, hook.decision.action) && rank[receipt.decision.action] >= rank[hook.decision.action], 'decision_weakened')
     for (const [key, definition] of definitions) if (digest(receipt.variables[key]) !== digest(previousValues[key])) check(receipt.hookReceipts.some(hook => hook.matched && hook.pluginId === definition.pluginId && hook.patchCount > 0), 'unowned_variable_change')
+    const noiseErrors = informationNoiseTransitionErrors({ previousValues, input: receipt.input,
+      variables: receipt.variables, artifacts: receipt.artifacts, decision: receipt.decision })
+    check(noiseErrors.length === 0, noiseErrors[0] ?? 'information_noise_semantics')
     check(event.checkpoint === checkpoint && event.contextHash === receipt.contextHash && event.variablesHash === receipt.variablesHash && event.hookRevision === receipt.revision && event.decision === receipt.decision.action && event.hookReceiptCount === receipt.hookReceipts.length && event.hookReceiptsHash === pythonEventHash(receipt.hookReceipts) && event.reasonHash === pythonEventHash(receipt.decision.reason), 'python_hook_binding')
     bound.push({ receipt, index }); priorHash = receipt.variablesHash; previousValues = receipt.variables; revision = receipt.revision
   }
@@ -209,6 +225,13 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
   }
   check(toolEvents.length > 0 && bound.filter(item => item.receipt.input.checkpoint === 'before_tool').length === toolEvents.length, 'missing_tool_gate_evidence')
   check(bound.at(-1).receipt.input.checkpoint === 'attempt_end' && bound.at(-1).receipt.input.loop?.terminal === true && events.some(event => event.type === 'attempt_execution_ended'), 'missing_attempt_end')
+  if (events.some(event => event.type === 'a2a_child_runtime_snapshot')) {
+    // The independent child verifier consumes only sealed copies through
+    // this reader. Absolute native/source identities never become FS reads.
+    verifyOfficialA2ARuntimeEvidence({ events,
+      identity: { executionId: task.executionId, sessionId: session.sessionId },
+      readEvidence: path => bytes(path) })
+  }
   check(used.size === files.size, 'unconsumed_evidence')
   const summary = { invocationCount: invocations.length, modelRequestCount: models.length, toolGateCount: toolEvents.length, typedVariableCount: definitions.size, persistentHarnessCount: harnesses.length, actorInputHashReconstructed: false, trainingHooksExecuted: false }
   if (correctionAuthority) Object.assign(summary, { correctionOrdinal: 1, readonlyInitializationVerified: true, strategyConsumedModelRequests: models.length, consumedStrategyHash: correctionAuthority.context.strategyHash })
@@ -250,10 +273,25 @@ export function collectRuntimeEvidence({ root, manifest, task, session, events, 
   const officialEntryPath = portable(join(session.outputDir, 'official-entry/run-manifest.json'))
   const hasOfficialEntry = existsSync(resolve(root, officialEntryPath))
   if (hasOfficialEntry) localFile(root, officialEntryPath)
-  const runtimeEvidence = [...receipts, hostProcessPath, readyPath, ...(hasOfficialEntry ? [officialEntryPath] : []), portable(relative(root, capturedCapabilities)), ...sourceFiles.map(file => file.path)].map(path => ref(localFile(root, path)))
+  const lifecyclePaths = ['lifecycle-start.json', 'lifecycle-ready.json', 'lifecycle-closed.json'].map(name => `${hostDir}/${name}`).filter(path => existsSync(resolve(root, path)))
+  check(lifecyclePaths.length === 0 || lifecyclePaths.length === 3, 'lifecycle_inventory_incomplete')
+  const runtimeEvidence = [...receipts, hostProcessPath, readyPath, ...lifecyclePaths, ...(hasOfficialEntry ? [officialEntryPath] : []), portable(relative(root, capturedCapabilities)), ...sourceFiles.map(file => file.path)].map(path => ref(localFile(root, path)))
+  const captured = new Map(runtimeEvidence.map(item => [item.path, item.sha256]))
+  for (const event of events.filter(item => item.type === 'a2a_child_runtime_snapshot')) {
+    check(Array.isArray(event.evidenceRefs) && event.evidenceRefs.length > 0, 'a2a_evidence_inventory_missing')
+    for (const childRef of event.evidenceRefs) {
+      check(object(childRef) && Object.keys(childRef).sort().join(',') === 'path,sha256,sourcePath'
+        && pathSyntax(childRef.path) && HASH.test(childRef.sha256 ?? '') && typeof childRef.sourcePath === 'string'
+        && childRef.path.startsWith(`${portable(session.workspaceDir)}/`), 'a2a_evidence_reference_invalid')
+      const actual = ref(localFile(root, childRef.path))
+      check(actual.sha256 === childRef.sha256, 'a2a_evidence_sha_mismatch')
+      if (captured.has(actual.path)) check(captured.get(actual.path) === actual.sha256, 'a2a_evidence_identity_changed')
+      else { captured.set(actual.path, actual.sha256); runtimeEvidence.push(actual) }
+    }
+  }
   const invocations = receipts.slice(1).map(path => readJson(resolve(root, path)))
   const entryRef = hasOfficialEntry ? runtimeEvidence.find(item => item.path === officialEntryPath) : null
-  const runtimeAttestation = { schemaVersion: 'gaia2-runtime-attestation-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, runNumber: task.runNumber, phase: task.phase, config: task.config, capabilitiesSha256: capabilityRef.sha256, capabilitiesPath: portable(relative(root, capturedCapabilities)), initializationPath: initial[0], invocationPaths: receipts.slice(1), hostProcessPath, readyPath, sourceFiles, ...(entryRef ? { officialEntryPath, officialEntrySha256: entryRef.sha256 } : {}), evidenceHash: digest(runtimeEvidence), eventsHash: digest(events), summary: { invocationCount: invocations.length, modelRequestCount: events.filter(event => event.type === 'model_request').length, toolGateCount: events.filter(event => ['tool_call_started', 'tool_call_blocked'].includes(event.type)).length, typedVariableCount: Object.keys(invocations[0]?.variables ?? {}).length, persistentHarnessCount: readJson(resolve(root, initial[0])).harnesses.length, actorInputHashReconstructed: false, trainingHooksExecuted: false } }
+  const runtimeAttestation = { schemaVersion: 'gaia2-runtime-attestation-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, runNumber: task.runNumber, phase: task.phase, config: task.config, capabilitiesSha256: capabilityRef.sha256, capabilitiesPath: portable(relative(root, capturedCapabilities)), initializationPath: initial[0], invocationPaths: receipts.slice(1), hostProcessPath, readyPath, ...(lifecyclePaths.length ? { lifecyclePaths } : {}), sourceFiles, ...(entryRef ? { officialEntryPath, officialEntrySha256: entryRef.sha256 } : {}), evidenceHash: digest(runtimeEvidence), eventsHash: digest(events), summary: { invocationCount: invocations.length, modelRequestCount: events.filter(event => event.type === 'model_request').length, toolGateCount: events.filter(event => ['tool_call_started', 'tool_call_blocked'].includes(event.type)).length, typedVariableCount: Object.keys(invocations[0]?.variables ?? {}).length, persistentHarnessCount: readJson(resolve(root, initial[0])).harnesses.length, actorInputHashReconstructed: false, trainingHooksExecuted: false } }
   if ((task.correctionOrdinal ?? 0) === 1) {
     const correctionAuthorityPath = portable(join(session.workspaceDir, 'correction-authority/index.json'))
     const authority = readJson(localFile(root, correctionAuthorityPath))

@@ -96,13 +96,17 @@ function gather(root, manifest) {
   const records = [], missing = []
   for (let i = 0; i < manifest.tasks.length; i++) {
     const task = manifest.tasks[i], record = state.tasks[i]
-    check(['pending', 'running', 'completed', 'retry_pending'].includes(record.status) && Array.isArray(record.sessions), 'invalid task state')
+    check(['pending', 'running', 'completed', 'retry_pending', 'terminal_failure'].includes(record.status) && Array.isArray(record.sessions), 'invalid task state')
     for (let ordinal = 0; ordinal < record.sessions.length; ordinal++) {
       const session = record.sessions[ordinal]
       check(/^\d{4}-[0-9a-f-]{12}$/.test(session.sessionId) && session.sessionOrdinal === ordinal + 1 && session.parentSessionId === (record.sessions[ordinal - 1]?.sessionId ?? null), 'session lineage differs')
       for (const key of ['outputDir', 'fixtureDir', 'workspaceDir']) check(portable(session[key]) === portable(join(task[key], 'sessions', session.sessionId)), 'session paths differ from frozen task')
     }
-    if (record.status !== 'completed') { missing.push({ executionId: task.executionId, status: record.status, category: record.failure?.category ?? 'not_evaluated' }); continue }
+    if (record.status !== 'completed') {
+      check(record.status !== 'terminal_failure' || record.failure?.retryable === false && record.failure?.category !== 'business_failure', 'terminal failure is not a technical failure')
+      missing.push({ executionId: task.executionId, status: record.status, category: record.failure?.category ?? 'not_evaluated', retryable: record.failure?.retryable === true })
+      continue
+    }
     const session = record.sessions.at(-1)
     check(session && session.sessionOrdinal === record.sessions.length && /^\d{4}-[0-9a-f-]{12}$/.test(session.sessionId), 'completed task session invalid')
     for (const key of ['outputDir', 'fixtureDir', 'workspaceDir']) check(portable(session[key]) === portable(join(task[key], 'sessions', session.sessionId)), 'session path differs from plan')

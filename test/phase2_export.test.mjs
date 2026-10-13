@@ -77,6 +77,19 @@ test('an unexecuted plan exports problems without fabricating records, Trace, mo
   await assert.rejects(exportSubmissionPackage({ root, manifestPath, outputDir, allowSynthetic: true }), /already exists/)
   assert.deepEqual(readFileSync(join(outputDir, 'export-manifest.json')), before)
 })
+test('terminal technical failures remain missing during export and cannot become business rows', async () => {
+  const { root, manifest, manifestPath } = fixture(), outputDir = join(root, 'terminal-submission')
+  const runtime = { processTimeoutMs: 480000000, scenarioTimeoutSeconds: 480000, modelRequestTimeoutSeconds: 60, concurrency: 1, minimal: false }
+  mkdirSync(join(root, 'runs/fixture'), { recursive: true })
+  writeFileSync(join(root, 'runs/fixture/runtime-settings.json'), JSON.stringify(runtime))
+  writeFileSync(join(root, manifest.stateFile), JSON.stringify({ schemaVersion: 'gaia2-run-state-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, runtimeHash: digest(runtime), tasks: manifest.tasks.map((task, index) => ({ executionId: task.executionId, status: index === 0 ? 'terminal_failure' : 'pending', sessions: [], resultPath: null, resultSha256: null, failure: index === 0 ? { category: 'configuration_error', retryable: false } : null })) }))
+  const report = await exportSubmissionPackage({ root, manifestPath, outputDir, allowSynthetic: true })
+  assert.equal(report.exportedRows, 0)
+  assert.equal(report.missingExecutions, 3)
+  const problems = readJson(join(outputDir, 'problems.json'))
+  assert.equal(problems.incompleteExecutions.find(item => item.executionId === 'controlled-1').status, 'terminal_failure')
+  assert.equal(problems.incompleteExecutions.find(item => item.executionId === 'controlled-1').retryable, false)
+})
 test('export refuses existing symlink/junction ancestors before creating any package', async () => {
   const { root, manifestPath } = fixture(), real = join(root, 'real'), link = join(root, 'linked')
   mkdirSync(real); symlinkSync(real, link, process.platform === 'win32' ? 'junction' : 'dir')

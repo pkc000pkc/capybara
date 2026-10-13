@@ -210,6 +210,35 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(outgoing, envelope(payload={"count": 1}))
         self.assertFalse(peer.closed)
 
+    def test_trusted_router_services_call_without_bypassing_peer_validation(self):
+        peer = self.peer(frames(envelope("response", payload={"ok": True, "value": [7]})))
+        routed = []
+        def router():
+            routed.append(True)
+            peer.serve_once()
+        peer.install_router(router)
+        self.assertEqual(peer.call("native", None, request_id=REQUEST), [7])
+        self.assertEqual(routed, [True])
+        self.assertFalse(peer.closed)
+
+    def test_router_cannot_be_replaced_or_installed_on_busy_or_closed_peer(self):
+        peer = self.peer()
+        with self.assertRaisesRegex(A2AWireError, "A2A_POOL_ROUTER_INVALID"):
+            peer.install_router(None)
+        peer.install_router(lambda: None)
+        with self.assertRaisesRegex(A2AWireError, "A2A_POOL_ROUTER_INVALID"):
+            peer.install_router(lambda: None)
+        for attribute, value in (("_pending", {REQUEST: "native"}),
+                                 ("_responses", {REQUEST: None}), ("_active_handlers", 1)):
+            peer = self.peer()
+            setattr(peer, attribute, value)
+            with self.subTest(attribute=attribute), self.assertRaisesRegex(A2AWireError, "A2A_POOL_ROUTER_INVALID"):
+                peer.install_router(lambda: None)
+        peer = self.peer()
+        peer.close()
+        with self.assertRaisesRegex(A2AWireError, "A2A_PIPE_CLOSED"):
+            peer.install_router(lambda: None)
+
     def test_inbound_request_served_while_waiting(self):
         seen = []
         peer = self.peer(frames(envelope(request_id=OTHER, payload=3),

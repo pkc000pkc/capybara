@@ -236,6 +236,8 @@ class ScopedRetryModelEngine(LLMEngine):
             path, sha = _source(value)
             self.__sources[path] = sha
         self.__guard_identity = None
+        self.__safe_point = None
+        self.__safe_point_identity = None
         if before_attempt is not None:
             self.__freeze_guard(before_attempt)
         initial = self.__factory_value()
@@ -319,6 +321,30 @@ class ScopedRetryModelEngine(LLMEngine):
         self.__sources[path] = sha
         self.__guard_identity, self.__guard = identity, guard
 
+    def __freeze_safe_point(self, callback: Callable[[str], None]) -> None:
+        if not callable(callback):
+            _fail("SCOPED_MODEL_SAFE_POINT_INVALID")
+        identity = _identity(callback)
+        if self.__safe_point_identity is not None and self.__safe_point_identity != identity:
+            _fail("SCOPED_MODEL_SAFE_POINT_CHANGED")
+        path, sha = _source(callback)
+        if path in self.__sources and self.__sources[path] != sha:
+            _fail("SCOPED_MODEL_SOURCE_CHANGED")
+        self.__sources[path] = sha
+        self.__safe_point_identity, self.__safe_point = identity, callback
+
+    def __observe_safe_point(self, stage: str) -> None:
+        if self.__safe_point is None:
+            return
+        self.__check()
+        try:
+            returned = self.__safe_point(stage)
+        except BaseException:
+            _fail("SCOPED_MODEL_SAFE_POINT_DENIED")
+        if returned is not None:
+            _fail("SCOPED_MODEL_SAFE_POINT_INVALID")
+        self.__check()
+
     def __check(self) -> dict:
         try:
             if self.__ledger_failed:
@@ -338,6 +364,8 @@ class ScopedRetryModelEngine(LLMEngine):
                 _fail("SCOPED_MODEL_SOURCE_CHANGED")
             if self.__guard is not None and _identity(self.__guard) != self.__guard_identity:
                 _fail("SCOPED_MODEL_GUARD_CHANGED")
+            if self.__safe_point is not None and _identity(self.__safe_point) != self.__safe_point_identity:
+                _fail("SCOPED_MODEL_SAFE_POINT_CHANGED")
             _pristine(self.__sdk)
             for path, expected in self.__sources.items():
                 actual_path, actual = _source_path(path)
@@ -389,7 +417,8 @@ class ScopedRetryModelEngine(LLMEngine):
 
     def begin_request(self, *, permit_id: str, request_id: str, actual_input_hash: str,
                       before_attempt: Callable[[dict], Any] | None = None,
-                      deadline: ScopedOSDeadline | None = None) -> None:
+                      deadline: ScopedOSDeadline | None = None,
+                      safe_point: Callable[[str], None] | None = None) -> None:
         with self.__lock:
             self.__check()
             if self.__pending is not None or self.__busy:
@@ -418,6 +447,8 @@ class ScopedRetryModelEngine(LLMEngine):
             if guard is None:
                 _fail("SCOPED_MODEL_GUARD_REQUIRED")
             self.__freeze_guard(guard)
+            if safe_point is not None:
+                self.__freeze_safe_point(safe_point)
             self.__pending = {"request": {"permitId": permit_id, "requestId": request_id,
                 "actualInputHash": actual_input_hash}, "deadline": deadline}
             self.__seen_permits.add(permit_id)
@@ -514,6 +545,7 @@ class ScopedRetryModelEngine(LLMEngine):
                 sdk_kwargs = self.__check()
                 if self.__sdk_used >= self.__sdk_limit:
                     _fail("SCOPED_MODEL_SDK_BUDGET_EXHAUSTED")
+                self.__observe_safe_point("sdk_attempt_before")
                 self.__deadline_check(deadline, "sdk_attempt_before")
                 guard_payload = {**request, "attempt": attempt}
                 try:
@@ -542,6 +574,7 @@ class ScopedRetryModelEngine(LLMEngine):
                 except Exception as error:
                     attempt_elapsed = self.__timing_accumulate(attempt_elapsed,
                         self.__timing_delta(attempt_start))
+                    self.__observe_safe_point("sdk_attempt_after")
                     self.__deadline_check(deadline, "sdk_attempt_after")
                     try:
                         classification = classify_model_error(error)
@@ -551,10 +584,12 @@ class ScopedRetryModelEngine(LLMEngine):
                         classification = {"category": "runtime_error", "retryable": False, "httpStatus": None}
                         now, hint, hint_source = 0.0, None, None
                 else:
+                    observed_success_elapsed = self.__timing_delta(attempt_start)
+                    attempt_elapsed = self.__timing_accumulate(attempt_elapsed, observed_success_elapsed)
+                    self.__observe_safe_point("sdk_attempt_after")
                     self.__deadline_check(deadline, "sdk_attempt_after")
                     self.__check()
-                    success_elapsed = self.__timing_delta(attempt_start)
-                    attempt_elapsed = self.__timing_accumulate(attempt_elapsed, success_elapsed)
+                    success_elapsed = observed_success_elapsed
                     text = _response_text(result)
                     usage_result = _safe_usage(result)
                     usage = usage_result.get("usage")
@@ -599,6 +634,7 @@ class ScopedRetryModelEngine(LLMEngine):
                     cumulativeWaitSecondsAfterRetry=waited + delay)
                 remaining = delay
                 while remaining > 0:
+                    self.__observe_safe_point("cooldown_before")
                     remaining_deadline = self.__deadline_check(deadline, "cooldown_before")
                     chunk = min(remaining, 30.0)
                     if remaining_deadline is not None:
@@ -612,6 +648,7 @@ class ScopedRetryModelEngine(LLMEngine):
                     cooldown_elapsed = self.__timing_accumulate(cooldown_elapsed,
                         self.__timing_delta(cooldown_start))
                     remaining = max(0.0, remaining - chunk)
+                    self.__observe_safe_point("cooldown_after")
                     self.__deadline_check(deadline, "cooldown_after")
                     self.__check()
                     if remaining > 0:

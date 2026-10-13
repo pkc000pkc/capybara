@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+from decimal import Decimal
+from fractions import Fraction
 import hashlib
 import inspect
 import json
@@ -24,7 +26,9 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import threading
+import types
 import typing
 import uuid
 import weakref
@@ -36,6 +40,9 @@ import gaia2_argument_preflight as preflight
 from are.simulation.agents.default_agent.app_agent import AppAgent
 from are.simulation.agents.default_agent.default_tools import FinalAnswerTool
 from are.simulation.apps.app import App
+from are.simulation.apps import shopping as official_shopping
+from are.simulation import tool_utils as official_tool_utils
+from are.simulation import tools as official_tools
 from are.simulation.environment import Environment
 from are.simulation.time_manager import TimeManager
 from are.simulation.tool_utils import AppTool, AppToolAdapter, OperationType
@@ -68,6 +75,120 @@ _OWNERS: dict[int, weakref.ReferenceType] = {}
 _OWNER_LOCK = threading.Lock()
 _MAX_CHILDREN = 100000
 _MAX_TICKETS = 100000
+# This exception is a reviewed ARE 1.2.0 source policy, not a hash of whatever
+# happens to be installed. Every other undeclared operation remains excluded.
+_SOURCE_RETURN_PIN_ID = "are-1.2-shopping-discount-codes-read-v1"
+_SOURCE_RETURN_FILES = {
+    "simulation/apps/shopping.py": ("7436b99640628ef737418396287fe8b7fb4912bd81bfee72e251a748aaeae205", 25517),
+    "simulation/tool_utils.py": ("dfbbe5bbfebd79b9aad214843e652600a4b7604d21a73b28d82bf9686d575f7f", 20251),
+    "simulation/tools.py": ("ba32076c4ab3089ea64c0a6e83813af8e9f54dbcb11d2bf4aa96a4a6cb1cad7c", 6774),
+}
+
+
+def _code_shape(code: types.CodeType) -> tuple:
+    def constant(value: Any) -> Any:
+        if type(value) is types.CodeType:
+            return ("code", _code_shape(value))
+        if type(value) is tuple:
+            return ("tuple", tuple(constant(item) for item in value))
+        if value is None or type(value) in (bool, int, float, str, bytes):
+            return (type(value), value)
+        _fail("NATIVE_SOURCE_RETURN_CODE_INVALID")
+    return (code.co_name, code.co_qualname, code.co_argcount, code.co_posonlyargcount,
+            code.co_kwonlyargcount, code.co_nlocals, code.co_stacksize, code.co_flags,
+            code.co_code, tuple(constant(value) for value in code.co_consts),
+            code.co_names, code.co_varnames, code.co_freevars, code.co_cellvars,
+            code.co_exceptiontable)
+
+
+def _source_return_pin(app: App, tool: AppTool, *, has_are_clock: bool) -> str | None:
+    """Match fixed file bytes AND the loaded implementation/metadata.
+
+    Compilation is comparison only; it never executes the pinned source or
+    substitutes a different function for ARE's actual AppTool call chain.
+    """
+    if (not has_are_clock or sys.version_info[:2] != (3, 12)
+            or type(app) not in (official_shopping.ShoppingApp, official_shopping.Shopping)
+            or type(tool) is not AppTool or tool.class_instance is not app
+            or tool.class_name != type(app).__name__ or tool.app_name != app.name
+            or tool.func_name != "get_all_discount_codes" or tool.write_operation is not None
+            or tool.name != app.name + "__get_all_discount_codes"
+            or tool._public_name != tool.name or tool.args != []
+            or tool.return_type != "dict[str, list[str]]"
+            or tool.return_description != "Dictionary mapping discount codes to list of item IDs they apply to"
+            or tool.function_description != "Returns all the discount codes that are available with the items they apply to."
+            or tool._public_description != tool.function_description):
+        return None
+    function = tool.function
+    if (not inspect.isfunction(function)
+            or function is not official_shopping.ShoppingApp.get_all_discount_codes
+            or getattr(type(app), "get_all_discount_codes") is not function
+            or getattr(function, "__wrapped__", None) is not None
+            or getattr(function, "llm_formatter", None) is not None
+            or getattr(function, "__event_registered__", False)
+            or getattr(function, "_is_app_tool", None) is not True
+            or getattr(function, "_is_data_tool", None) is not True
+            or getattr(function, "_is_env_tool", False)
+            or getattr(function, "_is_user_tool", False)
+            or function.__defaults__ is not None or function.__kwdefaults__ is not None
+            or function.__closure__ is not None):
+        return None
+    signature = inspect.signature(function)
+    parameters = tuple(signature.parameters.values())
+    if (len(parameters) != 1 or parameters[0].name != "self"
+            or parameters[0].kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
+            or parameters[0].default is not inspect.Parameter.empty
+            or parameters[0].annotation is not inspect.Parameter.empty
+            or signature.return_annotation != dict[str, list[str]]):
+        return None
+    root = Path(__file__).resolve().parents[1] / ".official-python" / "are"
+    compiled = {}
+    try:
+        for relative, (expected_hash, expected_bytes) in _SOURCE_RETURN_FILES.items():
+            path = root / relative
+            _no_links(path)
+            data = path.read_bytes()
+            if len(data) != expected_bytes or hashlib.sha256(data).hexdigest() != expected_hash:
+                return None
+            compiled[relative] = compile(data, str(path), "exec", dont_inherit=True, optimize=0)
+        checks = (
+            (function, official_shopping, "simulation/apps/shopping.py", "ShoppingApp.get_all_discount_codes"),
+            (AppTool.__call__, official_tool_utils, "simulation/tool_utils.py", "AppTool.__call__"),
+            (AppToolAdapter.forward, official_tool_utils, "simulation/tool_utils.py", "AppToolAdapter.forward"),
+            (Tool.__call__, official_tools, "simulation/tools.py", "Tool.__call__"),
+            (official_tools.handle_agent_inputs, official_tools, "simulation/tools.py", "handle_agent_inputs"),
+            (official_tools.handle_agent_outputs, official_tools, "simulation/tools.py", "handle_agent_outputs"),
+        )
+        def find(code: types.CodeType, qualname: str) -> types.CodeType | None:
+            if code.co_qualname == qualname:
+                return code
+            for child in code.co_consts:
+                if type(child) is types.CodeType:
+                    result = find(child, qualname)
+                    if result is not None:
+                        return result
+            return None
+        for actual, module, relative, qualname in checks:
+            path = root / relative
+            if (not inspect.isfunction(actual) or actual.__globals__ is not vars(module)
+                    or Path(os.path.abspath(inspect.getsourcefile(actual))) != path
+                    or Path(os.path.abspath(module.__file__)) != path):
+                return None
+            expected = find(compiled[relative], qualname)
+            if expected is None or _code_shape(actual.__code__) != _code_shape(expected):
+                return None
+    except (OSError, ValueError, TypeError, NativeBindingError):
+        return None
+    return _SOURCE_RETURN_PIN_ID
+
+
+def _source_return_state(app: App) -> None:
+    # The reviewed implementation iterates only these containers/keys. Reject
+    # overloaded containers whose iteration could execute an unrelated effect.
+    codes = app.discount_codes
+    if (type(codes) is not dict or any(type(key) is not str or type(value) is not dict
+            or any(type(code) is not str for code in value) for key, value in codes.items())):
+        _fail("NATIVE_SOURCE_RETURN_STATE_INVALID")
 
 
 def _fail(code: str) -> typing.NoReturn:
@@ -125,6 +246,162 @@ def _no_links(path: Path) -> None:
             continue
 
 
+def _registry_json_number(value: int | float) -> str:
+    """ECMAScript base-10 shortest round-trip, closest/even on a tie.
+
+    The private wire has already rejected nonfinite/unsafe integral values.
+    Fraction arithmetic chooses decimal digits without intermediate float
+    rounding. Python repr is used only to bound the decimal exponent search,
+    never as the result's digits or JSON spelling. Binary64 needs <=17 digits.
+    See ECMA-262 Number::toString, radix 10, steps 5-12 and Note 2.
+    """
+    if value == 0:
+        return "0"
+    if type(value) is int or value.is_integer():
+        return str(int(value))
+    magnitude = abs(value)
+    exact = Fraction.from_float(magnitude)
+    exponent = Decimal(repr(magnitude)).adjusted()
+    for count in range(1, 18):
+        candidates = []
+        for power in range(exponent - count, exponent - count + 3):
+            scale = Fraction(10 ** power) if power >= 0 else Fraction(1, 10 ** -power)
+            scaled = exact / scale
+            floor = scaled.numerator // scaled.denominator
+            for significand in (floor, floor + 1):
+                if (significand <= 0 or len(str(significand)) != count
+                        or count > 1 and significand % 10 == 0):
+                    continue
+                if float(f"{significand}e{power}") == magnitude:
+                    candidates.append((abs(significand * scale - exact), significand % 2, significand, power))
+        if not candidates:
+            continue
+        _, _, significand, power = min(candidates)
+        digits = str(significand)
+        position = len(digits) + power
+        if -5 <= position <= 21:
+            if position >= len(digits):
+                result = digits + "0" * (position - len(digits))
+            elif position > 0:
+                result = digits[:position] + "." + digits[position:]
+            else:
+                result = "0." + "0" * -position + digits
+        else:
+            result = digits[0] + ("." + digits[1:] if len(digits) > 1 else "")
+            result += "e" + ("+" if position - 1 >= 0 else "-") + str(abs(position - 1))
+        return ("-" if value < 0 else "") + result
+    _fail("NATIVE_REGISTRY_NUMBER_INVALID")
+
+
+def _registry_canonical_json(value: Any) -> str:
+    """Historical registry JSON, distinct from tagged private-wire bytes.
+
+    Exactly the backend's recursive canonical(value): Object.keys().sort()
+    uses UTF-16 order (including numeric-looking keys); leaves use
+    JSON.stringify. Normalization also preserves the wire's existing bounds,
+    rejection of unsafe values, and distinct bool/number identities.
+    """
+    value = _clone(value)
+    def visit(item):
+        if item is None:
+            return "null"
+        if type(item) is bool:
+            return "true" if item else "false"
+        if type(item) is str:
+            return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        if type(item) in (int, float):
+            return _registry_json_number(item)
+        if type(item) is list:
+            return "[" + ",".join(visit(child) for child in item) + "]"
+        if type(item) is dict:
+            keys = sorted(item, key=lambda key: key.encode("utf-16-be"))
+            return "{" + ",".join(visit(key) + ":" + visit(item[key]) for key in keys) + "}"
+        _fail("NATIVE_REGISTRY_VALUE_INVALID")
+    return visit(value)
+
+
+def _registry_action_hash(value: Any) -> str:
+    return hashlib.sha256(_registry_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _sealed_native_evidence(ref: Any) -> dict:
+    """Read a sealed private-owner/Host receipt, never an Actor value."""
+    _exact(ref, {"path", "sha256"})
+    if (type(ref["path"]) is not str or not Path(ref["path"]).is_absolute()
+            or type(ref["sha256"]) is not str or not _HEX.fullmatch(ref["sha256"])):
+        _fail("NATIVE_DISCARD_EVIDENCE_INVALID")
+    try:
+        target = Path(ref["path"])
+        _no_links(target)
+        if (not target.is_file()
+                or os.path.normcase(str(target.resolve())) != os.path.normcase(str(target))):
+            _fail("NATIVE_DISCARD_EVIDENCE_INVALID")
+        data = target.read_bytes()
+        if len(data) > 4 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != ref["sha256"]:
+            _fail("NATIVE_DISCARD_EVIDENCE_INVALID")
+        def pairs(items):
+            result = {}
+            for key, value in items:
+                if key in result:
+                    _fail("NATIVE_DISCARD_EVIDENCE_INVALID")
+                result[key] = value
+            return result
+        value = json.loads(data.decode("utf-8", errors="strict"), object_pairs_hook=pairs,
+                           parse_constant=lambda _: _fail("NATIVE_DISCARD_EVIDENCE_INVALID"))
+        if type(value) is not dict:
+            _fail("NATIVE_DISCARD_EVIDENCE_INVALID")
+        return _clone(value)
+    except (OSError, ValueError, UnicodeError):
+        _fail("NATIVE_DISCARD_EVIDENCE_INVALID")
+
+
+def _validate_native_blocked_before(*, scope: dict, action: dict, gate_decision: str,
+                                    before_hook_ref: dict, before_clock_ref: dict,
+                                    source_manifest_hash: str) -> dict:
+    """Exact pre-execution negative proof; not permission to execute a tool."""
+    if gate_decision not in ("block", "read_back"):
+        _fail("NATIVE_DISCARD_GATE_INVALID")
+    clock = _sealed_native_evidence(before_clock_ref)
+    common = {"sourceManifestHash": source_manifest_hash, "scopeHash": wire.value_hash(scope),
+        "dispatchId": action["dispatchId"], "toolId": action["toolId"],
+        "canonicalName": action["canonicalName"], "toolKind": action["toolKind"], "effect": action["effect"],
+        "rawArgumentsHash": clock.get("rawArgumentsHash"), "effectiveArgumentsHash": wire.value_hash(action["arguments"])}
+    if (set(clock) != {"schemaVersion", *common, "ticketId", "checkpoint", "clock", "clockAuthority",
+                       "revisionMeaning", "nativeReturnEvidenceRef"}
+            or clock.get("schemaVersion") != "gaia2-private-native-clock-receipt-v1"
+            or any(clock.get(key) != value for key, value in common.items())
+            or type(clock["ticketId"]) is not str or not _TICKET.fullmatch(clock["ticketId"])
+            or type(clock["rawArgumentsHash"]) is not str or not _HEX.fullmatch(clock["rawArgumentsHash"])
+            or clock["checkpoint"] != "before_tool" or clock["nativeReturnEvidenceRef"] is not None
+            or clock["clockAuthority"] != "ARE"
+            or clock["revisionMeaning"] != "owner_observation_sequence_not_are_revision"
+            or type(clock["clock"]) is not dict or set(clock["clock"]) != {"now", "revision"}
+            or not _finite(clock["clock"]["now"]) or clock["clock"]["now"] < 0
+            or type(clock["clock"]["revision"]) is not int or not 1 <= clock["clock"]["revision"] <= wire.MAX_SAFE_INTEGER):
+        _fail("NATIVE_DISCARD_CLOCK_INVALID")
+    before = _sealed_native_evidence(before_hook_ref)
+    projected = {"id": action["id"], "name": action["toolId"], "canonicalName": action["canonicalName"],
+        "arguments": action["arguments"], "effect": action["effect"], "mutationKey": action["mutationKey"],
+        "resourceKey": action["resourceKey"], "authoritativeRead": action["effect"] == "read"}
+    trusted = {"schemaVersion": "capybara-trusted-native-checkpoint-v1", "scopeHash": wire.value_hash(scope),
+        "actionHash": wire.value_hash(action), "checkpoint": "before_tool", "clockEvidenceRef": before_clock_ref,
+        "hookOutcome": None}
+    hooks = before.get("hookReceipts")
+    if (before.get("schemaVersion") != "capybara-runtime-plugin-invocation-v1"
+            or before.get("executionId") != scope["childExecutionId"] or before.get("sessionId") != scope["childSessionId"]
+            or "safetyFailure" not in before or before["safetyFailure"] is not None
+            or wire.value_hash(before.get("input")) != wire.value_hash({"checkpoint": "before_tool", "action": projected, "clock": clock["clock"]})
+            or wire.value_hash(before.get("trustedNativeCheckpoint")) != wire.value_hash(trusted)
+            or type(before.get("decision")) is not dict or before["decision"].get("action") != gate_decision
+            or type(hooks) is not list or not hooks or any(type(hook) is not dict or hook.get("status") != "passed" for hook in hooks)
+            or not any(hook.get("matched") is True and hook.get("hookId") in
+                       ("gaia2-a2a-guard", "gaia2-write-guard", "gaia2-conflict-gate")
+                       and type(hook.get("decision")) is dict and hook["decision"].get("action") == gate_decision
+                       for hook in hooks)):
+        _fail("NATIVE_DISCARD_HOOK_INVALID")
+    return clock
+
+
 class NativeAppBinding:
     """Constructor/handler map are trusted owner facilities, not tool schemas."""
 
@@ -173,6 +450,7 @@ class NativeAppBinding:
         self.__clock_dispatches: dict[str, dict] = {}
         self.__closed = False
         self.__unknown = False
+        self.__binding_failed = False
         self.__lock = threading.RLock()
         self.__dispatch_lock = threading.Lock()
         self.__active = None
@@ -190,26 +468,53 @@ class NativeAppBinding:
         self.__callback = self.__observe_event
         self.__environment_callbacks = tuple(app.add_event_callbacks.items())
         self.__original_tools = tuple(app.get_tools())
+        self.__original_entries: list[dict] = []
+        self.__excluded_tools: list[dict] = []
         self.__internal = {}
         self.__collect_methods()
-        for index, original in enumerate(tool for tool in self.__original_tools
-                                         if tool.func_name != "expert_agent"):
+        index = 0
+        for original in self.__original_tools:
             if (not isinstance(original, AppTool) or original.class_instance is not app
-                    or original.app_name != app.name or type(original.write_operation) is not bool):
+                    or original.app_name != app.name
+                    or type(original.name) is not str or not original.name
+                    or type(original.write_operation) not in (bool, type(None))):
                 _fail("NATIVE_TOOL_BINDING_INVALID")
             functions = _chain(original.function)
-            if any(item.__name__ == "expert_agent" for item in functions):
+            expert = original.func_name == "expert_agent"
+            if not expert and any(item.__name__ == "expert_agent" for item in functions):
                 _fail("NATIVE_NESTED_EXPERT_FORBIDDEN")
             adapter = AppToolAdapter(original)
-            self.__tools[f"native-{index:04d}"] = {
+            entry = {
                 "adapter": adapter, "original": original, "functions": functions,
                 "signature": inspect.signature(original.function),
-                "formatter": getattr(original.function, "llm_formatter", None)}
+                "formatter": getattr(original.function, "llm_formatter", None),
+                "completionEvidenceKind": "are_completed_event", "sourcePinId": None}
+            # The authoritative ARE registry is retained intact. Unknown
+            # metadata is an unsupported capability, never an inferred read;
+            # its complete original entry remains source/identity-frozen.
+            self.__original_entries.append(entry)
+            if expert:
+                continue
+            tool_id = f"native-{index:04d}"
+            index += 1
+            if original.write_operation is None:
+                source_pin = _source_return_pin(app, original, has_are_clock=clock_environment is not None)
+                if source_pin is None:
+                    self.__excluded_tools.append({
+                        "publicName": adapter.name,
+                        "canonicalName": f"{original.class_name}__{original.func_name}",
+                        "reasonCode": "NATIVE_TOOL_EFFECT_UNDECLARED"})
+                    continue
+                entry["completionEvidenceKind"] = "source_pinned_return"
+                entry["sourcePinId"] = source_pin
+            self.__tools[tool_id] = entry
         final = FinalAnswerTool()
         self.__tools["final_answer"] = {"adapter": final, "original": None,
             "functions": _chain(final.forward), "signature": inspect.signature(final.forward),
-            "formatter": None}
-        public = [entry["adapter"].name for entry in self.__tools.values()]
+            "formatter": None, "completionEvidenceKind": "child_final_answer", "sourcePinId": None}
+        self.__version = 2 if any(entry["sourcePinId"] is not None for entry in self.__tools.values()) else 1
+        public = [entry["adapter"].name for entry in self.__original_entries
+                  if entry["original"].func_name != "expert_agent"] + [final.name]
         if any(type(name) is not str or not name for name in public) or len(set(public)) != len(public):
             _fail("NATIVE_TOOL_INVENTORY_INVALID")
         for required in (App, type(app), AppTool, AppToolAdapter, Tool, FinalAnswerTool,
@@ -223,7 +528,7 @@ class NativeAppBinding:
         self.__add_source_path(Path(__file__))
         for source in trusted_source_files:
             self.__add_source_path(Path(source))
-        for entry in self.__tools.values():
+        for entry in (*self.__original_entries, self.__tools["final_answer"]):
             for function in entry["functions"]:
                 self.__add_source_object(function)
                 self.__add_annotation_sources(function)
@@ -253,7 +558,7 @@ class NativeAppBinding:
             self.__root = root
             app.register_to_env(self.__callback_key, self.__callback)
             tools = self.__inventory()
-            self.__manifest = {"schemaVersion": "gaia2-native-app-binding-v1",
+            self.__manifest = {"schemaVersion": f"gaia2-native-app-binding-v{self.__version}",
                 "environmentGeneration": environment_generation,
                 "parentExecutionId": parent_execution_id, "parentSessionId": parent_session_id,
                 "appId": app.name, "appType": type(app).__module__ + "." + type(app).__qualname__,
@@ -380,13 +685,17 @@ class NativeAppBinding:
                 path = str(Path(os.path.abspath(inspect.getsourcefile(function))))
                 formatter_hash = wire.value_hash({"sourceSha256": self.__sources[path]["sha256"],
                     "qualname": function.__module__ + "." + function.__qualname__})
-            result.append({"toolId": tool_id, "publicName": adapter.name,
+            metadata = {"toolId": tool_id, "publicName": adapter.name,
                 "canonicalName": f"{original.class_name}__{original.func_name}" if original else "final_answer",
                 "effect": "write" if original and original.write_operation else "read" if original else "finish",
                 "toolKind": "app_tool" if original else "child_final_answer",
                 "resourceKey": self.__app.name,
                 "signatureHash": wire.value_hash(self.__signature_description(entry["signature"])),
-                "formatterSourceHash": formatter_hash})
+                "formatterSourceHash": formatter_hash}
+            if self.__version == 2:
+                metadata.update(completionEvidenceKind=entry["completionEvidenceKind"],
+                                sourcePinId=entry["sourcePinId"])
+            result.append(metadata)
         return _clone(result)
 
     def __function_snapshot(self, function: Any) -> tuple:
@@ -399,13 +708,17 @@ class NativeAppBinding:
 
     def __current_snapshot(self) -> tuple:
         entries = []
-        for entry in self.__tools.values():
+        # Freeze all original entries, not only the dispatch subset. Removing
+        # an unknown tool from the manifest must not hide metadata, argument,
+        # function/default or formatter drift on that still-registered tool.
+        for entry in (*self.__original_entries, self.__tools["final_answer"]):
             original, adapter = entry["original"], entry["adapter"]
             formatter = getattr(original.function, "llm_formatter", None) if original else None
             metadata = None
             if original:
                 metadata = (original.class_name, original.app_name, original.name,
-                    original._public_name, original._public_description, original.write_operation,
+                    original._public_name, original._public_description, original.function_description,
+                    original.return_type, original.return_description, original.write_operation,
                     type(original.write_operation), original.failure_probability, type(original.failure_probability),
                     original.failure_message_template, original.seed, type(original.seed),
                     id(original.rng), id(original.class_instance), id(original.function),
@@ -416,6 +729,9 @@ class NativeAppBinding:
                 self.__function_snapshot(original.function if original else adapter.forward),
                 id(formatter), self.__function_snapshot(formatter) if formatter else None,
                 self.__function_snapshot(adapter.forward), self.__function_snapshot(adapter.__call__)))
+            if entry["sourcePinId"] is not None:
+                entries.append((entry["sourcePinId"], _source_return_pin(self.__app, original,
+                               has_are_clock=self.__clock_environment is not None)))
         internal = tuple((name, self.__function_snapshot(getattr(type(self.__app), name))) for name in self.__internal)
         clock_binding = None
         if self.__clock_environment is not None:
@@ -441,6 +757,8 @@ class NativeAppBinding:
     def __check(self) -> None:
         if self.__closed:
             _fail("NATIVE_OWNER_CLOSED")
+        if self.__binding_failed:
+            _fail("NATIVE_BINDING_CHANGED")
         try:
             same = self.__current_snapshot() == self.__snapshot
             same = same and self.__app.add_event_callbacks.get(self.__callback_key) is self.__callback
@@ -455,6 +773,7 @@ class NativeAppBinding:
             same = False
         if not same:
             self.__unknown = True
+            self.__binding_failed = True
             _fail("NATIVE_BINDING_CHANGED")
         if not EventRegisterer.is_active() or EventRegisterer.is_capture_mode():
             _fail("NATIVE_EVENT_MODE_INVALID")
@@ -539,7 +858,7 @@ class NativeAppBinding:
             prior = self.__clock_dispatches.get(dispatch_id)
             native_return_ref = None
             if checkpoint == "before_tool":
-                if (child["status"] != "running" or ticket["consumed"] or dispatch_id in self.__dispatches
+                if (child["status"] != "running" or ticket["consumed"] or ticket.get("discarded") is True or dispatch_id in self.__dispatches
                         or prior is not None or any(item["binding"]["ticketId"] == ticket_id for item in self.__clock_dispatches.values())):
                     _fail("NATIVE_CLOCK_BEFORE_INVALID_OR_REUSED")
             else:
@@ -604,6 +923,21 @@ class NativeAppBinding:
         if payload is not None:
             _fail("NATIVE_PAYLOAD_INVALID")
         return self.manifest()
+
+    def excluded_tool_snapshot(self) -> dict:
+        """Answer-blind unsupported inventory, outside the strict pipe manifest.
+
+        This trusted diagnostic API does not mutate ARE tools or grant a
+        dispatch ID. Return a copy of the constructor-time exclusion list;
+        drift cannot reclassify or silently rebaseline an excluded tool.
+        """
+        with self.__lock:
+            self.__check()
+            return _clone({"schemaVersion": "gaia2-private-native-excluded-tools-v1",
+                "appId": self.__app.name, "toolCount": len(self.__excluded_tools),
+                "sourceManifestHash": self.__manifest_hash,
+                "tools": sorted(self.__excluded_tools,
+                    key=lambda item: (item["publicName"], item["canonicalName"]))})
 
     def __scope_shape(self, scope: Any) -> tuple[dict, str]:
         _exact(scope, _SCOPE_KEYS)
@@ -707,6 +1041,8 @@ class NativeAppBinding:
             if child["count"] >= child["scope"]["maxNativeActions"] or len(self.__tickets) >= _MAX_TICKETS:
                 _fail("NATIVE_BUDGET_EXHAUSTED")
             original = entry["original"]
+            if entry["sourcePinId"] is not None:
+                _source_return_state(self.__app)
             try:
                 bound = entry["signature"].bind(*((self.__app,) if original else ()), **arguments)
                 bound.apply_defaults()
@@ -721,6 +1057,9 @@ class NativeAppBinding:
                 "canonicalName": meta["canonicalName"], "toolKind": meta["toolKind"], "effect": meta["effect"],
                 "rawArgumentsHash": wire.value_hash(arguments), "effectiveArguments": effective,
                 "effectiveArgumentsHash": wire.value_hash(effective)}
+            if self.__version == 2:
+                response.update(completionEvidenceKind=entry["completionEvidenceKind"],
+                                sourcePinId=entry["sourcePinId"])
             self.__tickets[ticket_id] = {"child": child, "raw": copy.deepcopy(arguments),
                 "effective": copy.deepcopy(effective), "response": _clone(response), "consumed": False}
             return _clone(response)
@@ -806,7 +1145,7 @@ class NativeAppBinding:
                 self.__now()
                 child = self.__child(payload["scope"])
                 ticket = self.__tickets.get(payload["ticketId"])
-                if ticket is None or ticket["child"] is not child or ticket["consumed"]:
+                if ticket is None or ticket["child"] is not child or ticket["consumed"] or ticket.get("discarded") is True:
                     _fail("NATIVE_TICKET_INVALID_OR_CONSUMED")
                 response = ticket["response"]
                 if (payload["toolId"] != response["toolId"] or payload["effectiveArgumentsHash"] != response["effectiveArgumentsHash"]
@@ -814,6 +1153,9 @@ class NativeAppBinding:
                     _fail("NATIVE_TICKET_BINDING_MISMATCH")
                 if self.__unknown and response["effect"] in ("write", "finish"):
                     _fail("NATIVE_UNRESOLVED_APP_MUTATION")
+                entry = self.__tools[response["toolId"]]
+                if entry["sourcePinId"] is not None:
+                    _source_return_state(self.__app)
                 if child["count"] >= child["scope"]["maxNativeActions"]:
                     _fail("NATIVE_BUDGET_EXHAUSTED")
                 clock_dispatch = self.__clock_dispatches.get(payload["dispatchId"])
@@ -841,7 +1183,6 @@ class NativeAppBinding:
                     if child["status"] == "unknown":
                         self.__unknown = True
                     _fail("NATIVE_DISPATCH_EVIDENCE_FAILED")
-                entry = self.__tools[response["toolId"]]
                 active = {"thread": threading.get_ident(), "effect": response["effect"], "child": child,
                           "events": [], "eventError": None, "binding": binding}
                 self.__active = active
@@ -849,6 +1190,7 @@ class NativeAppBinding:
             returned = False
             result = None
             observation = observation_hash = raw_hash = ce_ref = None
+            native_result = raw_projection = return_owner_clock = None
             try:
                 result = entry["adapter"](**ticket["raw"])
                 returned = True
@@ -869,6 +1211,17 @@ class NativeAppBinding:
                         if active["events"]:
                             _fail("NATIVE_FINAL_UNEXPECTED_EVENT")
                         raw_hash = observation_hash
+                        native_result = result
+                    elif entry["sourcePinId"] is not None:
+                        # ARE intentionally registers no event for this exact
+                        # pure getter. The actual adapter return is the native
+                        # result; an unrelated or forged event cannot replace it.
+                        if active["events"]:
+                            _fail("NATIVE_SOURCE_RETURN_UNEXPECTED_EVENT")
+                        raw_hash = observation_hash
+                        raw_projection = observation
+                        native_result = result
+                        return_owner_clock = self.__are_now()
                     else:
                         direct = [event for event in active["events"] if event["function"] in entry["functions"]]
                         if (len(direct) != 1 or direct[0]["completed"] is not True
@@ -877,6 +1230,7 @@ class NativeAppBinding:
                                 or direct[0]["operation"] != response["effect"]):
                             _fail("NATIVE_DIRECT_EVENT_MISMATCH")
                         event = direct[0]
+                        native_result = event["originalResult"]
                         raw_hash = event["nativeRawResultHash"]
                         if entry["formatter"] is None and raw_hash != observation_hash:
                             _fail("NATIVE_RETURN_EVENT_MISMATCH")
@@ -905,11 +1259,17 @@ class NativeAppBinding:
                         "nativeRawResultHash": raw_hash, "nativeCompletedEventRef": ce_ref,
                         "errorCode": error_code}
                     observation = observation_hash = raw_hash = ce_ref = None
+                    raw_projection = return_owner_clock = None
                 try:
-                    native_return_ref = self.__receipt("return", {"schemaVersion": "gaia2-private-native-return-v1", **binding,
+                    return_body = {"schemaVersion": f"gaia2-private-native-return-v{self.__version}", **binding,
                         "status": status, "returned": returned, "agentObservation": observation,
                         "agentObservationHash": observation_hash, "nativeRawResultHash": raw_hash,
-                        "nativeCompletedEventRef": ce_ref, "dispatchEvidenceRef": dispatch_ref, "errorCode": error_code})
+                        "nativeCompletedEventRef": ce_ref, "dispatchEvidenceRef": dispatch_ref, "errorCode": error_code}
+                    if self.__version == 2:
+                        return_body.update(completionEvidenceKind=entry["completionEvidenceKind"],
+                            sourcePinId=entry["sourcePinId"], nativeRawProjection=raw_projection,
+                            ownerClock=return_owner_clock)
+                    native_return_ref = self.__receipt("return", return_body)
                     # Complete the same snapshot/clock barrier before either
                     # original result becomes available to the trusted owner.
                     if status == "succeeded":
@@ -933,14 +1293,83 @@ class NativeAppBinding:
                 elif response["toolKind"] == "child_final_answer":
                     child["status"] = "completed"
                 if status == "succeeded":
-                    self.__native_results[payload["dispatchId"]] = event["originalResult"] if entry["original"] else result
+                    self.__native_results[payload["dispatchId"]] = native_result
                     self.__agent_observations[payload["dispatchId"]] = result
-                return _clone({"schemaVersion": "gaia2-private-native-outcome-v1",
+                outcome = {"schemaVersion": f"gaia2-private-native-outcome-v{self.__version}",
                     **{key: value for key, value in binding.items() if key != "sourceManifestHash"},
                     "status": status, "agentObservation": observation, "agentObservationHash": observation_hash,
                     "nativeRawResultHash": raw_hash, "nativeCompletedEventRef": ce_ref,
                     "dispatchEvidenceRef": dispatch_ref, "nativeReturnEvidenceRef": native_return_ref,
-                    "errorCode": error_code})
+                    "errorCode": error_code}
+                if self.__version == 2:
+                    outcome.update(completionEvidenceKind=entry["completionEvidenceKind"],
+                                   sourcePinId=entry["sourcePinId"])
+                return _clone(outcome)
+
+    def discard_native(self, payload: Any) -> dict:
+        """Revoke one uncommitted ticket after a real nonallow Host decision.
+
+        This never samples an after clock, constructs a native return/event,
+        consumes an observation, or removes uncertainty from any prior write.
+        The dispatch mutex makes the no-active check and revocation atomic
+        against the real commit path, including other bound child scopes.
+        """
+        _exact(payload, {"scope", "ticketId", "dispatchId", "beforeClockEvidenceRef", "beforeHookEvidenceRef", "gateDecision"})
+        if (type(payload["ticketId"]) is not str or not _TICKET.fullmatch(payload["ticketId"])
+                or type(payload["dispatchId"]) is not str or payload["gateDecision"] not in ("block", "read_back")):
+            _fail("NATIVE_DISCARD_INVALID")
+        try:
+            if str(uuid.UUID(payload["dispatchId"])) != payload["dispatchId"]:
+                _fail("NATIVE_DISCARD_INVALID")
+        except (ValueError, AttributeError):
+            _fail("NATIVE_DISCARD_INVALID")
+        if not self.__dispatch_lock.acquire(blocking=False):
+            _fail("NATIVE_DISCARD_ACTIVE")
+        try:
+            with self.__lock:
+                self.__check()
+                self.__now()
+                child = self.__child(payload["scope"])
+                ticket = self.__tickets.get(payload["ticketId"])
+                prior = self.__clock_dispatches.get(payload["dispatchId"])
+                if (self.__active is not None or self.__unknown or ticket is None or ticket["child"] is not child
+                        or ticket["consumed"] is not False or ticket.get("discarded") is True
+                        or payload["dispatchId"] in self.__dispatches or prior is None
+                        or prior["binding"]["scopeHash"] != child["hash"]
+                        or prior["binding"]["ticketId"] != payload["ticketId"] or prior["afterObserved"]
+                        or prior["nativeReturnEvidenceRef"] is not None or prior.get("discarded") is True):
+                    _fail("NATIVE_DISCARD_STATE_INVALID")
+                response = ticket["response"]
+                meta = next(item for item in self.__manifest["tools"] if item["toolId"] == response["toolId"])
+                arguments_hash = _registry_action_hash(ticket["effective"])
+                action = {key: value for key, value in meta.items() if key not in ("publicName", "signatureHash", "formatterSourceHash")}
+                action.update(id=payload["dispatchId"], dispatchId=payload["dispatchId"], arguments=ticket["effective"],
+                    argumentsHash=arguments_hash, mutationKey=_registry_action_hash([self.__environment, self.__app.name,
+                        meta["resourceKey"], meta["canonicalName"], arguments_hash]))
+                expected_ref = {"path": str(self.__root / prior["beforeEvidenceRef"]["path"]),
+                                "sha256": prior["beforeEvidenceRef"]["sha256"]}
+                if payload["beforeClockEvidenceRef"] != expected_ref:
+                    _fail("NATIVE_DISCARD_CLOCK_BINDING_INVALID")
+                observed = _validate_native_blocked_before(scope=payload["scope"], action=action,
+                    gate_decision=payload["gateDecision"], before_hook_ref=payload["beforeHookEvidenceRef"],
+                    before_clock_ref=payload["beforeClockEvidenceRef"], source_manifest_hash=self.__manifest_hash)
+                if any(observed.get(key) != value for key, value in prior["binding"].items()):
+                    _fail("NATIVE_DISCARD_CLOCK_BINDING_INVALID")
+                try:
+                    evidence = self.__receipt("discard", {"schemaVersion": "gaia2-private-native-discard-v1",
+                        **prior["binding"], "gateDecision": payload["gateDecision"],
+                        "beforeClockEvidenceRef": payload["beforeClockEvidenceRef"], "beforeHookEvidenceRef": payload["beforeHookEvidenceRef"],
+                        "discarded": True, "consumed": False, "nativeStarted": False})
+                except Exception:
+                    # A lost negative receipt cannot become a reusable permit.
+                    self.__binding_failed = True
+                    _fail("NATIVE_DISCARD_EVIDENCE_FAILED")
+                ticket["discarded"] = True
+                prior["discarded"] = True
+                return _clone({"schemaVersion": "gaia2-private-native-discard-ack-v1", "scopeHash": child["hash"],
+                    "ticketId": payload["ticketId"], "dispatchId": payload["dispatchId"], "discarded": True, "evidenceRef": evidence})
+        finally:
+            self.__dispatch_lock.release()
 
     def cancel_child(self, payload: Any) -> dict:
         _exact(payload, {"scope"})
@@ -1010,6 +1439,13 @@ class NativeAppBinding:
                 self.__scope_payload(payload, frozenset(("scope", "identity", "ticketId", "dispatchId", "checkpoint")), transport=True)
                 return self.observe_clock({key: value for key, value in payload.items() if key != "identity"})
             result["observe_clock"] = observe_clock_transport
+            def discard_native_transport(payload: Any) -> dict:
+                if type(payload) is not dict or "identity" not in payload:
+                    _fail("NATIVE_CHILD_IDENTITY_REQUIRED")
+                self.__scope_payload(payload, frozenset(("scope", "identity", "ticketId", "dispatchId",
+                    "beforeClockEvidenceRef", "beforeHookEvidenceRef", "gateDecision")), transport=True)
+                return self.discard_native({key: value for key, value in payload.items() if key != "identity"})
+            result["discard_native"] = discard_native_transport
         return result
 
     def close(self) -> None:

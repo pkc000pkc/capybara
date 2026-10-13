@@ -1,5 +1,6 @@
 node_modules/
 .official-python/
+.runtime-python/
 official-results/
 .official-fixtures/
 scripts/__pycache__/

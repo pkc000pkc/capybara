@@ -17,6 +17,7 @@ import math
 import uuid
 import re
 import posixpath
+import stat
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,7 +26,8 @@ from typing import Any
 import litellm
 from litellm import completion
 from gaia2_model_retry import install_model_retries
-from gaia2_deadline_notifications import DeadlineNotificationError, ProjectedNotification
+from gaia2_a2a_wire import value_hash as _a2a_value_hash
+from gaia2_deadline_notifications import DeadlineNotificationError, ProjectedNotification, ScopedOSDeadline
 from gaia2_notification_producer import (
     NotificationProducerError,
     ScopedChildNotificationLifecycle,
@@ -131,6 +133,170 @@ class BridgeNotificationBinding:
                 raise HookProtocolError("notification_lifecycle_environment_invalid") from None
             if self.lifecycle.reader.time_manager is not manager:
                 raise HookProtocolError("notification_lifecycle_clock_mismatch")
+
+
+class _A2AParentNotificationPump:
+    """Trusted, synchronous fan-out from the real queue into one child scope.
+
+    Parent-visible messages stay buffered until the pending tool result is
+    appended. This preserves assistant/tool adjacency without giving the
+    child ownership of the queue or consuming future notifications.
+    """
+
+    _STAGES = frozenset(("pre_step", "model_admission", "sdk_attempt_before",
+        "sdk_attempt_after", "cooldown_before", "cooldown_after",
+        "model_returned", "native_before", "child_close"))
+
+    def __init__(self, *, env, lifecycle, binding, scope, is_current,
+                 revision_reader, revision_writer, pending_messages):
+        if (type(lifecycle) is not ScopedChildNotificationLifecycle
+                or type(binding) is not BridgeNotificationBinding
+                or binding.lifecycle is not lifecycle or type(scope) is not dict
+                or lifecycle.scope_id != scope.get("requestId")
+                or lifecycle.origin_id != scope.get("childExecutionId")
+                or lifecycle.app_id != scope.get("appId")
+                or any(not callable(callback) for callback in
+                    (is_current, revision_reader, revision_writer))
+                or type(pending_messages) is not list):
+            raise HookProtocolError("a2a_notification_pump_bind_failed")
+        binding.validate_environment(env)
+        self.__env, self.__manager = env, env.time_manager
+        self.__lifecycle, self.__binding = lifecycle, binding
+        self.__is_current = is_current
+        self.__revision_reader, self.__revision_writer = revision_reader, revision_writer
+        self.__pending = pending_messages
+        self.__identity = {key: scope[key] for key in
+            ("appId", "childExecutionId", "childSessionId")}
+        self.__identity["scopeHash"] = _a2a_value_hash(scope)
+        self.__stopped = False
+
+    def __call__(self, stage: str) -> bool:
+        if (stage not in self._STAGES or self.__is_current() is not True
+                or self.__env.time_manager is not self.__manager):
+            raise HookProtocolError("a2a_notification_pump_binding_changed")
+        before = self.__revision_reader()
+        if type(before) is not int or before < 0:
+            raise HookProtocolError("a2a_notification_pump_revision_invalid")
+        initial_count = len(self.__pending)
+        if not self.__stopped:
+            state = self.__lifecycle.snapshot()
+            if state["closed"]:
+                if state["closeReason"] != "stop":
+                    raise HookProtocolError("a2a_notification_pump_lifecycle_closed")
+                self.__stopped = True
+            else:
+                after, _, stopped = _drain_notifications(self.__env, self.__pending,
+                    before, binding=self.__binding)
+                self.__revision_writer(after)
+                if stopped:
+                    # A public terminal Environment state may precede the
+                    # STOP notification. Revoke the exact child in both cases.
+                    self.__lifecycle.close("stop")
+                    self.__stopped = True
+        after = self.__revision_reader()
+        state = self.__lifecycle.snapshot()
+        _emit_runtime_event("a2a_parent_notification_pumped",
+            schemaVersion="gaia2-a2a-parent-pump-receipt-v1", **self.__identity,
+            stage=stage, clockNow=float(self.__manager.time()),
+            parentRevisionBefore=before, parentRevisionAfter=after,
+            publishedCount=len(self.__pending) - initial_count,
+            stopped=self.__stopped, originRevoked=state["originRevoked"])
+        return self.__stopped
+
+
+def _capture_a2a_child_runtime(value: dict[str, Any], *, workspace: str) -> None:
+    """Seal child/native/ledger bytes for relocation-safe evaluator audit.
+
+    Original absolute paths remain identity labels only. Source files are
+    copied into this execution's workspace; no credential configuration or
+    unconstrained filesystem inventory is accepted here.
+    """
+    project = Path(__file__).resolve().parents[1]
+    root = Path(workspace).resolve(strict=True)
+    identity, snapshot, manifest = value["identity"], value["snapshot"], value["manifest"]
+    scope_hash = identity["scopeHash"]
+
+    def regular(path: Path) -> Path:
+        if not path.is_absolute():
+            raise HookProtocolError("a2a_evidence_path_invalid")
+        for part in (path, *path.parents):
+            info = part.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise HookProtocolError("a2a_evidence_path_invalid")
+        if not path.is_file() or path.resolve(strict=True) != path:
+            raise HookProtocolError("a2a_evidence_path_invalid")
+        return path
+
+    def inside(path: Path, parent: Path) -> bool:
+        return path != parent and parent in path.parents
+
+    if not inside(root, project) or type(snapshot) is not dict or type(manifest) is not dict:
+        raise HookProtocolError("a2a_evidence_scope_invalid")
+    native_root = Path(manifest["evidenceRoot"]).resolve(strict=True)
+    if not inside(native_root, root):
+        raise HookProtocolError("a2a_native_evidence_root_invalid")
+    refs = {}
+
+    def add(path: Path, *, source_path: Path | None = None):
+        path = regular(path)
+        if not inside(path, root):
+            raise HookProtocolError("a2a_evidence_path_escape")
+        raw = path.read_bytes()
+        original = (source_path or path).as_posix()
+        ref = {"path": path.relative_to(project).as_posix(),
+               "sha256": hashlib.sha256(raw).hexdigest(), "sourcePath": original}
+        prior = refs.get(original)
+        if prior is not None and prior != ref:
+            raise HookProtocolError("a2a_evidence_identity_changed")
+        refs[original] = ref
+
+    sources = list(manifest.get("sourceRefs", [])) + list(snapshot.get("sourceRefs", []))
+    for record in snapshot.get("modelRequests", []):
+        sources.extend(record.get("generationOwnerSourceRefs", []))
+    copy_root = root / "a2a-captured-sources"
+    copy_root.mkdir(exist_ok=True)
+    for source in sources:
+        if type(source) is not dict or not {"path", "sha256", "bytes"}.issubset(source):
+            raise HookProtocolError("a2a_evidence_source_invalid")
+        path = regular(Path(source["path"]))
+        # The trusted owner only pins project/ARE/backend implementation
+        # files. Never let a purported source ref copy secret configuration.
+        if path.suffix not in (".py", ".ts", ".mjs"):
+            raise HookProtocolError("a2a_evidence_source_invalid")
+        raw = path.read_bytes()
+        if (len(raw) != source["bytes"] or len(raw) > 16 * 1024 * 1024
+                or hashlib.sha256(raw).hexdigest() != source["sha256"]):
+            raise HookProtocolError("a2a_evidence_source_changed")
+        target = copy_root / (source["sha256"] + "-" + path.name)
+        if target.exists():
+            if regular(target).read_bytes() != raw:
+                raise HookProtocolError("a2a_evidence_source_changed")
+        else:
+            with target.open("xb") as stream:
+                stream.write(raw)
+        add(target, source_path=path)
+
+    def mentions(value):
+        if type(value) is dict:
+            return any(mentions(item) for item in value.values())
+        if type(value) is list:
+            return any(mentions(item) for item in value)
+        return type(value) is str and value in (scope_hash, identity["childExecutionId"])
+
+    for path in sorted(native_root.rglob("*.json")):
+        if mentions(json.loads(regular(path).read_text(encoding="utf-8"))):
+            add(path)
+    child_root = root / "plugin-runtime-children" / identity["childSessionId"]
+    for path in sorted(child_root.rglob("*.json")):
+        add(path)
+    # Registry is one global append-only chain, including prior children.
+    # Preserve its full prefix rather than break previousHash at a scope edge.
+    for path in sorted((root / "plugin-delegation").glob("*.json")):
+        add(path)
+    _emit_runtime_event("a2a_child_runtime_snapshot", appId=identity["appId"],
+        scopeHash=scope_hash, childExecutionId=identity["childExecutionId"],
+        childSessionId=identity["childSessionId"], runnerSnapshot=snapshot,
+        nativeManifest=manifest, evidenceRefs=sorted(refs.values(), key=lambda ref: ref["sourcePath"]))
 
 
 def configure_notification_bridge(factory) -> None:
@@ -399,8 +565,13 @@ def _install_windows_fallback_compatibility() -> None:
         return str(value).replace("\\", "/")
 
     def ensure_file_loaded(self, path: str) -> None:
-        if (not self.fallback_root or not self.fallback_fs
-                or not self.fallback_fs.exists(self.fallback_root) or path == "."):
+        # Do not probe the remote fallback root here.  On Windows the official
+        # HF filesystem implements ``exists(root)`` through ``paths-info``;
+        # calling it for every placeholder turns scenario initialization into
+        # an unbounded network walk.  A concrete file open below is the only
+        # authoritative read and is enough to distinguish a missing remote
+        # object from a usable one.
+        if (not self.fallback_root or not self.fallback_fs or path == "."):
             return
         raw_rel = self._rel_path(path)
         rel_path = normalize(raw_rel)
@@ -410,11 +581,15 @@ def _install_windows_fallback_compatibility() -> None:
         if not self.fs.exists(path) or self.fs.info(path)["size"] != 0:
             return
         fallback_path = posixpath.join(self.fallback_root, rel_path.lstrip("/"))
-        if not self.fallback_fs.exists(fallback_path) or not self.fallback_fs.isfile(fallback_path):
+        try:
+            # Opening the concrete object avoids the HF ``paths-info`` call
+            # used by exists/info and still preserves lazy, per-file loading.
+            with self.fallback_fs.open(fallback_path, "rb") as stream:
+                payload = stream.read()
+        except Exception:
             return
         self.fs.makedirs(os.path.dirname(path), exist_ok=True)
-        with self.fallback_fs.open(fallback_path, "rb") as stream:
-            self.fs.write_bytes(path, stream.read())
+        self.fs.write_bytes(path, payload)
         self.fallback_stats.pop(raw_rel, None)
         self.fallback_stats.pop(rel_path, None)
 
@@ -425,15 +600,11 @@ def _install_windows_fallback_compatibility() -> None:
         if (self.fs.exists(path) and self.fs.isfile(path) and item["size"] == 0
                 and key in self.fallback_stats):
             entry = self.fallback_stats[key]
-            if "loaded" in entry and not entry["loaded"]:
-                fallback_path = posixpath.join(self.fallback_root, rel_path.lstrip("/"))
-                if self.fallback_fs.exists(fallback_path) and self.fallback_fs.isfile(fallback_path):
-                    info = self.fallback_fs.info(fallback_path)
-                    self.fallback_stats[key] = {"size": info["size"], "mode": info.get("mode", 0o644), "loaded": True}
-                    entry = self.fallback_stats[key]
-                else:
-                    self.fallback_stats.pop(key, None)
-                    return item
+            # Lazy entries intentionally remain size-less while the scenario
+            # is being serialized.  Querying remote metadata here defeats the
+            # lazy filesystem and caused the failed batch's HF paths-info storm.
+            # A later concrete read invokes ensure_file_loaded(), which opens
+            # exactly the requested object and removes the entry on success.
             if "size" in entry and "mode" in entry:
                 item["size"] = entry["size"]
                 item["mode"] = entry["mode"]
@@ -558,6 +729,40 @@ def _native_openai_tool(tool) -> dict[str, Any]:
     return source
 
 
+def _compact_provider_tool_schema(tool, source: dict[str, Any]) -> dict[str, Any]:
+    """Keep required SystemApp tools while staying under provider schema budgets.
+
+    The official runtime adds these two read-only tools to the live registry.
+    Their names and exact parameters are authoritative; their long prose
+    descriptions duplicate the bridge system prompt and push the otherwise
+    valid 101-tool request just over the local provider's 50,000-byte limit.
+    """
+    if _canonical(tool) == ("SystemApp", "get_current_time") or _canonical(tool) == ("SystemApp", "wait_for_notification"):
+        source.get("function", {}).pop("description", None)
+    return source
+
+
+def _tool_inventory(app_tools: list[Any], openai_tools: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return non-secret identity evidence for the live actor tool registry."""
+    encoded = json.dumps(openai_tools, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return {
+        "toolCount": len(app_tools),
+        "toolDefinitionsUtf8Bytes": len(encoded),
+        "schemaSha256": hashlib.sha256(encoded).hexdigest(),
+        "tools": [
+            {
+                "canonicalName": f"{_canonical(tool)[0]}__{_canonical(tool)[1]}",
+                "className": _canonical(tool)[0],
+                "functionName": _canonical(tool)[1],
+                "publicName": str(getattr(tool, "_public_name", "")),
+                "toolName": str(getattr(tool, "name", "")),
+                "appName": str(getattr(tool, "app_name", "")),
+            }
+            for tool in app_tools
+        ],
+    }
+
+
 class BridgeBudgetExceeded(RuntimeError):
     """The action budget is a technical stop, not a successful completion."""
 
@@ -612,8 +817,214 @@ def _actor_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{key: value for key, value in item.items() if key in allowed} for item in messages]
 
 
+# The local provider accepts the compact 101-tool registry, but requests near
+# the provider context boundary can otherwise fail as an opaque HTTP 400.  A
+# conservative wire budget leaves room for tokenization differences and keeps
+# the full authoritative history in the internal ledger.  Message count is a
+# second guard: a small but very long tool-call history can exceed provider
+# limits before its byte size does.
+_MODEL_INPUT_MAX_BYTES = 120_000
+_MODEL_INPUT_MAX_MESSAGES = 80
+_COMPACTED_TOOL_RESULT_BYTES = 4_096
+
+
+def _model_wire_bytes(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
+    return len(json.dumps({"messages": messages, "tools": tools},
+                          ensure_ascii=False, separators=(",", ":"),
+                          allow_nan=False).encode("utf-8"))
+
+
+def _compact_tool_result(message: dict[str, Any], limit: int) -> tuple[dict[str, Any], bool]:
+    content = message.get("content")
+    if not isinstance(content, str):
+        return message, False
+    encoded = content.encode("utf-8")
+    if len(encoded) <= limit:
+        return message, False
+    marker = ("\n[GAIA2 runtime compaction: this prior tool result is incomplete; "
+              "re-read the authoritative native tool before relying on it.]\n")
+    marker_bytes = marker.encode("utf-8")
+    available = max(0, limit - len(marker_bytes))
+    head = available // 2
+    tail = available - head
+    compacted = (encoded[:head] + marker_bytes + encoded[-tail:] if tail
+                 else encoded[:head] + marker_bytes).decode("utf-8", errors="ignore")
+    return {**message, "content": compacted}, True
+
+
+def _history_groups(messages: list[dict[str, Any]], start: int) -> list[list[dict[str, Any]]]:
+    """Split assistant/tool turns so compaction never leaves an orphan tool."""
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            groups.append(current)
+            current = []
+
+    for message in messages[start:]:
+        role = message.get("role")
+        if role == "assistant":
+            flush()
+            current = [message]
+        elif role == "tool":
+            # Internal bridge history always has an assistant immediately
+            # before tool results.  Keep a defensive standalone group if a
+            # malformed/legacy receipt ever reaches this function.
+            if not current:
+                current = [message]
+            else:
+                current.append(message)
+        else:
+            flush()
+            current = [message]
+    flush()
+    return groups
+
+
+def _compact_model_input(messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+                         max_bytes: int = _MODEL_INPUT_MAX_BYTES,
+                         max_messages: int = _MODEL_INPUT_MAX_MESSAGES) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Bound model transport history without changing the authoritative ledger.
+
+    Hooks retain the complete internal history.  Only the provider-facing
+    request is compacted.  The initial user request, current hook context and
+    newest complete turns remain visible; hidden turns are explicitly marked
+    as requiring fresh authoritative reads, so a missing old observation is
+    never interpreted as absence and an old write is never replayed blindly.
+    """
+    original_bytes = _model_wire_bytes(messages, tools)
+    original_message_count = len(messages)
+    if original_bytes <= max_bytes and original_message_count <= max_messages:
+        return messages, {"compacted": False, "originalBytes": original_bytes,
+                          "compactedBytes": original_bytes, "hiddenMessageCount": 0,
+                          "retainedMessageCount": len(messages), "truncatedToolResults": 0,
+                          "originalMessageCount": original_message_count,
+                          "compactedMessageCount": original_message_count,
+                          "compactionReason": None,
+                          "hiddenToolCallIds": [], "truncatedToolCallIds": []}
+
+    # The bridge inserts the current dynamic context as the second system
+    # message.  Preserve both system messages and the first user request.
+    system_count = 2 if len(messages) >= 2 and all(
+        item.get("role") == "system" for item in messages[:2]
+    ) else 1
+    prefix = list(messages[:system_count])
+    initial_index = next((index for index in range(system_count, len(messages))
+                          if messages[index].get("role") == "user"), None)
+    initial = [messages[initial_index]] if initial_index is not None else []
+    history_start = (initial_index + 1) if initial_index is not None else system_count
+    groups = _history_groups(messages, history_start)
+    summary = {"role": "system", "content": (
+        "GAIA2 runtime context compaction is active because the provider input "
+        "budget was reached. Earlier tool observations are not visible in this "
+        "request and may be incomplete; use fresh authoritative native reads "
+        "before any decision or mutation. The write ledger still governs all "
+        "replays, and unknown writes must never be repeated automatically."
+    )}
+    base = prefix + [summary] + initial
+    selected: list[list[dict[str, Any]]] = []
+    truncated = 0
+    for group in reversed(groups):
+        bounded_group: list[dict[str, Any]] = []
+        for message in group:
+            bounded, changed = _compact_tool_result(message, _COMPACTED_TOOL_RESULT_BYTES)
+            bounded_group.append(bounded)
+            truncated += int(changed)
+        candidate_groups = [bounded_group, *selected]
+        candidate = base + [item for group_item in candidate_groups for item in group_item]
+        if (_model_wire_bytes(candidate, tools) <= max_bytes
+                and len(candidate) <= max_messages):
+            selected = candidate_groups
+            continue
+        if selected:
+            break
+        # Always retain the newest group, even when one unusually large result
+        # alone exceeds the budget.  Its tool payload is reduced further and
+        # explicitly marked incomplete.
+        aggressively_bounded = []
+        for message in bounded_group:
+            bounded, changed = _compact_tool_result(message, 512)
+            aggressively_bounded.append(bounded)
+            truncated += int(changed)
+        selected = [aggressively_bounded]
+        break
+
+    compacted = base + [item for group in selected for item in group]
+    compacted_bytes = _model_wire_bytes(compacted, tools)
+    reasons = []
+    if original_bytes > max_bytes:
+        reasons.append("wire_bytes")
+    if original_message_count > max_messages:
+        reasons.append("message_count")
+    original_tools = {item["tool_call_id"]: item.get("content") for item in messages
+                      if item.get("role") == "tool" and isinstance(item.get("tool_call_id"), str)}
+    visible_tools = {item["tool_call_id"]: item.get("content") for item in compacted
+                     if item.get("role") == "tool" and isinstance(item.get("tool_call_id"), str)}
+    hidden_ids = sorted(set(original_tools) - set(visible_tools))
+    truncated_ids = sorted(identity for identity in set(original_tools) & set(visible_tools)
+                           if original_tools[identity] != visible_tools[identity])
+    return compacted, {"compacted": True, "originalBytes": original_bytes,
+                       "compactedBytes": compacted_bytes,
+                       "hiddenMessageCount": max(0, len(messages) - len(compacted)),
+                       "retainedMessageCount": len(compacted),
+                       "truncatedToolResults": truncated,
+                       "originalMessageCount": original_message_count,
+                       "compactedMessageCount": len(compacted),
+                       "compactionReason": reasons,
+                       "hiddenToolCallIds": hidden_ids,
+                       "truncatedToolCallIds": truncated_ids}
+
+
+def _mark_compacted_observation_views(messages: list[dict[str, Any]],
+                                     compaction: dict[str, Any]) -> list[str]:
+    """Mark the provider view, never overwrite full native content or its hash.
+
+    The trusted compactor supplies exact native call identities. Text markers
+    inside a tool result cannot create these annotations. Hooks still see the
+    complete history and can require a fresh read before a dependent mutation.
+    """
+    hidden = set(compaction.get("hiddenToolCallIds", []))
+    truncated = set(compaction.get("truncatedToolCallIds", []))
+    changed = []
+    for message in messages:
+        observation = message.get("observation")
+        call_id = message.get("tool_call_id")
+        if (message.get("role") != "tool" or not isinstance(observation, dict)
+                or observation.get("actionId") != call_id):
+            continue
+        reason = "hidden" if call_id in hidden else "truncated" if call_id in truncated else None
+        if reason is not None:
+            if observation.get("viewComplete") is not False or observation.get("viewIncompleteReason") != reason:
+                message["observation"] = {**observation, "viewComplete": False,
+                                          "viewIncompleteReason": reason}
+                changed.append(call_id)
+    return changed
+
+
+def _tool_observation_metadata(action: dict[str, Any], outcome: dict[str, Any],
+                               observed_at: float) -> dict[str, Any] | None:
+    """Native operational provenance only; never parse claims from result text."""
+    if outcome.get("executed") is not True:
+        return None
+    result_hash, query_hash = outcome.get("resultHash"), action.get("mutationKey")
+    if not (isinstance(result_hash, str) and re.fullmatch(r"[0-9a-f]{64}", result_hash)
+            and isinstance(query_hash, str) and re.fullmatch(r"[0-9a-f]{64}", query_hash)):
+        raise HookProtocolError("invalid_observation_identity")
+    if (isinstance(observed_at, bool) or not isinstance(observed_at, (int, float))
+            or not math.isfinite(observed_at) or observed_at < 0):
+        raise HookProtocolError("invalid_observation_clock")
+    return {"actionId": action["id"], "resourceKey": action["resourceKey"],
+            "canonicalName": action["canonicalName"], "queryHash": query_hash,
+            "resultHash": result_hash, "observedAt": observed_at,
+            "complete": outcome.get("complete") is True,
+            "viewComplete": True}
+
+
 def _hook_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    allowed = {"role", "id", "name", "toolCallId", "requestId", "content"}
+    allowed = {"role", "id", "name", "toolCallId", "requestId", "content",
+               "observation", "notificationType"}
     projected = []
     for item in messages:
         translated = {("toolCallId" if key == "tool_call_id" else key): value for key, value in item.items()}
@@ -805,6 +1216,7 @@ def _native_run_with_agent(
     if turn_limit is not None and (isinstance(turn_limit, bool) or not isinstance(turn_limit, int) or turn_limit < 1):
         raise HookProtocolError("invalid_turn_limit")
     notification_binding = _notification_binding_for_run(env, scenario_id)
+    base_notification_binding = notification_binding
     _official_filesystem_health_check(env)
 
     all_tools = scenario.get_tools()
@@ -817,8 +1229,14 @@ def _native_run_with_agent(
         class_name, function_name = _canonical(tool)
         if class_name == "AgentUserInterface":
             tool.class_instance.wait_for_user_response = False
-            if function_name in history_functions:
-                continue
+        # These four notification-history helpers are intentionally hidden
+        # from the actor schema.  Filter by the authoritative function name,
+        # not only by the class label: the live ARE/plugin path can wrap an AUI
+        # tool and change its class identity while retaining the same helper.
+        # The previous class-qualified check allowed wrapped helpers through,
+        # producing 101 live tools although the frozen fixture contained 99.
+        if function_name in history_functions:
+            continue
         app_tools.append(tool)
     allowlist = {name.strip() for name in os.environ.get("GAIA2_E2E_TOOL_ALLOWLIST", "").split(",") if name.strip()}
     if allowlist:
@@ -826,7 +1244,8 @@ def _native_run_with_agent(
     tool_map = {tool._public_name: tool for tool in app_tools}
     if len(tool_map) != len(app_tools) or any(not isinstance(name, str) or not name for name in tool_map):
         raise HookProtocolError("invalid_public_tool_identity")
-    openai_tools = [_native_openai_tool(tool) for tool in app_tools]
+    openai_tools = [_compact_provider_tool_schema(tool, _native_openai_tool(tool)) for tool in app_tools]
+    inventory = _tool_inventory(app_tools, openai_tools)
     finish_tool = next((tool for tool in app_tools if _canonical(tool) == ("AgentUserInterface", "send_message_to_user")), None)
     system = (
         "You are an agent inside the official Meta Agents Research Environments. "
@@ -863,25 +1282,145 @@ def _native_run_with_agent(
     failure = None
     delegation_coordinator = None
     a2a_client = None
+    a2a_pool = None
     a2a_transport_enabled = all(
         isinstance(os.environ.get(key), str) and bool(os.environ.get(key))
         for key in ("GAIA2_A2A_PIPE_HOST", "GAIA2_A2A_PIPE_PORT",
                     "GAIA2_A2A_PIPE_CHANNEL", "GAIA2_A2A_PIPE_BINDING",
                     "GAIA2_A2A_WORKSPACE")
     )
+    # The official private-pipe path has no parent coordinator object to
+    # construct these capabilities for it.  Keep the bindings in this
+    # adapter-owned closure: the child scope returned by the trusted Node
+    # facade is the only input admitted to either factory, and the parent
+    # queue remains the only notification producer.
+    a2a_registry = (
+        base_notification_binding.registry
+        if a2a_transport_enabled and base_notification_binding is not None
+        else ScopedNotificationOriginRegistry() if a2a_transport_enabled else None
+    )
+    a2a_lifecycle = None
+    a2a_notification_pump = None
+    a2a_pending_notifications = []
+    a2a_stop_observed = False
+
+    def _a2a_notification_reader_factory(scope):
+        nonlocal notification_binding, a2a_lifecycle
+        if a2a_registry is None or a2a_lifecycle is not None:
+            raise HookProtocolError("a2a_notification_lifecycle_reuse")
+        try:
+            lifecycle = ScopedChildNotificationLifecycle(
+                registry=a2a_registry, scope=dict(scope), time_manager=env.time_manager)
+        except HookProtocolError:
+            raise
+        except BaseException:
+            raise HookProtocolError("a2a_notification_lifecycle_bind_failed") from None
+        a2a_lifecycle = lifecycle
+        # Future official messages are published into this exact child scope
+        # by the parent drain loop; the child receives its own read cursor.
+        notification_binding = BridgeNotificationBinding.from_lifecycle(lifecycle)
+        return lifecycle.reader
+
+    def _a2a_notification_pump_factory(scope):
+        nonlocal a2a_notification_pump
+        lifecycle, binding = a2a_lifecycle, notification_binding
+        if (lifecycle is None or binding is None or binding.lifecycle is not lifecycle
+                or a2a_notification_pump is not None or a2a_pending_notifications):
+            raise HookProtocolError("a2a_notification_pump_lifecycle_invalid")
+
+        def read_revision():
+            return revision
+
+        def write_revision(value):
+            nonlocal revision
+            if type(value) is not int or value < revision:
+                raise HookProtocolError("a2a_notification_pump_revision_invalid")
+            revision = value
+
+        pump = _A2AParentNotificationPump(env=env, lifecycle=lifecycle,
+            binding=binding, scope=dict(scope),
+            is_current=lambda: a2a_lifecycle is lifecycle and notification_binding is binding,
+            revision_reader=read_revision, revision_writer=write_revision,
+            pending_messages=a2a_pending_notifications)
+        a2a_notification_pump = pump
+        return pump
+
+    def _a2a_deadline_factory(request_id):
+        # This is an OS monotonic deadline, intentionally independent of the
+        # ARE simulation clock.  The duration is fixed by the adapter and is
+        # never selected by Actor/model payloads or environment input.
+        return ScopedOSDeadline(scope_id=request_id, duration_seconds=600.0,
+                                monotonic_clock=time.monotonic)
+
+    def _close_a2a_lifecycle(reason: str) -> None:
+        nonlocal notification_binding, a2a_lifecycle, a2a_notification_pump, a2a_stop_observed
+        lifecycle = a2a_lifecycle
+        if lifecycle is None:
+            return
+        try:
+            if a2a_notification_pump is not None:
+                a2a_stop_observed = a2a_notification_pump("child_close") or a2a_stop_observed
+        except BaseException:
+            raise HookProtocolError("a2a_notification_lifecycle_close_failed") from None
+        finally:
+            try:
+                lifecycle.close("stop" if a2a_stop_observed else reason)
+            finally:
+                a2a_lifecycle = None
+                a2a_notification_pump = None
+                if notification_binding is not None and notification_binding.lifecycle is lifecycle:
+                    notification_binding = base_notification_binding
     _emit_runtime_event("official_run_started", scenarioId=scenario_id, toolCount=len(app_tools),
                         executionMode="live_plugin_host", generationTimeMode=simulated_generation_time_mode,
                         generationMeasurement="unavailable_official_litellm_metadata" if simulated_generation_time_mode == "measured" else "fixed_one_second",
                         maxActions=max_actions, turnLimit=turn_limit,
                         officialEntryVerified=entry_handshake is not None,
                         officialEntryHash=entry_handshake["entrySha256"] if entry_handshake is not None else None)
+    _emit_runtime_event("official_tool_inventory", **inventory)
+    if os.environ.get("GAIA2_TOOL_SCHEMA_DIAGNOSTIC") == "1":
+        # This mode is strictly diagnostic: emit the live registry and stop
+        # before any model request or native tool execution.  It cannot create
+        # a benchmark result or silently weaken the original task path.
+        raise HookProtocolError("tool_schema_diagnostic_stop")
 
     try:
         # The factory is trusted adapter configuration.  It can construct a
         # per-run coordinator, but no child is created until an actual
         # AppAgent action passes the live parent before_tool gate below.
         delegation_coordinator = _delegation_coordinator_for_run(env, scenario_id)
+        if a2a_transport_enabled and delegation_coordinator is None:
+            # Prepare the complete, authoritative ARE wrapper inventory before
+            # the Actor runs. App selection is not a model-provided capability,
+            # and the parent registry is configured only once for this run.
+            from gaia2_official_a2a import connect_official_a2a_pool
+            wrapped_apps = {}
+            for native_tool in app_tools:
+                if _canonical(native_tool) != ("AppAgent", "expert_agent"):
+                    continue
+                app = native_tool.class_instance
+                app_name = getattr(app, "name", None)
+                if (not isinstance(app_name, str) or not app_name
+                        or env.apps.get(app_name) is not app or app_name in wrapped_apps):
+                    raise HookProtocolError("a2a_app_inventory_invalid")
+                wrapped_apps[app_name] = app
+            a2a_pool = connect_official_a2a_pool(
+                env=env, apps=[wrapped_apps[name] for name in sorted(wrapped_apps)],
+                scenario_id=scenario_id, workspace=os.environ["GAIA2_A2A_WORKSPACE"],
+                model=os.environ.get("GAIA2_A2A_MODEL", model),
+                provider=os.environ.get("GAIA2_A2A_PROVIDER") or provider or "openai",
+                endpoint=os.environ.get("GAIA2_A2A_ENDPOINT") or endpoint or "",
+                api_key=os.environ.get("OPENAI_API_KEY", ""),
+                notification_reader_factory=_a2a_notification_reader_factory,
+                notification_pump_factory=_a2a_notification_pump_factory,
+                require_notification_pump=True,
+                require_generation_time=True,
+                deadline_factory=_a2a_deadline_factory,
+                model_event_emitter=_emit_runtime_event,
+            )
         while True:
+            if a2a_stop_observed:
+                termination_reason = "environment_stop"
+                break
             revision, changed, stopped = _drain_notifications(env, messages, revision,
                                                               binding=notification_binding)
             if stopped:
@@ -913,10 +1452,28 @@ def _native_run_with_agent(
             context_text = context if isinstance(context, str) else json.dumps(context, ensure_ascii=False, sort_keys=True, default=str)
             correction_consumption = _correction_consumption(context_text)
             dynamic_message = {"role": "system", "content": "Live Capybara dynamic context:\n" + context_text}
-            actor_input = [_actor_messages(messages)[0], dynamic_message, *_actor_messages(messages)[1:]]
+            actor_messages = _actor_messages(messages)
+            actor_input = [actor_messages[0], dynamic_message, *actor_messages[1:]]
+            actor_input, compaction = _compact_model_input(actor_input, openai_tools)
+            changed_observation_views = _mark_compacted_observation_views(messages, compaction)
+            if compaction["compacted"]:
+                _emit_runtime_event("model_context_compacted", turn=iteration,
+                                    originalBytes=compaction["originalBytes"],
+                                    compactedBytes=compaction["compactedBytes"],
+                                    originalMessageCount=compaction["originalMessageCount"],
+                                    compactedMessageCount=compaction["compactedMessageCount"],
+                                    compactionReason=compaction["compactionReason"],
+                                    hiddenMessageCount=compaction["hiddenMessageCount"],
+                                    retainedMessageCount=compaction["retainedMessageCount"],
+                                    truncatedToolResults=compaction["truncatedToolResults"],
+                                    hiddenToolCallIds=compaction["hiddenToolCallIds"],
+                                    truncatedToolCallIds=compaction["truncatedToolCallIds"],
+                                    incompleteObservationIds=changed_observation_views)
             _emit_runtime_event("dynamic_context_injected", turn=iteration, contextHash=before["contextHash"],
                                 injectedContextHash=hashlib.sha256(context_text.encode("utf-8")).hexdigest(),
                                 actorInputHash=_stable_hash(actor_input),
+                                modelInputBytes=compaction["compactedBytes"],
+                                modelContextCompacted=compaction["compacted"],
                                 hookRevision=before["revision"], clockNow=env.time_manager.time(), revision=revision,
                                 **correction_consumption)
             _emit_runtime_event("model_request", turn=iteration, toolCount=len(openai_tools))
@@ -1055,26 +1612,18 @@ def _native_run_with_agent(
                             # model/native gates remain on the trusted Node
                             # side of the private pipe; Actor JSON supplies
                             # only the already-gated task argument.
-                            from gaia2_official_a2a import connect_official_a2a
                             app = env.apps.get(action["resourceKey"])
                             if app is None or getattr(app, "name", None) != action["resourceKey"]:
                                 raise HookProtocolError("a2a_app_binding_missing")
-                            if a2a_client is None:
-                                a2a_client = connect_official_a2a(
-                                    env=env, app=app, scenario_id=scenario_id,
-                                    workspace=os.environ["GAIA2_A2A_WORKSPACE"],
-                                    model=os.environ.get("GAIA2_A2A_MODEL", model),
-                                    provider=os.environ.get("GAIA2_A2A_PROVIDER") or provider or "openai",
-                                    endpoint=os.environ.get("GAIA2_A2A_ENDPOINT") or endpoint or "",
-                                    api_key=os.environ.get("OPENAI_API_KEY", ""),
-                                )
-                            elif a2a_client.app_name != app.name:
-                                raise HookProtocolError("a2a_app_rebind_forbidden")
-                            a2a_client.begin_child(parent_response=before_tool,
-                                                    task=action["arguments"]["task"])
-                            runner = a2a_client.child_runner()
+                            if a2a_pool is None:
+                                raise HookProtocolError("a2a_app_pool_missing")
+                            a2a_client = a2a_pool.client_for(app.name)
                             child_completed = False
+                            child_runtime = None
                             try:
+                                a2a_client.begin_child(parent_response=before_tool,
+                                                        task=action["arguments"]["task"])
+                                runner = a2a_client.child_runner()
                                 child_result = runner.run()
                                 snapshot = runner.snapshot()
                                 if (type(child_result) is not str or type(snapshot) is not dict
@@ -1084,9 +1633,26 @@ def _native_run_with_agent(
                                 child_completed = True
                             finally:
                                 try:
-                                    runner.close()
+                                    if runner is not None:
+                                        try:
+                                            child_runtime = {
+                                                "identity": a2a_client.child_evidence_identity(),
+                                                "manifest": a2a_client.native_manifest(),
+                                                "snapshot": runner.snapshot(),
+                                            }
+                                        finally:
+                                            runner.close()
                                 finally:
-                                    a2a_client.reset_child(completed=child_completed)
+                                    try:
+                                        a2a_client.reset_child(completed=child_completed)
+                                    finally:
+                                        try:
+                                            _close_a2a_lifecycle(
+                                                "completed" if child_completed else "failed")
+                                        finally:
+                                            if child_runtime is not None:
+                                                _capture_a2a_child_runtime(child_runtime,
+                                                    workspace=os.environ["GAIA2_A2A_WORKSPACE"])
                         if type(child_result) is not str:
                             raise TypeError("child_result_not_string")
                     except BaseException as error:
@@ -1111,7 +1677,14 @@ def _native_run_with_agent(
                             try:
                                 a2a_client.reset_child(completed=False)
                             except BaseException:
-                                pass
+                                # A missing trusted cancellation ACK leaves
+                                # child authority unresolved: never convert
+                                # it to an evaluated blocked/business result.
+                                raise HookProtocolError("a2a_child_cancel_failed") from None
+                        try:
+                            _close_a2a_lifecycle("failed")
+                        except BaseException:
+                            raise HookProtocolError("a2a_notification_lifecycle_close_failed") from None
                         result = {"status": "blocked", "reason": "delegation_failed",
                                   "executed": False, "requiredAction": "replan"}
                         outcome = {"status": "failed_before_execution", "complete": True,
@@ -1214,13 +1787,26 @@ def _native_run_with_agent(
                     _emit_runtime_event("tool_call_completed", turn=iteration, callId=call_id, function=name,
                                         canonicalName=action["canonicalName"], status=outcome["status"],
                                         ok=outcome["status"] == "succeeded", resultHash=result_hash)
+                observation = _tool_observation_metadata(action, outcome, env.time_manager.time())
+                message_metadata = {"tool_call_id": call_id, "name": name}
+                if observation is not None:
+                    message_metadata["observation"] = observation
                 messages.append(_new_message("tool", json.dumps(result, default=str, ensure_ascii=False, allow_nan=False),
-                                             tool_call_id=call_id, name=name))
+                                             **message_metadata))
                 revision += 1
+                if a2a_pending_notifications:
+                    # Child pump already incremented the revision. Publish
+                    # these parent messages only after this tool's result.
+                    messages.extend(a2a_pending_notifications)
+                    a2a_pending_notifications.clear()
+                    active_turn = True
                 if outcome["executed"]:
                     after = _invoke_hook(client, "after_tool", env, messages, revision, iteration, action=action, outcome=outcome)
                     if after["decision"]["action"] != "allow":
                         raise HookProtocolError("after_tool_rejected")
+                if a2a_stop_observed:
+                    termination_reason = "environment_stop"
+                    break
                 if outcome["status"] == "succeeded" and action["effect"] == "finish":
                     usage["completedTurns"] += 1
                     active_turn = False
@@ -1228,7 +1814,7 @@ def _native_run_with_agent(
                     if turn_limit is not None and usage["completedTurns"] >= turn_limit:
                         termination_reason = "conversation_turn_limit"
                         break
-            if termination_reason == "conversation_turn_limit":
+            if termination_reason in ("conversation_turn_limit", "environment_stop"):
                 break
     except BaseException as error:
         failure = error
@@ -1237,9 +1823,21 @@ def _native_run_with_agent(
         raise
     finally:
         delegation_close_failed = False
-        if a2a_client is not None:
+        if a2a_pool is not None:
+            # Keep the A2A boundary answer-blind but auditable.  The snapshot
+            # records only immutable identity, guard binding and usage state;
+            # it never includes task text, model content or provider data.
             try:
-                a2a_client.close()
+                snapshot = a2a_pool.snapshot()
+                if isinstance(snapshot, dict):
+                    _emit_runtime_event("a2a_client_pool_snapshot", **snapshot)
+                    for client_snapshot in snapshot.get("clients", []):
+                        if client_snapshot.get("appId") in snapshot.get("usedAppIds", []):
+                            _emit_runtime_event("a2a_client_snapshot", **client_snapshot)
+            except BaseException:
+                _emit_runtime_event("a2a_client_snapshot_unavailable")
+            try:
+                a2a_pool.close()
             except BaseException:
                 delegation_close_failed = True
                 if failure is None:

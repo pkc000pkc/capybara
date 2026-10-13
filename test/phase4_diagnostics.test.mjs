@@ -371,6 +371,16 @@ test('failure causes retain both model SDK error and evidence gates without copy
   assert.equal(legacy.errorCode, null)
 })
 
+test('adapter and native-result boundaries remain explicit technical diagnostics', () => {
+  const adapter = buildFailureDiagnostics({ processResult: { spawnError: { code: 'ADAPTER_FAILURE' }, adapterFailure: { code: 'adapter_exception', errorType: 'Error' } } })
+  assert.deepEqual(adapter.causes, [
+    { stage: 'adapter', code: 'adapter_failure' },
+    { stage: 'process_supervision', code: 'process_spawn_failed' },
+  ])
+  const native = buildFailureDiagnostics({ processResult: { loggingError: 'native_result_missing' } })
+  assert.deepEqual(native.causes, [{ stage: 'evidence_gate', code: 'native_result_missing' }])
+})
+
 test('additional diagnostics do not change execution failure classification priority', () => {
   const events = [modelFailure()]
   const report = { evaluationComplete: true, businessPassed: false, hasException: true, evidenceGateCode: 'missing_tool_gate_evidence' }
@@ -397,6 +407,20 @@ test('additional diagnostics do not change execution failure classification prio
   const correction = classifyExecutionFailure({ events: [modelFailure({ modelRole: 'correction' })] })
   assert.equal(correction.modelRole, null)
   assert.equal(correction.diagnostic.causes[0].modelRole, 'correction')
+})
+
+test('child model diagnostics preserve the fixed role without exposing private request data', () => {
+  const failure = modelFailure({ modelRole: 'child_actor', category: 'transport_error', retryable: true, httpStatus: 503 })
+  const diagnostic = buildFailureDiagnostics({ events: [failure] })
+  assert.equal(diagnostic.causes[0].modelRole, 'child_actor')
+  assert.equal(JSON.stringify(diagnostic).includes('SECRET'), false)
+  const classified = classifyExecutionFailure({ events: [failure] })
+  assert.equal(classified.modelRole, 'child_actor')
+  assert.equal(classified.retryable, true)
+  assert.equal(buildFailureDiagnostics({ events: [{ ...failure, modelRole: 'SECRET_CHILD_ROLE' }] }).causes[0].modelRole, null)
+  const recovered = [failure, { type: 'model_request_succeeded', requestId: failure.requestId, modelRole: 'child_actor' }]
+  assert.deepEqual(buildFailureDiagnostics({ events: recovered }).causes, [])
+  assert.equal(classifyExecutionFailure({ events: recovered, report: { evaluationComplete: true, businessPassed: false } }).category, 'business_failure')
 })
 
 test('recovered model failures do not displace later business failure or the remaining evidence gate', () => {

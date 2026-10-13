@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { digest, fileDigest, readJson } from '../src/phase0_run.mjs'
-import { atomicJson, runFrozenBatch } from '../src/phase1_runner.mjs'
+import { atomicJson, runFrozenBatch, selectFrozenTaskIds } from '../src/phase1_runner.mjs'
+import { runManifestCli } from '../src/phase1_cli.mjs'
 import { readProcessIdentity } from '../src/phase1_process.mjs'
 import { fixtureFromScenario, readNativeResult, resolveModelRetrySettings, resolveTransportProvider } from '../src/phase1_official.mjs'
 import { canonicalScenarioHash } from '../src/phase0_dataset.mjs'
@@ -19,6 +20,15 @@ function plan(phases = ['standard', 'standard'], mode = 'internal_pass5') {
 }
 function good({ task }, passed = true) { return { processResult: { exitCode: 0 }, report: { scenarioId: task.scenarioId, runNumber: task.runNumber, evaluationComplete: true, businessPassed: passed, hasException: false }, events: [], artifacts: [] } }
 function options(root, extra = {}) { return { root, manifest: plan(), settings, executeTask: good, ...extra } }
+function enhancedPlan() {
+  const { manifestHash, ...base } = plan(['noise'], 'official_submission')
+  const template = base.tasks[0]
+  base.tasks = ['agent2agent', 'noise'].flatMap(phase => Array.from({ length: 5 }, (_, scenarioIndex) => [1, 2, 3].map(runNumber => {
+    const executionId = `${phase}-scenario-${scenarioIndex}-run-${runNumber}`
+    return { ...template, phase, scenarioId: `scenario-${scenarioIndex}`, runNumber, executionId, outputDir: `runs/controlled/outputs/${executionId}`, fixtureDir: `runs/controlled/fixtures/${executionId}`, workspaceDir: `runs/controlled/workspaces/${executionId}` }
+  })).flat())
+  return { ...base, manifestHash: digest(base) }
+}
 
 test('official transport maps ARE local provider labels to explicit OpenAI LiteLLM transport', () => {
   assert.equal(resolveTransportProvider('local'), 'openai')
@@ -39,12 +49,146 @@ test('official runner can select one enhanced phase without executing other plan
   } finally { clean(root) }
 })
 
+test('official exact execution selection hits only the third Noise scenario run 2 without changing the plan', async () => {
+  const root = project(), manifest = enhancedPlan(), onlyExecutionId = 'noise-scenario-2-run-2', before = JSON.stringify(manifest), calls = []
+  try {
+    const report = await runFrozenBatch(options(root, { manifest, onlyExecutionId, onlyPhase: 'noise', onlyRunNumber: 2, executeTask: args => { calls.push(args.task.executionId); return good(args) } }))
+    assert.deepEqual(calls, [onlyExecutionId])
+    assert.equal(report.onlyExecutionId, onlyExecutionId)
+    assert.equal(report.onlyPhase, 'noise')
+    assert.equal(report.onlyRunNumber, 2)
+    assert.equal(report.selectedExecutions, 1)
+    assert.equal(report.selectedCompleted, 1)
+    assert.equal(report.selectedEvaluationComplete, true)
+    assert.equal(report.selectedTechnicalComplete, true)
+    assert.equal(report.executedThisInvocation, 1)
+    assert.equal(report.plannedInitialExecutions, 30)
+    assert.equal(report.evaluatedInitialExecutions, 1)
+    assert.equal(report.counts.pending, 29)
+    assert.equal(report.status, 'incomplete')
+    assert.equal(report.officialSubmissionReady, false)
+    const state = readJson(join(root, manifest.stateFile))
+    assert.deepEqual(state.tasks.map(record => record.executionId), manifest.tasks.map(task => task.executionId))
+    assert.equal(state.tasks.filter(record => record.sessions.length === 0 && record.status === 'pending').length, 29)
+    assert.equal(JSON.stringify(manifest), before)
+    assert.deepEqual([...selectFrozenTaskIds(manifest, { onlyExecutionId })], [onlyExecutionId])
+  } finally { clean(root) }
+})
+
+test('official exact selection rejects empty, unknown, non-unique and conflicting identities before creating state', async () => {
+  const root = project(), manifest = enhancedPlan(), onlyExecutionId = 'noise-scenario-2-run-2'
+  let calls = 0
+  try {
+    const executeTask = args => { calls++; return good(args) }
+    for (const invalid of ['', ' ', ` ${onlyExecutionId}`, `${onlyExecutionId} `, 'unknown-slot', true, 2, []]) {
+      await assert.rejects(runFrozenBatch(options(root, { manifest, onlyExecutionId: invalid, executeTask })), /onlyExecutionId/)
+    }
+    for (const conflict of [{ onlyPhase: 'agent2agent' }, { onlyRunNumber: 1 }, { onlyPhase: 'noise', onlyRunNumber: 3 }]) {
+      await assert.rejects(runFrozenBatch(options(root, { manifest, onlyExecutionId, ...conflict, executeTask })), /conflicts/)
+    }
+    const duplicated = { ...manifest, tasks: [...manifest.tasks, manifest.tasks.find(task => task.executionId === onlyExecutionId)] }
+    assert.throws(() => selectFrozenTaskIds(duplicated, { onlyExecutionId }), /exactly one planned task/)
+    assert.equal(calls, 0)
+    assert.equal(existsSync(join(root, manifest.runRoot)), false)
+    assert.equal(existsSync(join(root, manifest.stateFile)), false)
+  } finally { clean(root) }
+})
+
+test('shared official CLI accepts the exact selector and rejects empty, missing or duplicate values without execution', async () => {
+  const root = project(), onlyExecutionId = 'noise-scenario-2-run-2'
+  try {
+    await assert.rejects(runManifestCli({ root, entrypoint: 'e2e', argv: ['--only-execution-id', onlyExecutionId], env: {} }), /Frozen manifest required/)
+    for (const argv of [['--only-execution-id'], ['--only-execution-id', ''], ['--only-execution-id', '--execute'], ['--only-execution-id', onlyExecutionId, '--only-execution-id', onlyExecutionId]]) {
+      await assert.rejects(runManifestCli({ root, entrypoint: 'e2e', argv, env: {} }), /invalid argument --only-execution-id/)
+    }
+    assert.equal(existsSync(join(root, 'runs')), false)
+  } finally { clean(root) }
+})
+
+test('official exact selection never reruns a completed business zero or executes another pending slot', async () => {
+  const root = project(), manifest = enhancedPlan(), onlyExecutionId = 'noise-scenario-2-run-2', calls = []
+  const executeTask = args => { calls.push(args.task.executionId); return good(args, false) }
+  try {
+    await runFrozenBatch(options(root, { manifest, onlyExecutionId, maxTasks: 1, executeTask }))
+    const record = readJson(join(root, manifest.stateFile)).tasks.find(task => task.executionId === onlyExecutionId)
+    const resultBefore = readFileSync(join(root, record.resultPath), 'utf8')
+    for (const retryInfrastructure of [false, true]) {
+      const report = await runFrozenBatch(options(root, { manifest, onlyExecutionId, resume: true, retryInfrastructure, executeTask }))
+      assert.equal(report.executedThisInvocation, 0)
+      assert.equal(report.selectedCompleted, 1)
+      assert.equal(report.selectedEvaluationComplete, true)
+      assert.equal(report.counts.pending, 29)
+      assert.equal(report.businessFailures, 1)
+      assert.deepEqual(readJson(join(root, manifest.stateFile)).tasks.find(task => task.executionId === onlyExecutionId), record)
+      assert.equal(readFileSync(join(root, record.resultPath), 'utf8'), resultBefore)
+    }
+    assert.deepEqual(calls, [onlyExecutionId])
+    assert.equal(readJson(join(root, record.resultPath)).score, 0)
+  } finally { clean(root) }
+})
+
+test('official exact selection never retries a 400 technical terminal even with retry-infrastructure', async () => {
+  const root = project(), manifest = enhancedPlan(), onlyExecutionId = 'noise-scenario-2-run-2', calls = []
+  const executeTask = args => {
+    calls.push(args.task.executionId)
+    return { processResult: { exitCode: 0 }, report: { hasException: true }, events: [{ type: 'model_request_failed', requestId: 'bad-config', category: 'configuration_error', retryable: false, requestAttempt: 1, httpStatus: 400 }] }
+  }
+  try {
+    await runFrozenBatch(options(root, { manifest, onlyExecutionId, executeTask }))
+    const record = readJson(join(root, manifest.stateFile)).tasks.find(task => task.executionId === onlyExecutionId)
+    const resultBefore = readFileSync(join(root, record.resultPath), 'utf8')
+    for (const retryInfrastructure of [false, true]) {
+      const report = await runFrozenBatch(options(root, { manifest, onlyExecutionId, resume: true, retryInfrastructure, executeTask }))
+      assert.equal(report.executedThisInvocation, 0)
+      assert.equal(report.selectedExecutions, 1)
+      assert.equal(report.selectedCompleted, 0)
+      assert.equal(report.selectedEvaluationComplete, false)
+      assert.equal(report.selectedTechnicalComplete, true)
+      assert.equal(report.counts.terminal_failure, 1)
+      assert.equal(report.counts.pending, 29)
+      assert.equal(report.businessFailures, 0)
+      assert.equal(report.officialSubmissionReady, false)
+      assert.deepEqual(readJson(join(root, manifest.stateFile)).tasks.find(task => task.executionId === onlyExecutionId), record)
+      assert.equal(readFileSync(join(root, record.resultPath), 'utf8'), resultBefore)
+    }
+    assert.deepEqual(calls, [onlyExecutionId])
+    assert.equal(readJson(join(root, record.resultPath)).score, null)
+  } finally { clean(root) }
+})
+
+test('official exact selection preserves retry-infrastructure opt-in and clean session lineage', async () => {
+  const root = project(), manifest = enhancedPlan(), onlyExecutionId = 'noise-scenario-2-run-2', calls = []
+  try {
+    const failed = args => {
+      calls.push(args.task.executionId)
+      return { processResult: { exitCode: 0 }, report: { hasException: true }, events: [{ type: 'model_request_failed', requestId: 'rate-limited', category: 'rate_limit', retryable: true, retryExhausted: true, httpStatus: 429 }] }
+    }
+    await runFrozenBatch(options(root, { manifest, onlyExecutionId, executeTask: failed }))
+    const before = readJson(join(root, manifest.stateFile)).tasks.find(task => task.executionId === onlyExecutionId).sessions[0]
+    const goodTask = args => { calls.push(args.task.executionId); return good(args) }
+    const blocked = await runFrozenBatch(options(root, { manifest, onlyExecutionId, resume: true, executeTask: goodTask }))
+    assert.equal(blocked.executedThisInvocation, 0)
+    assert.equal(blocked.selectedTechnicalComplete, false)
+    const recovered = await runFrozenBatch(options(root, { manifest, onlyExecutionId, resume: true, retryInfrastructure: true, executeTask: goodTask }))
+    assert.equal(recovered.executedThisInvocation, 1)
+    assert.equal(recovered.selectedCompleted, 1)
+    assert.equal(recovered.totalSessions, 2)
+    assert.equal(recovered.counts.pending, 29)
+    assert.deepEqual(calls, [onlyExecutionId, onlyExecutionId])
+    const sessions = readJson(join(root, manifest.stateFile)).tasks.find(task => task.executionId === onlyExecutionId).sessions
+    assert.equal(sessions[1].parentSessionId, before.sessionId)
+    assert.equal(sessions[1].recoveryKind, 'clean_environment_restart_not_ARE_checkpoint')
+    assert.notEqual(sessions[1].workspaceDir, before.workspaceDir)
+  } finally { clean(root) }
+})
+
 test('phase1 completed tasks including judged business failures are never rerun', async () => {
   const root = project(); let calls = 0
   try {
     const executeTask = async args => { calls++; return good(args, false) }
     const first = await runFrozenBatch(options(root, { executeTask }))
     assert.equal(first.status, 'evaluation_complete'); assert.equal(first.businessFailures, 2)
+    assert.equal(first.onlyExecutionId, null); assert.equal(first.selectedExecutions, 2)
     const resumed = await runFrozenBatch(options(root, { executeTask, resume: true }))
     assert.equal(calls, 2); assert.equal(resumed.executedThisInvocation, 0)
     assert.equal(resumed.officialSubmissionReady, false)
@@ -52,6 +196,45 @@ test('phase1 completed tasks including judged business failures are never rerun'
     assert.equal(heartbeat.terminal, true); assert.equal(heartbeat.status, 'evaluation_complete')
     assert.ok(heartbeat.finishedAt); assert.equal(heartbeat.reportPath, 'runs/controlled/batch-report.json')
   } finally { clean(root) }
+})
+
+test('phase1 valid official judgment is not replaced by a child transport failure', async () => {
+  const root = project(), manifest = plan(['agent2agent'], 'official_submission')
+  let calls = 0
+  try {
+    const executeTask = args => {
+      calls++
+      return { ...good(args, false), events: [{ type: 'model_request_failed', requestId: 'child-request', modelRole: 'child_actor', category: 'transport_error', retryable: true, retryExhausted: true, requestAttempt: 6, httpStatus: 503, cumulativeWaitSeconds: 62 }] }
+    }
+    const report = await runFrozenBatch(options(root, { manifest, executeTask }))
+    assert.equal(report.counts.completed, 1)
+    assert.equal(report.counts.retry_pending, 0)
+    assert.equal(report.businessFailures, 1)
+    const state = readJson(join(root, manifest.stateFile))
+    const result = readJson(join(root, state.tasks[0].resultPath))
+    assert.equal(result.evaluationComplete, true)
+    assert.equal(result.score, 0)
+    assert.equal(result.failure.category, 'business_failure')
+    const resumed = await runFrozenBatch(options(root, { manifest, executeTask, resume: true, retryInfrastructure: true }))
+    assert.equal(resumed.executedThisInvocation, 0)
+    assert.equal(calls, 1)
+  } finally { clean(root) }
+})
+
+test('phase1 unevaluated child model failures keep technical classification and role', async () => {
+  for (const [httpStatus, category, retryable, stateStatus] of [[503, 'transport_error', true, 'retry_pending'], [400, 'configuration_error', false, 'terminal_failure']]) {
+    const root = project(), manifest = plan(['agent2agent'], 'official_submission')
+    try {
+      const report = await runFrozenBatch(options(root, { manifest, executeTask: () => ({ processResult: { exitCode: 1 }, report: { hasException: true }, events: [{ type: 'model_request_failed', requestId: 'child-request', modelRole: 'child_actor', httpStatus, category, retryable, retryExhausted: retryable, requestAttempt: retryable ? 6 : 1 }] }) }))
+      assert.equal(report.counts[stateStatus], 1)
+      assert.equal(report.businessFailures, 0)
+      const state = readJson(join(root, manifest.stateFile))
+      assert.equal(state.tasks[0].failure.modelRole, 'child_actor')
+      const result = readJson(join(root, state.tasks[0].resultPath))
+      assert.equal(result.evaluationComplete, false)
+      assert.equal(result.score, null)
+    } finally { clean(root) }
+  }
 })
 
 test('phase1 run-number selection preserves all 25 planned tasks and resumes selected tasks only', async () => {
@@ -81,9 +264,35 @@ test('phase1 production hook binding cannot accept a judged result without live 
   const manifest = { ...base, manifestHash: digest(base) }
   try {
     const report = await runFrozenBatch(options(root, { manifest }))
-    assert.equal(report.evaluatedInitialExecutions, 0); assert.equal(report.businessSuccesses, 0); assert.equal(report.counts.retry_pending, 1)
+    assert.equal(report.evaluatedInitialExecutions, 0); assert.equal(report.businessSuccesses, 0); assert.equal(report.counts.terminal_failure, 2); assert.equal(report.technicalFailures, 2); assert.equal(report.selectedTechnicalComplete, true)
     const state = readJson(join(root, manifest.stateFile)), result = readJson(join(root, state.tasks[0].resultPath))
     assert.equal(result.runtimeEvidenceRequired, true); assert.equal(result.evaluationComplete, false); assert.equal(result.score, null); assert.equal(result.realHooksReady, false)
+  } finally { clean(root) }
+})
+
+test('phase1 terminal technical failure advances the queue without becoming a business result', async () => {
+  const root = project(), calls = []
+  try {
+    const executeTask = async args => {
+      calls.push(args.task.executionId)
+      if (args.task.executionId === 'task-0') return { processResult: { exitCode: 0 }, report: { hasException: true }, events: [{ type: 'model_request_failed', requestId: 'bad-config', category: 'configuration_error', retryable: false, retryExhausted: true, httpStatus: 400 }] }
+      return good(args)
+    }
+    const first = await runFrozenBatch(options(root, { executeTask }))
+    assert.deepEqual(calls, ['task-0', 'task-1'])
+    assert.equal(first.status, 'incomplete')
+    assert.equal(first.counts.terminal_failure, 1)
+    assert.equal(first.counts.completed, 1)
+    assert.equal(first.businessFailures, 0)
+    assert.equal(first.technicalFailures, 1)
+    assert.equal(first.selectedTechnicalComplete, true)
+    assert.equal(first.submissionBlockedReason, 'non_retryable_technical_failures')
+    const state = readJson(join(root, plan().stateFile))
+    assert.equal(state.tasks[0].status, 'terminal_failure')
+    assert.equal(state.tasks[0].failure.category, 'configuration_error')
+    const resumed = await runFrozenBatch(options(root, { executeTask, resume: true }))
+    assert.equal(resumed.executedThisInvocation, 0)
+    assert.deepEqual(calls, ['task-0', 'task-1'])
   } finally { clean(root) }
 })
 

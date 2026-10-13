@@ -1,4 +1,4 @@
-import copy, hashlib, json, os, socket, sys, tempfile, threading, unittest
+import copy, hashlib, io, json, os, socket, sys, tempfile, threading, unittest
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -235,7 +235,14 @@ def hook_server(policy=None,corrupt=None,after_hook=None):
                 request=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 assert request['executionId']=='controlled-execution'
                 assert request['sessionId']=='controlled-session'
-                assert all(set(message)<={'role','content','id','name','toolCallId','requestId'} for message in request['messages'])
+                assert all(set(message)<={'role','content','id','name','toolCallId','requestId','observation','notificationType'} for message in request['messages'])
+                for message in request['messages']:
+                    if 'observation' in message:
+                        assert message['role']=='tool'
+                        assert message['observation']['actionId']==message['toolCallId']
+                    if 'notificationType' in message:
+                        assert message['role']=='user'
+                        assert message['notificationType'] in ('USER_MESSAGE','ENVIRONMENT_NOTIFICATION')
                 assert all(isinstance(message['content'],str) for message in request['messages'])
                 assert request.get('action','absent') is not None
                 assert request.get('outcome','absent') is not None
@@ -423,6 +430,105 @@ class Tests(unittest.TestCase):
             handle=fs.open('/Documents/news/target.txt', 'r')
             bridge._actor_visible_tool_result(handle)
             self.assertTrue(handle.closed)
+
+    def test_01d_windows_fallback_serialization_does_not_probe_remote_metadata(self):
+        if os.name != 'nt':
+            self.skipTest('Windows fallback compatibility is host-specific')
+        bridge._install_windows_fallback_compatibility()
+
+        class RemoteFile:
+            def __init__(self):
+                self.opened=[]
+            def open(self, path, mode='rb'):
+                self.opened.append(path)
+                return io.BytesIO(b'localised payload')
+            def exists(self, path):
+                raise AssertionError('serialization must not call remote exists/info')
+            def info(self, path):
+                raise AssertionError('serialization must not call remote exists/info')
+            def isfile(self, path):
+                raise AssertionError('serialization must not call remote exists/info')
+
+        state={'files':{'name':'','type':'directory','children':[
+            {'name':'Documents','type':'directory','children':[
+                {'name':'news','type':'directory','children':[
+                    {'name':'target.txt','type':'file'}]}]}]}}
+        with tempfile.TemporaryDirectory() as fallback, tempfile.TemporaryDirectory() as sandbox:
+            target=Path(fallback)/'Documents'/'news'/'target.txt'
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b'remote payload')
+            fs=SandboxLocalFileSystem(sandbox_dir=sandbox, state_directory=Path(fallback).as_uri())
+            fs.load_state(state)
+            remote=RemoteFile()
+            fs.local_fs.fallback_root='remote-root'
+            fs.local_fs.fallback_fs=remote
+            target=fs._validate_path('/Documents/news/target.txt')
+            self.assertEqual(fs.local_fs._get_fallback_stats_for_item(
+                target, {'name': target, 'size': 0, 'type': 'file'}
+            )['size'], 0)
+            self.assertEqual(remote.opened, [])
+            self.assertEqual(fs.cat('/Documents/news/target.txt'), b'localised payload')
+            self.assertEqual(remote.opened, ['remote-root/Documents/news/target.txt'])
+
+    def test_01e_model_history_compaction_preserves_pairs_and_marks_incomplete(self):
+        messages = [
+            {'role': 'system', 'content': 'base policy'},
+            {'role': 'system', 'content': 'live hook context'},
+            {'role': 'user', 'content': 'complete the authoritative task'},
+        ]
+        for index in range(5):
+            messages.extend([
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    {'id': f'call-{index}', 'type': 'function',
+                     'function': {'name': 'Files__read', 'arguments': '{}'}}
+                ]},
+                {'role': 'tool', 'tool_call_id': f'call-{index}',
+                 'content': f'old observation {index} ' + ('x' * 6000)},
+            ])
+
+        compacted, metadata = bridge._compact_model_input(messages, [], max_bytes=9000)
+        self.assertTrue(metadata['compacted'])
+        self.assertLessEqual(metadata['compactedBytes'], 9000)
+        self.assertGreater(metadata['hiddenMessageCount'], 0)
+        self.assertIn('runtime compaction', '\n'.join(
+            item.get('content', '') for item in compacted
+            if item.get('role') == 'tool'
+        ))
+        self.assertEqual(compacted[:2], messages[:2])
+        self.assertIn(messages[2], compacted)
+        for index, message in enumerate(compacted):
+            if message.get('role') == 'tool':
+                self.assertGreater(index, 0)
+                self.assertEqual(compacted[index - 1].get('role'), 'assistant')
+
+    def test_01f_model_history_compaction_has_message_count_guard(self):
+        messages = [
+            {'role': 'system', 'content': 'base policy'},
+            {'role': 'system', 'content': 'live hook context'},
+            {'role': 'user', 'content': 'complete the authoritative task'},
+        ]
+        for index in range(20):
+            messages.extend([
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    {'id': f'call-count-{index}', 'type': 'function',
+                     'function': {'name': 'Files__read', 'arguments': '{}'}}
+                ]},
+                {'role': 'tool', 'tool_call_id': f'call-count-{index}',
+                 'content': f'observation {index}'},
+            ])
+
+        compacted, metadata = bridge._compact_model_input(
+            messages, [], max_bytes=1_000_000, max_messages=10
+        )
+        self.assertTrue(metadata['compacted'])
+        self.assertIn('message_count', metadata['compactionReason'])
+        self.assertLessEqual(len(compacted), 10)
+        self.assertEqual(compacted[:2], messages[:2])
+        self.assertIn(messages[2], compacted)
+        for index, message in enumerate(compacted):
+            if message.get('role') == 'tool':
+                self.assertGreater(index, 0)
+                self.assertEqual(compacted[index - 1].get('role'), 'assistant')
 
     def test_02_unknown_write_is_not_retried_and_requires_read_back(self):
         scenario,env,aui,system,ledger=setup_scenario()

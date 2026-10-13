@@ -35,6 +35,7 @@ const GATES = [
 const LOGGING_GATES = [
   'runtime_hook_evidence_invalid', 'plugin_host_termination_failed',
   'foreign_runtime_events', 'malformed_runtime_event_log',
+  'native_result_missing',
   'fresh_replay_process_generation_unverified', 'frozen_replay_baseline_changed',
   'fresh_replay_native_proof_invalid',
 ]
@@ -85,10 +86,11 @@ export function buildFailureDiagnostics({ processResult = {}, report = null, eve
     // Older logs only have httpStatus. This remains an SDK-reported status.
     diagnostic.sdkReportedStatus ??= status(failure.httpStatus)
     causes.push({ stage: 'model_request', eventIndex, category: failure.category,
-      modelRole: enumValue(failure.modelRole, ['actor', 'judge', 'correction']),
+      modelRole: enumValue(failure.modelRole, ['actor', 'judge', 'correction', 'child_actor']),
       requestAttempts: count(failure.requestAttempt), diagnostic })
   }
   if (processResult.loggingError) causes.push({ stage: 'evidence_gate', code: enumValue(processResult.loggingError, LOGGING_GATES) ?? 'process_logging_failed' })
+  if (processResult.adapterFailure) causes.push({ stage: 'adapter', code: 'adapter_failure' })
   const gateCode = processResult.evidenceGateCode ?? report?.evidenceGateCode
   if (gateCode != null) causes.push({ stage: 'evidence_gate', code: enumValue(gateCode, GATES) ?? 'runtime_evidence_rejected' })
   if (processResult.spawnError) causes.push({ stage: 'process_supervision', code: 'process_spawn_failed' })

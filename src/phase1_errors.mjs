@@ -23,7 +23,7 @@ export function classifyExecutionFailure({ processResult = {}, report = null, ev
       retryExhausted: failure.retryExhausted === true,
       requestAttempts: Number.isInteger(failure.requestAttempt) ? failure.requestAttempt : null,
       cumulativeWaitSeconds: Number.isFinite(failure.cumulativeWaitSeconds) ? failure.cumulativeWaitSeconds : 0,
-      modelRole: ['actor', 'judge'].includes(failure.modelRole) ? failure.modelRole : null,
+      modelRole: ['actor', 'judge', 'child_actor'].includes(failure.modelRole) ? failure.modelRole : null,
     })
   }
   const exitCode = Object.hasOwn(processResult, 'exitCode') ? processResult.exitCode : Object.hasOwn(processResult, 'status') ? processResult.status : 0

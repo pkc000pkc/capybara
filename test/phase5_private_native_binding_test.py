@@ -415,9 +415,9 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(NativeBindingError, "NATIVE_BINDING_CHANGED"):
             owner.commit_native(self.commit_payload(scope, prepared))
         source.write_text("original factory", encoding="utf-8")
-        other = self.child(owner)
-        with self.assertRaisesRegex(NativeBindingError, "NATIVE_UNRESOLVED_APP_MUTATION"):
-            self.prepare(owner, other)
+        # Restoring bytes cannot restore an owner's source capability.
+        with self.assertRaisesRegex(NativeBindingError, "NATIVE_BINDING_CHANGED"):
+            self.child(owner)
         self.assertEqual(app.calls, 0)
 
     def test_13_write_exception_unknown_across_child_read_does_not_clear(self):
@@ -610,9 +610,8 @@ class Tests(unittest.TestCase):
         for accessor in (owner.take_native_result, owner.take_agent_observation):
             with self.assertRaises(NativeBindingError):
                 accessor(payload["dispatchId"])
-        other = self.child(owner)
-        with self.assertRaisesRegex(NativeBindingError, "NATIVE_UNRESOLVED_APP_MUTATION"):
-            self.prepare(owner, other)
+        with self.assertRaisesRegex(NativeBindingError, "NATIVE_BINDING_CHANGED"):
+            self.child(owner)
 
     def test_23_default_identity_and_bool_effect_type_cannot_alias(self):
         owner, app, env, root = self.owner()
@@ -622,6 +621,12 @@ class Tests(unittest.TestCase):
         with patch.object(tool, "write_operation", 1):
             with self.assertRaisesRegex(NativeBindingError, "NATIVE_BINDING_CHANGED"):
                 owner.commit_native(self.commit_payload(scope, prepared))
+        # A sticky failure on the first owner must not mask this independent
+        # default-identity counterexample on a still-valid fresh owner.
+        owner, app, env, root = self.owner()
+        scope = self.child(owner)
+        prepared = self.prepare(owner, scope)
+        tool = next(tool for tool in app.get_tools() if tool.func_name == "write")
         innermost = tool.function.__wrapped__
         original_defaults = innermost.__defaults__
         self.assertEqual(original_defaults, ("default",))
@@ -733,6 +738,24 @@ class Tests(unittest.TestCase):
         for accessor in (owner.take_native_result, owner.take_agent_observation):
             with self.assertRaisesRegex(NativeBindingError, "NATIVE_OWNER_CLOSED"):
                 accessor(payload2["dispatchId"])
+
+    def test_30_non_bool_non_none_effect_is_rejected_before_native_execution(self):
+        for effect in (0, 1, "read", [], {}):
+            with self.subTest(effect=effect):
+                app = Ledger()
+                tool = next(tool for tool in app.get_tools() if tool.func_name == "write")
+                with patch.object(tool, "write_operation", effect):
+                    with self.assertRaisesRegex(NativeBindingError, "^NATIVE_TOOL_BINDING_INVALID$"):
+                        self.owner(app)
+                self.assertEqual(app.calls, 0)
+
+    def test_31_empty_exclusion_is_explicit_and_not_a_new_pipe_handler(self):
+        owner, _, _, _ = self.owner()
+        self.assertEqual(owner.excluded_tool_snapshot(), {
+            "schemaVersion": "gaia2-private-native-excluded-tools-v1",
+            "appId": "Ledger", "toolCount": 0, "tools": [],
+            "sourceManifestHash": wire.value_hash(owner.manifest())})
+        self.assertNotIn("excluded_tool_snapshot", owner.handlers())
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@
   },
   "runtime": {
     "areVersion": "1.2.0",
-    "python": "C:/Users/pkc00/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe",
+    "python": ".runtime-python/python-3.12.14-d41bad46673f/python.exe",
     "officialPythonPath": ".official-python",
     "backendRoot": "D:/gitlocals/kanli8-human/capybara-backend",
     "pluginSourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/plugins",
