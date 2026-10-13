@@ -60,7 +60,7 @@ export function validateExportPlan(root, manifest, { allowSynthetic = false } = 
     }
     const protocol = readJson(frozenSources.protocol)
     const index = readFileSync(frozenSources.scenarioIndex, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line))
-    const expected = buildRunManifest({ root, protocol, index, lockRefs: manifest.lockRefs, entrypoints: manifest.entrypoints, mode: manifest.mode, runId: manifest.runId, perCapability: manifest.selection.perCapability ?? undefined, miniLimit: manifest.selection.miniLimit ?? undefined, rootSeed: manifest.rootSeed })
+    const expected = buildRunManifest({ root, protocol, index, lockRefs: manifest.lockRefs, entrypoints: manifest.entrypoints, mode: manifest.mode, runId: manifest.runId, perCapability: manifest.selection.perCapability ?? undefined, miniLimit: manifest.selection.miniLimit ?? undefined, selectionProfile: manifest.selection.profile, rootSeed: manifest.rootSeed })
     for (const key of ['planFingerprint', 'dataset', 'models', 'policy', 'requestedRuntime', 'tasks', 'selection', 'runRoot', 'stateFile']) check(digest(manifest[key]) === digest(expected[key]), `${key} differs from captured frozen inputs`)
     const capturedEnvironment = readJson(frozenSources.environment)
     for (const entry of manifest.entrypoints.entries) check(capturedEnvironment.codeInputs.some(file => file.path === entry.path && file.sha256 === entry.sha256), 'entrypoint does not match captured code snapshot')
@@ -129,7 +129,7 @@ function gather(root, manifest) {
     const native = readNativeResult({ root, outputDir: session.outputDir, task, session, events })
     check(native.report.evaluationComplete && native.report.businessPassed === result.businessPassed && digest(native.artifacts) === digest(result.artifacts), 'native judgment/artifacts differ')
     if (runtimeEvidenceRequired(manifest, result) || result.runtimeAttestation || result.runtimeEvidence?.length) {
-      const hooks = validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation: result.runtimeAttestation, runtimeEvidence: result.runtimeEvidence, readEvidence: path => readFileSync(checkedSource(root, path, runRoot)) })
+      const hooks = validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation: result.runtimeAttestation, runtimeEvidence: result.runtimeEvidence, nativeProcessSourceBytes: readFileSync(processPath), readEvidence: path => readFileSync(checkedSource(root, path, runRoot)) })
       check(result.realHooksReady === hooks.realHooksReady, 'hook readiness differs from evidence')
     } else check(result.realHooksReady !== true, 'unattested hooks claimed ready')
     records.push({ task, session, result, resultPath, processPath, eventsPath, nativePath: resolve(root, native.artifacts[0].path), tracePath: resolve(root, native.artifacts[1].path), sourceArtifacts: result.artifacts, sourceRuntimeEvidence: result.runtimeEvidence ?? [] })

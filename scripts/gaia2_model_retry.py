@@ -20,6 +20,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Mapping
 
 from gaia2_model_diagnostics import safe_model_diagnostics, safe_request_summary
+from gaia2_model_http_guard import guarded_sdk_attempt
 
 
 @dataclass(frozen=True)
@@ -222,7 +223,8 @@ def wrap_completion(
             operational = {"modelRole": role, "requestId": request_id, "requestAttempt": attempt, "maxRequestAttempts": active.max_attempts, "cumulativeWaitSeconds": waited}
             emit("model_request_attempt", **operational, requestSummary=request_summary)
             try:
-                result = completion(*args, **kwargs)
+                result = guarded_sdk_attempt(completion, role, request_id, attempt,
+                    args=args, kwargs=kwargs)
             except Exception as error:
                 classification = classify_model_error(error)
                 diagnostic = safe_model_diagnostics(error, request_summary)

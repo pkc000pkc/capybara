@@ -26,6 +26,7 @@ from typing import Any
 import litellm
 from litellm import completion
 from gaia2_model_retry import install_model_retries
+from gaia2_model_http_guard import install_model_http_guard
 from gaia2_a2a_wire import value_hash as _a2a_value_hash
 from gaia2_deadline_notifications import DeadlineNotificationError, ProjectedNotification, ScopedOSDeadline
 from gaia2_notification_producer import (
@@ -1887,6 +1888,7 @@ def install() -> None:
     # Do not let install_model_retries silently clear a pre-existing unsafe
     # global configuration before we have verified the native contract.
     _assert_native_model_protocol()
+    install_model_http_guard()
     completion = install_model_retries(_emit_runtime_event, actor_completion=completion)
     scenario_runner.ScenarioRunner._run_with_agent = _native_run_with_agent
     logger.info("Installed Capybara native-tool bridge for official ARE runner")

@@ -117,7 +117,7 @@ function validateResult(root, manifest, task, session, record, runtimeHash) {
   if (runtimeEvidenceRequired(manifest, result) || result.runtimeAttestation || result.runtimeEvidence?.length) {
     const eventsPath = safePath(root, portable(join(session.outputDir, 'runtime-events.jsonl')), resolve(root, session.outputDir))
     const events = readFileSync(eventsPath, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse)
-    const hooks = validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation: result.runtimeAttestation, runtimeEvidence: result.runtimeEvidence, readEvidence: path => readFileSync(safePath(root, path, resolve(root, manifest.runRoot))) })
+    const hooks = validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation: result.runtimeAttestation, runtimeEvidence: result.runtimeEvidence, ...(result.runtimeAttestation?.modelHttpDispatchRequired === true ? { nativeProcessSourceBytes: readFileSync(safePath(root, portable(join(session.outputDir, 'process-result.json')), resolve(root, session.outputDir))) } : {}), readEvidence: path => readFileSync(safePath(root, path, resolve(root, manifest.runRoot))) })
     assert(result.realHooksReady === hooks.realHooksReady, 'runtime readiness differs from evidence')
   } else assert(result.realHooksReady !== true, 'unattested runtime hooks claimed ready')
   return result
@@ -271,7 +271,7 @@ export async function runFrozenBatch({ root, manifest, settings, executeTask, si
       let realHooksReady = false
       if (evidenceRequired || execution?.runtimeAttestation || execution?.runtimeEvidence?.length) {
         try {
-          const hooks = validateRuntimeEvidence({ manifest, task, session, events: execution?.events, runtimeAttestation: execution?.runtimeAttestation, runtimeEvidence: execution?.runtimeEvidence, readEvidence: path => readFileSync(safePath(root, path, runRoot)) })
+          const hooks = validateRuntimeEvidence({ manifest, task, session, events: execution?.events, runtimeAttestation: execution?.runtimeAttestation, runtimeEvidence: execution?.runtimeEvidence, ...(execution?.runtimeAttestation?.modelHttpDispatchRequired === true ? { nativeProcessSourceBytes: readFileSync(safePath(root, portable(join(session.outputDir, 'process-result.json')), resolve(root, session.outputDir))) } : {}), readEvidence: path => readFileSync(safePath(root, path, runRoot)) })
           realHooksReady = hooks.realHooksReady
         } catch (error) { report = { ...report, evaluationComplete: false, hasException: true, exceptionType: 'RuntimeEvidenceError', evidenceGateCode: safeEvidenceGateCode(error) } }
       }

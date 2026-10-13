@@ -629,6 +629,9 @@ class OfficialA2AClient:
             config_hash=config_hash,
             emit=self._model_emitter(model_scope=model_scope, model_scope_hash=model_scope_hash),
             deadline_timeout_policy="remaining" if self.__deadline_factory is not None else "fixed",
+            http_guard_identity={**{key: self.__scope[key] for key in (
+                "parentExecutionId", "parentSessionId", "childExecutionId", "childSessionId")},
+                "delegationScopeHash": value_hash(self.__scope)},
         )
 
         def dispatch(action: dict[str, Any]) -> dict[str, Any]:

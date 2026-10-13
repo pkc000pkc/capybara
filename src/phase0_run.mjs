@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { resolveRuntimeSettings } from './phase1_config.mjs'
 import { assertOfficialSubmissionProtocol } from './official_submission_config.mjs'
+import { buildStandardMiniMapping, OFFICIAL_MINI_PROFILE } from './phase6_selection.mjs'
 
 export function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical)
@@ -113,7 +114,7 @@ function seed(rootSeed, phase, config, id, runNumber) {
   return createHash('sha256').update(JSON.stringify([rootSeed, phase, config, id, runNumber])).digest().readUInt32BE(0)
 }
 
-export function buildRunManifest({ root, protocol, index, lockRefs, entrypoints, mode = 'internal_pass5', perCapability, miniLimit, runId = randomUUID(), rootSeed = protocol.rootSeed }) {
+export function buildRunManifest({ root, protocol, index, lockRefs, entrypoints, mode = 'internal_pass5', perCapability, miniLimit, selectionProfile, runId = randomUUID(), rootSeed = protocol.rootSeed }) {
   validateProtocol(protocol)
   if (!protocol.modes[mode]) throw new Error(`unsupported mode ${mode}`)
   if (mode === 'official_submission') assertOfficialSubmissionProtocol(protocol)
@@ -123,13 +124,17 @@ export function buildRunManifest({ root, protocol, index, lockRefs, entrypoints,
   const datasetKind = policy.datasetKind
   const dataset = protocol.datasets[datasetKind]
   const capabilities = dataset.configs.filter((name) => name !== 'mini')
+  if (selectionProfile !== undefined && selectionProfile !== OFFICIAL_MINI_PROFILE) throw new Error('unsupported selection profile')
+  if (selectionProfile !== undefined && (mode !== 'official_submission' || perCapability !== undefined && perCapability !== null || miniLimit !== undefined && miniLimit !== null)) throw new Error('official-mini-v1 requires official_submission and does not permit selection limits')
+  const standardMini = selectionProfile === OFFICIAL_MINI_PROFILE ? buildStandardMiniMapping(index, lockRefs.scenarioIndex.sha256) : null
+  const miniIds = standardMini ? new Set(standardMini.entries.map(item => item.scenarioId)) : null
   const limit = perCapability ?? (mode === 'internal_pass5' ? 1 : null)
   for (const [name, value] of [['perCapability', limit], ['miniLimit', miniLimit]]) if (value !== undefined && value !== null && (!Number.isInteger(value) || value <= 0)) throw new Error(`${name} must be a positive integer`)
   const selection = []
   for (const phase of policy.phases) {
     const configs = phase === 'standard' ? capabilities : ['mini']
     for (const config of configs) {
-      const rows = index.filter((item) => config === 'mini' ? item.datasetKind === 'mini' && item.config === 'mini' : item.datasetKind === datasetKind && item.config === config).sort((a, b) => a.rowIndex - b.rowIndex)
+      const rows = index.filter((item) => config === 'mini' ? item.datasetKind === 'mini' && item.config === 'mini' : item.datasetKind === datasetKind && item.config === config && (!miniIds || miniIds.has(item.id))).sort((a, b) => a.rowIndex - b.rowIndex)
       const wanted = config === 'mini' ? miniLimit ?? rows.length : limit ?? rows.length
       if (!rows.length || wanted > rows.length) throw new Error(`insufficient scenarios for ${phase}/${config}`)
       const seenIds = new Set()
@@ -143,20 +148,20 @@ export function buildRunManifest({ root, protocol, index, lockRefs, entrypoints,
       }
     }
   }
-  const planBasis = { mode, dataset: { id: dataset.id, revision: dataset.revision, split: dataset.split }, models: protocol.models, policy, rootSeed, lockRefs, entrypoints, selection }
+  const planBasis = { mode, dataset: { id: dataset.id, revision: dataset.revision, split: dataset.split }, models: protocol.models, policy, rootSeed, lockRefs, entrypoints, selection, ...(standardMini ? { selectionProfile, standardMini } : {}) }
   const planFingerprint = digest(planBasis)
   const runRoot = join('runs', runId)
   const tasks = selection.map((task) => {
     const executionId = `${task.phase}-${task.config}-${digest([task.scenarioId, task.runNumber]).slice(0, 16)}`
     return { ...task, executionId, attemptIndex: mode === 'internal_pass5' ? task.runNumber : null, correctionOrdinal: 0, outputDir: join(runRoot, 'executions', executionId), fixtureDir: join(runRoot, 'fixtures', executionId), workspaceDir: join(runRoot, 'workspaces', executionId) }
   })
-  const fullCoverage = mode === 'official_submission' && limit === null && miniLimit === undefined
+  const fullCoverage = mode === 'official_submission' && limit === null && miniLimit === undefined && !standardMini
   return {
     schemaVersion: 'gaia2-run-manifest-v1', runId, generatedAt: new Date().toISOString(), mode, planFingerprint,
     dataset: { kind: datasetKind, id: dataset.id, revision: dataset.revision, split: dataset.split },
     models: protocol.models, policy: { initialRunsPerScenario: policy.initialRunsPerScenario, maxCorrections: policy.maxCorrections, seedBinding: policy.seedBinding, learningPolicy: protocol.learningPolicy },
     rootSeed, requestedRuntime: protocol.requestedRuntime, entrypoints, lockRefs,
-    selection: { perCapability: limit, miniLimit: miniLimit ?? null, expectedInitialExecutions: tasks.length, fullOfficialCoverage: fullCoverage },
+    selection: { perCapability: limit, miniLimit: miniLimit ?? null, expectedInitialExecutions: tasks.length, fullOfficialCoverage: fullCoverage, ...(standardMini ? { profile: selectionProfile, standardMini } : {}) },
     runRoot, tasks, stateFile: join(runRoot, 'run-state.json'),
     executionBinding: protocol.runtime?.executionBinding ?? 'manifest_driven_standard_only_real_hooks_pending_phase3',
   }

@@ -19,7 +19,7 @@
     "requestedRuntime": {"type": "object"},
     "entrypoints": {"type": "object"},
     "lockRefs": {"type": "object", "additionalProperties": false, "required": ["protocol", "environment", "capabilities", "dataset", "scenarioIndex"], "properties": {"protocol": {"$ref": "#/$defs/lockRef"}, "environment": {"$ref": "#/$defs/lockRef"}, "capabilities": {"$ref": "#/$defs/lockRef"}, "dataset": {"$ref": "#/$defs/lockRef"}, "scenarioIndex": {"$ref": "#/$defs/lockRef"}}},
-    "selection": {"type": "object", "additionalProperties": false, "required": ["perCapability", "miniLimit", "expectedInitialExecutions", "fullOfficialCoverage"], "properties": {"perCapability": {"type": ["integer", "null"], "minimum": 1}, "miniLimit": {"type": ["integer", "null"], "minimum": 1}, "expectedInitialExecutions": {"type": "integer", "minimum": 1}, "fullOfficialCoverage": {"type": "boolean"}}},
+    "selection": {"type": "object", "additionalProperties": false, "required": ["perCapability", "miniLimit", "expectedInitialExecutions", "fullOfficialCoverage"], "properties": {"perCapability": {"type": ["integer", "null"], "minimum": 1}, "miniLimit": {"type": ["integer", "null"], "minimum": 1}, "expectedInitialExecutions": {"type": "integer", "minimum": 1}, "fullOfficialCoverage": {"type": "boolean"}, "profile": {"const": "official-mini-v1"}, "standardMini": {"$ref": "#/$defs/standardMini"}}},
     "runRoot": {"type": "string", "minLength": 1},
     "stateFile": {"type": "string", "minLength": 1},
     "executionBinding": {"enum": ["planning_only_pending_phase1_and_phase3", "manifest_driven_standard_only_real_hooks_pending_phase3", "phase3_live_plugin_host_required"]},
@@ -27,6 +27,11 @@
   },
   "$defs": {
     "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "miniSource": {"type": "object", "additionalProperties": false, "required": ["rowIndex", "sourcePath"], "properties": {"rowIndex": {"type": "integer", "minimum": 0}, "sourcePath": {"type": "string", "minLength": 1}}},
+    "standardMini": {"type": "object", "additionalProperties": false, "required": ["schemaVersion", "scenarioIndexSha256", "perCapability", "count", "entries", "mappingHash"], "properties": {
+      "schemaVersion": {"const": "gaia2-standard-mini-selection-v1"}, "scenarioIndexSha256": {"$ref": "#/$defs/hash"}, "perCapability": {"const": 32}, "count": {"const": 160}, "mappingHash": {"$ref": "#/$defs/hash"},
+      "entries": {"type": "array", "minItems": 160, "maxItems": 160, "items": {"type": "object", "additionalProperties": false, "required": ["capability", "scenarioId", "scenarioHash", "scenarioVersion", "mini", "standard"], "properties": {"capability": {"enum": ["execution", "search", "adaptability", "time", "ambiguity"]}, "scenarioId": {"type": "string", "minLength": 1}, "scenarioHash": {"$ref": "#/$defs/hash"}, "scenarioVersion": {"type": "string", "minLength": 1}, "mini": {"$ref": "#/$defs/miniSource"}, "standard": {"$ref": "#/$defs/miniSource"}}}}
+    }},
     "lockRef": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/hash"}}},
     "task": {
       "type": "object", "additionalProperties": false,

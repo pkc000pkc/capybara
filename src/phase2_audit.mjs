@@ -286,7 +286,7 @@ export function auditSubmissionPackage({ packageRoot, officialCheck = null } = {
       if (Object.keys(captured).length === 5) {
         try {
           const protocol = readJson(captured.protocol), index = readFileSync(captured.scenarioIndex, 'utf8').split(/\r?\n/).filter(line => line.trim()).map(JSON.parse)
-          const restored = buildRunManifest({ root, protocol, index, lockRefs: manifest.lockRefs, entrypoints: manifest.entrypoints, mode: manifest.mode, runId: manifest.runId, perCapability: manifest.selection.perCapability ?? undefined, miniLimit: manifest.selection.miniLimit ?? undefined, rootSeed: manifest.rootSeed })
+          const restored = buildRunManifest({ root, protocol, index, lockRefs: manifest.lockRefs, entrypoints: manifest.entrypoints, mode: manifest.mode, runId: manifest.runId, perCapability: manifest.selection.perCapability ?? undefined, miniLimit: manifest.selection.miniLimit ?? undefined, selectionProfile: manifest.selection.profile, rootSeed: manifest.rootSeed })
           for (const key of ['planFingerprint', 'dataset', 'models', 'policy', 'requestedRuntime', 'tasks', 'selection', 'runRoot', 'stateFile']) if (digest(manifest[key]) !== digest(restored[key])) throw new Error('captured_plan')
           const environment = readJson(captured.environment)
           capturedEnvironment = environment
@@ -429,7 +429,7 @@ export function auditSubmissionPackage({ packageRoot, officialCheck = null } = {
             runtimeCopies.set(ref.sourcePath, checked)
           }
           if (runtimeEvidenceRequired(manifest, result) || result.runtimeAttestation || sourceRefs.length) {
-            const hooks = validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation: result.runtimeAttestation, runtimeEvidence: sourceRefs, readEvidence: sourcePath => { if (!runtimeCopies.has(sourcePath)) throw new Error('unbound_runtime_copy'); return readFileSync(runtimeCopies.get(sourcePath)) } })
+            const hooks = validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation: result.runtimeAttestation, runtimeEvidence: sourceRefs, nativeProcessSourceBytes: readFileSync(processPath), readEvidence: sourcePath => { if (!runtimeCopies.has(sourcePath)) throw new Error('unbound_runtime_copy'); return readFileSync(runtimeCopies.get(sourcePath)) } })
             if (result.realHooksReady !== hooks.realHooksReady) throw new Error('runtime_readiness_mismatch')
             metrics.runtimeAttestedRows++; if (hooks.realHooksReady) metrics.realHookRows++
           } else if (result.realHooksReady === true) throw new Error('unattested_hooks_ready')

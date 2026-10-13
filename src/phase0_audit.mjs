@@ -60,7 +60,7 @@ export function validateRunManifest(root, manifest, inputs, env = process.env) {
   if (digest(manifest.lockRefs) !== digest(inputs.lockRefs)) errors.push('run lock references have changed')
   let expected
   try {
-    expected = buildRunManifest({ root, protocol: inputs.protocol, index: inputs.index, lockRefs: inputs.lockRefs, entrypoints: inspectEntrypoints(root, env), mode: manifest.mode, runId: manifest.runId, perCapability: manifest.selection.perCapability ?? undefined, miniLimit: manifest.selection.miniLimit ?? undefined, rootSeed: manifest.rootSeed })
+    expected = buildRunManifest({ root, protocol: inputs.protocol, index: inputs.index, lockRefs: inputs.lockRefs, entrypoints: inspectEntrypoints(root, env), mode: manifest.mode, runId: manifest.runId, perCapability: manifest.selection.perCapability ?? undefined, miniLimit: manifest.selection.miniLimit ?? undefined, selectionProfile: manifest.selection.profile, rootSeed: manifest.rootSeed })
     for (const key of ['planFingerprint', 'dataset', 'models', 'policy', 'requestedRuntime', 'entrypoints', 'tasks', 'selection', 'runRoot', 'stateFile', 'executionBinding']) if (digest(manifest[key]) !== digest(expected[key])) errors.push(`${key} differs from frozen plan`)
   } catch (error) { errors.push(error.message) }
   const taskKeys = new Set(), outputs = new Set()

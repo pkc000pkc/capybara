@@ -5,6 +5,8 @@ import { digest, fileDigest, readJson, within } from './phase0_run.mjs'
 import { assertInitialHasNoCorrection, verifyCorrectionReplayAuthority } from './phase4_replay_authority.mjs'
 import { verifyOfficialA2ARuntimeEvidence } from './phase5_a2a_evidence.mjs'
 import { informationNoiseTransitionErrors } from './phase5_information_noise_evidence.mjs'
+import { verifyModelHttpDispatchEvidence } from './phase6_http_evidence.mjs'
+import { verifyPhase6HttpSessionPaths, verifyPhase6NativeProcessIdentity } from './phase6_process_identity.mjs'
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const hash = value => createHash('sha256').update(value).digest('hex')
@@ -41,7 +43,7 @@ export const runtimeEvidenceRequired = (manifest, result) => manifest?.execution
 /** Verify source-bound live receipts using only a caller-supplied evidence reader.
  * Bundle callers map original relative identities to package copies; no old root is opened.
  */
-export function validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation: attestation, runtimeEvidence: refs, readEvidence }) {
+export function validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation: attestation, runtimeEvidence: refs, readEvidence, nativeProcessSourceBytes = null }) {
   check(object(attestation) && attestation.schemaVersion === 'gaia2-runtime-attestation-v1' && Array.isArray(refs) && refs.length > 0 && typeof readEvidence === 'function', 'missing_attestation')
   for (const key of ['runId', 'manifestHash']) check(attestation[key] === manifest[key], 'manifest_identity')
   for (const key of ['executionId', 'scenarioId', 'runNumber', 'phase', 'config']) check(attestation[key] === task[key], 'task_identity')
@@ -232,15 +234,34 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
       identity: { executionId: task.executionId, sessionId: session.sessionId },
       readEvidence: path => bytes(path) })
   }
+  const httpFields = ['modelHttpDispatchRequired', 'modelHttpDispatchPath', 'modelHttpDispatchSha256', 'modelHttpDispatchProcessId', 'modelHttpDispatchProcessPath']
+  let httpProof = null
+  if (httpFields.some(key => Object.hasOwn(attestation, key))) {
+    check(httpFields.every(key => Object.hasOwn(attestation, key)) && attestation.modelHttpDispatchRequired === true
+      && pathSyntax(attestation.modelHttpDispatchPath) && HASH.test(attestation.modelHttpDispatchSha256 ?? '')
+      && Number.isSafeInteger(attestation.modelHttpDispatchProcessId) && attestation.modelHttpDispatchProcessId > 0
+      && pathSyntax(attestation.modelHttpDispatchProcessPath) && attestation.officialEntryPath !== undefined, 'http_attestation_fields')
+    verifyPhase6HttpSessionPaths({ session, attestation })
+    const nativeProcessBytes = bytes(attestation.modelHttpDispatchProcessPath), nativeProcess = JSON.parse(nativeProcessBytes.toString('utf8'))
+    if (nativeProcessSourceBytes !== null) check(Buffer.isBuffer(nativeProcessSourceBytes) && nativeProcessSourceBytes.equals(nativeProcessBytes), 'http_native_process_source_mismatch')
+    verifyPhase6NativeProcessIdentity({ nativeProcess, officialEntry: json(attestation.officialEntryPath), pythonProcessId: attestation.modelHttpDispatchProcessId })
+    const journal = bytes(attestation.modelHttpDispatchPath)
+    check(hash(journal) === attestation.modelHttpDispatchSha256, 'http_journal_hash')
+    httpProof = verifyModelHttpDispatchEvidence({ journalBytes: journal, events,
+      identity: { runId: manifest.runId, manifestHash: manifest.manifestHash, executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, runNumber: task.runNumber, phase: task.phase, config: task.config,
+        scenarioVersion: task.scenarioVersion, scenarioHash: task.scenarioHash, attemptIndex: task.attemptIndex ?? task.runNumber, correctionOrdinal: task.correctionOrdinal ?? 0 },
+      officialEntryBytes: bytes(attestation.officialEntryPath), pythonProcessId: nativeProcess.pid })
+  }
   check(used.size === files.size, 'unconsumed_evidence')
   const summary = { invocationCount: invocations.length, modelRequestCount: models.length, toolGateCount: toolEvents.length, typedVariableCount: definitions.size, persistentHarnessCount: harnesses.length, actorInputHashReconstructed: false, trainingHooksExecuted: false }
+  if (httpProof) Object.assign(summary, { modelHttpDispatchVerified: true, guardedSdkAttempts: httpProof.attempts, admittedHttpDispatches: httpProof.admittedDispatches, deniedHttpRedispatches: httpProof.deniedRedispatches })
   if (correctionAuthority) Object.assign(summary, { correctionOrdinal: 1, readonlyInitializationVerified: true, strategyConsumedModelRequests: models.length, consumedStrategyHash: correctionAuthority.context.strategyHash })
   check(digest(attestation.summary) === digest(summary), 'attestation_summary_mismatch')
   return { ...summary, realHooksReady: manifest.syntheticFixtureOnly !== true }
 }
 
 /** Capture original Host bytes and frozen source copies; never expose evaluation inputs to Actor. */
-export function collectRuntimeEvidence({ root, manifest, task, session, events, hostProcess }) {
+export function collectRuntimeEvidence({ root, manifest, task, session, events, hostProcess, modelHttpDispatchRequired = false, modelHttpDispatchProcess = null }) {
   root = resolve(root)
   const ref = path => ({ path: portable(relative(root, path)), sha256: fileDigest(path) })
   const hostDir = portable(join(session.outputDir, 'hook-host')), evidenceDir = portable(join(session.workspaceDir, 'plugin-runtime'))
@@ -292,6 +313,21 @@ export function collectRuntimeEvidence({ root, manifest, task, session, events, 
   const invocations = receipts.slice(1).map(path => readJson(resolve(root, path)))
   const entryRef = hasOfficialEntry ? runtimeEvidence.find(item => item.path === officialEntryPath) : null
   const runtimeAttestation = { schemaVersion: 'gaia2-runtime-attestation-v1', runId: manifest.runId, manifestHash: manifest.manifestHash, executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, runNumber: task.runNumber, phase: task.phase, config: task.config, capabilitiesSha256: capabilityRef.sha256, capabilitiesPath: portable(relative(root, capturedCapabilities)), initializationPath: initial[0], invocationPaths: receipts.slice(1), hostProcessPath, readyPath, ...(lifecyclePaths.length ? { lifecyclePaths } : {}), sourceFiles, ...(entryRef ? { officialEntryPath, officialEntrySha256: entryRef.sha256 } : {}), evidenceHash: digest(runtimeEvidence), eventsHash: digest(events), summary: { invocationCount: invocations.length, modelRequestCount: events.filter(event => event.type === 'model_request').length, toolGateCount: events.filter(event => ['tool_call_started', 'tool_call_blocked'].includes(event.type)).length, typedVariableCount: Object.keys(invocations[0]?.variables ?? {}).length, persistentHarnessCount: readJson(resolve(root, initial[0])).harnesses.length, actorInputHashReconstructed: false, trainingHooksExecuted: false } }
+  check(typeof modelHttpDispatchRequired === 'boolean', 'http_required_flag')
+  if (modelHttpDispatchRequired) {
+    const journalPath = portable(join(session.outputDir, 'model-http-dispatch.jsonl'))
+    const nativeProcessPath = portable(join(session.outputDir, 'process-result.json'))
+    const nativeProcess = readJson(localFile(root, nativeProcessPath))
+    check(entryRef && processHealthy(modelHttpDispatchProcess) && digest(nativeProcess) === digest(modelHttpDispatchProcess), 'http_native_process_binding')
+    const proof = verifyModelHttpDispatchEvidence({ journalBytes: readFileSync(localFile(root, journalPath)), events,
+      identity: { runId: manifest.runId, manifestHash: manifest.manifestHash, executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, runNumber: task.runNumber, phase: task.phase, config: task.config,
+        scenarioVersion: task.scenarioVersion, scenarioHash: task.scenarioHash, attemptIndex: task.attemptIndex ?? task.runNumber, correctionOrdinal: task.correctionOrdinal ?? 0 },
+      officialEntryBytes: readFileSync(localFile(root, officialEntryPath)), pythonProcessId: nativeProcess.pid })
+    runtimeEvidence.push(ref(localFile(root, journalPath)), ref(localFile(root, nativeProcessPath)))
+    Object.assign(runtimeAttestation, { modelHttpDispatchRequired: true, modelHttpDispatchPath: journalPath, modelHttpDispatchSha256: proof.journalSha256,
+      modelHttpDispatchProcessId: nativeProcess.pid, modelHttpDispatchProcessPath: nativeProcessPath, evidenceHash: digest(runtimeEvidence) })
+    Object.assign(runtimeAttestation.summary, { modelHttpDispatchVerified: true, guardedSdkAttempts: proof.attempts, admittedHttpDispatches: proof.admittedDispatches, deniedHttpRedispatches: proof.deniedRedispatches })
+  }
   if ((task.correctionOrdinal ?? 0) === 1) {
     const correctionAuthorityPath = portable(join(session.workspaceDir, 'correction-authority/index.json'))
     const authority = readJson(localFile(root, correctionAuthorityPath))
@@ -299,6 +335,7 @@ export function collectRuntimeEvidence({ root, manifest, task, session, events, 
     Object.assign(runtimeAttestation, { correctionAuthorityPath, correctionContext: authority.context, evidenceHash: digest(runtimeEvidence) })
     Object.assign(runtimeAttestation.summary, { correctionOrdinal: 1, readonlyInitializationVerified: true, strategyConsumedModelRequests: runtimeAttestation.summary.modelRequestCount, consumedStrategyHash: authority.context.strategyHash })
   }
-  validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation, runtimeEvidence, readEvidence: path => readFileSync(localFile(root, path)) })
+  validateRuntimeEvidence({ manifest, task, session, events, runtimeAttestation, runtimeEvidence, readEvidence: path => readFileSync(localFile(root, path)),
+    nativeProcessSourceBytes: modelHttpDispatchRequired ? readFileSync(localFile(root, portable(join(session.outputDir, 'process-result.json')))) : null })
   return { runtimeAttestation, runtimeEvidence }
 }

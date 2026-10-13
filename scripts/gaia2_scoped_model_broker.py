@@ -23,6 +23,7 @@ from typing import Any, Callable, Mapping
 
 import gaia2_a2a_wire as wire
 from gaia2_model_retry import ModelRetryPolicy, classify_model_error, retry_delay_hint, _iso, _safe_usage
+from gaia2_model_http_guard import guarded_sdk_attempt
 from gaia2_deadline_notifications import DeadlineNotificationError, ScopedOSDeadline
 from are.simulation.agents.llm.llm_engine import LLMEngine
 from are.simulation.agents.llm.types import MessageRole
@@ -201,7 +202,7 @@ class ScopedRetryModelEngine(LLMEngine):
                  config_hash: str | None = None, emit: Callable[..., None] | None = None,
                  clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
                  monotonic_clock: Callable[[], float] = time.monotonic,
-                 deadline_timeout_policy: str = "fixed"):
+                 deadline_timeout_policy: str = "fixed", http_guard_identity: Mapping | None = None):
         if role not in ROLES or type(role) is not str or type(model_scope_hash) is not str or not _HASH.fullmatch(model_scope_hash):
             _fail("SCOPED_MODEL_IDENTITY_INVALID")
         if any(type(value) is not int or not 1 <= value <= 100000 for value in (max_logical_requests, max_sdk_attempts)):
@@ -217,18 +218,20 @@ class ScopedRetryModelEngine(LLMEngine):
         super().__init__("scoped-model")
         self.__role, self.__scope = role, model_scope_hash
         self.__sdk, self.__factory, self.__policy = sdk_completion, sdk_kwargs_factory, policy
+        self.__http_transport = guarded_sdk_attempt
+        self.__http_guard_identity = _clone(http_guard_identity)
         self.__logical_limit, self.__sdk_limit = max_logical_requests, max_sdk_attempts
         self.__guard, self.__emit, self.__clock, self.__sleep = before_attempt, emit, clock, sleep
         self.__monotonic = monotonic_clock
         self.__callbacks = {"sdk": sdk_completion, "factory": sdk_kwargs_factory, "clock": clock,
-            "sleep": sleep, "monotonic": monotonic_clock}
+            "sleep": sleep, "monotonic": monotonic_clock, "http_transport": self.__http_transport}
         if emit is not None:
             self.__callbacks["emit"] = emit
         self.__identities = {name: _identity(value) for name, value in self.__callbacks.items()}
         self.__sources: dict[Path, str] = {}
         for value in (type(self), LLMEngine, MessageRole, ModelRetryPolicy, classify_model_error,
                 retry_delay_hint, _safe_usage, wire.value_hash, ScopedOSDeadline,
-                DeadlineNotificationError, *self.__callbacks.values()):
+                DeadlineNotificationError, guarded_sdk_attempt, *self.__callbacks.values()):
             # Built-in time functions have no Python source; their identity is
             # frozen, and the module's SDK/factory/guard sources remain pinned.
             if inspect.isbuiltin(value):
@@ -267,7 +270,8 @@ class ScopedRetryModelEngine(LLMEngine):
         self.__binding = (self.__role, self.__scope, self.__config, self.__logical_limit,
             self.__sdk_limit, id(self.__policy), self.__deadline_timeout_policy,
             _identity(type(self).chat_completion),
-            _identity(type(self).begin_request), _identity(type(self).__call__), self.__source_identity_hash)
+            _identity(type(self).begin_request), _identity(type(self).__call__), self.__source_identity_hash,
+            wire.value_hash(self.__http_guard_identity))
 
     @property
     def model_role(self):
@@ -354,13 +358,15 @@ class ScopedRetryModelEngine(LLMEngine):
             binding = (self.__role, self.__scope, self.__config, self.__logical_limit,
                 self.__sdk_limit, id(self.__policy), self.__deadline_timeout_policy,
                 _identity(type(self).chat_completion),
-                _identity(type(self).begin_request), _identity(type(self).__call__), self.__source_identity_hash)
+                _identity(type(self).begin_request), _identity(type(self).__call__), self.__source_identity_hash,
+                wire.value_hash(self.__http_guard_identity))
             actual_callbacks = {"sdk": self.__sdk, "factory": self.__factory, "clock": self.__clock,
-                "sleep": self.__sleep, "monotonic": self.__monotonic}
+                "sleep": self.__sleep, "monotonic": self.__monotonic, "http_transport": self.__http_transport}
             if self.__emit is not None:
                 actual_callbacks["emit"] = self.__emit
             if (binding != self.__binding or set(actual_callbacks) != set(self.__callbacks)
-                    or any(_identity(value) != self.__identities[name] for name, value in actual_callbacks.items())):
+                    or any(_identity(value) != self.__identities[name] for name, value in actual_callbacks.items())
+                    or _identity(guarded_sdk_attempt) != self.__identities["http_transport"]):
                 _fail("SCOPED_MODEL_SOURCE_CHANGED")
             if self.__guard is not None and _identity(self.__guard) != self.__guard_identity:
                 _fail("SCOPED_MODEL_GUARD_CHANGED")
@@ -547,30 +553,54 @@ class ScopedRetryModelEngine(LLMEngine):
                     _fail("SCOPED_MODEL_SDK_BUDGET_EXHAUSTED")
                 self.__observe_safe_point("sdk_attempt_before")
                 self.__deadline_check(deadline, "sdk_attempt_before")
-                guard_payload = {**request, "attempt": attempt}
+                # Complete naturally rejectable preparation BEFORE the Node
+                # ACK: that ACK increments the independently audited counters.
+                # A deadline/clock/clone rejection must not spend an ACK or
+                # invent an ordinary SDK attempt without an HTTP lease.
+                guard_payload = _clone({**request, "attempt": attempt})
+                # Preflight the trusted clock before spending the SDK ACK.
+                # This is NOT the SDK timer start: authorization RPC time
+                # must not become successfulSdkElapsedSeconds / ARE offset.
+                self.__timing_now()
+                http_identity = None
+                if self.__role == "child_actor" and self.__http_guard_identity is not None:
+                    http_identity = {**_clone(self.__http_guard_identity),
+                        "permitId": request["permitId"], "actualInputHash": request["actualInputHash"],
+                        "modelScopeHash": self.__scope, "configHash": self.__config}
+                prepared_messages = _clone(converted)
+                remaining_deadline = self.__deadline_check(deadline, "sdk_attempt_before")
+                sdk_kwargs = self.__provider_kwargs(sdk_kwargs, remaining_deadline)
+                prepared_kwargs = {"messages": prepared_messages, **sdk_kwargs}
+                def before_http_dispatch():
+                    # This callback is trusted broker authority, not provider
+                    # kwargs. A deadline can expire during ACK/SDK preparation;
+                    # the lease then closes failed with zero HTTP admissions.
+                    self.__check()
+                    self.__deadline_check(deadline, "sdk_attempt_before")
                 try:
                     # The trusted runner independently validates the full Node
                     # ACK. Only an exception-free guard return authorizes SDK.
-                    self.__guard(_clone(guard_payload))
+                    self.__guard(guard_payload)
                 except BaseException:
                     _fail("SCOPED_MODEL_ATTEMPT_DENIED")
                 # A late source/config mutation in the guard cannot dispatch.
-                sdk_kwargs = self.__check()
+                # Post-ACK source/config integrity errors remain technical
+                # fail-closed, never a clean STOP/expired pre-dispatch attempt.
+                self.__check()
+                # A last trusted-clock integrity failure here is likewise a
+                # technical failure, not a normal zero-ACK deadline rejection.
+                attempt_start = self.__timing_now()
                 operational = {"requestAttempt": attempt, "maxRequestAttempts": self.__policy.max_attempts,
                     "cumulativeWaitSeconds": waited}
                 self.__event("model_request_attempt", request, **operational)
                 self.__sdk_used += 1
                 attempted += 1
                 self.__last_attempts = attempted
-                attempt_start = self.__timing_now()
                 attempt_observed = True
-                # Keep the final authorization immediately adjacent to the
-                # provider call; guard/event bookkeeping must not consume the
-                # only trusted deadline observation used for this attempt.
-                remaining_deadline = self.__deadline_check(deadline, "sdk_attempt_before")
-                sdk_kwargs = self.__provider_kwargs(sdk_kwargs, remaining_deadline)
                 try:
-                    result = self.__sdk(messages=_clone(converted), **sdk_kwargs)
+                    result = self.__http_transport(self.__sdk, self.__role, request["requestId"], attempt,
+                        kwargs=prepared_kwargs, additional_identity=http_identity,
+                        before_dispatch=before_http_dispatch)
                 except Exception as error:
                     attempt_elapsed = self.__timing_accumulate(attempt_elapsed,
                         self.__timing_delta(attempt_start))

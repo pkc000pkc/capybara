@@ -20,13 +20,13 @@ function parseArgs(argv) {
   return values
 }
 
-function resolveInside(base, value) {
+function resolveInside(base, value, workspaceRoot = root) {
   if (typeof value !== 'string' || !value || isAbsolute(value)) return null
-  const target = resolve(root, value)
+  const target = resolve(workspaceRoot, value)
   return within(base, target) && target !== resolve(base) ? target : null
 }
 
-function validateSession(errors, manifest, task, session, index) {
+function validateSession(errors, manifest, task, session, index, workspaceRoot = root) {
   const id = task.executionId
   if (!session || typeof session !== 'object') { issue(errors, 'invalid_session', id, index); return }
   if (session.sessionOrdinal !== index + 1 || session.parentSessionId !== (index ? task.__sessions[index - 1]?.sessionId ?? null : null)) issue(errors, 'session_lineage_invalid', id, index)
@@ -34,26 +34,27 @@ function validateSession(errors, manifest, task, session, index) {
   for (const key of ['outputDir', 'fixtureDir', 'workspaceDir']) {
     const expected = portable(join(task[key], 'sessions', session.sessionId))
     if (portable(session[key]) !== expected) issue(errors, 'session_path_mismatch', id, `${key}:${index}`)
-    if (!resolveInside(resolve(root, manifest.runRoot), session[key])) issue(errors, 'session_path_escape', id, `${key}:${index}`)
+    if (!resolveInside(resolve(workspaceRoot, manifest.runRoot), session[key], workspaceRoot)) issue(errors, 'session_path_escape', id, `${key}:${index}`)
   }
 }
 
-function validateResult(errors, manifest, task, record, session) {
+function validateResult(errors, manifest, task, record, session, workspaceRoot = root, runtimeHash = null) {
   const id = task.executionId
   if (!record.resultPath || typeof record.resultSha256 !== 'string') { issue(errors, 'result_reference_missing', id); return null }
-  const path = resolveInside(resolve(root, manifest.runRoot), record.resultPath)
+  if (portable(record.resultPath) !== portable(join(session.workspaceDir, 'task-result.json'))) { issue(errors, 'result_session_path_mismatch', id); return null }
+  const path = resolveInside(resolve(workspaceRoot, session.workspaceDir), record.resultPath, workspaceRoot)
   if (!path || !existsSync(path)) { issue(errors, 'result_missing', id); return null }
   let result
   try { result = readJson(path) } catch { issue(errors, 'result_json_invalid', id); return null }
   try { if (fileDigest(path) !== record.resultSha256) issue(errors, 'result_hash_mismatch', id) } catch { issue(errors, 'result_unreadable', id); return null }
-  for (const [key, expected] of [['schemaVersion', 'gaia2-task-result-v1'], ['runId', manifest.runId], ['manifestHash', manifest.manifestHash], ['executionId', id], ['scenarioId', task.scenarioId], ['runNumber', task.runNumber], ['phase', task.phase], ['config', task.config]]) {
+  for (const [key, expected] of [['schemaVersion', 'gaia2-task-result-v1'], ['runId', manifest.runId], ['manifestHash', manifest.manifestHash], ['executionId', id], ['sessionId', session.sessionId], ['runtimeHash', runtimeHash], ['scenarioId', task.scenarioId], ['runNumber', task.runNumber], ['phase', task.phase], ['config', task.config]]) {
     if (result[key] !== expected) issue(errors, 'result_identity_mismatch', id, key)
   }
   if (result.evaluationComplete === true && typeof result.businessPassed !== 'boolean') issue(errors, 'judgment_invalid', id)
   return result
 }
 
-export function auditPhase6Run({ manifest, state = null, exportManifest = null } = {}) {
+export function auditPhase6Run({ manifest, state = null, exportManifest = null, root: workspaceRoot = root } = {}) {
   const errors = []
   if (!manifest || manifest.schemaVersion !== 'gaia2-run-manifest-v1' || !Array.isArray(manifest.tasks)) return { schemaVersion: 'gaia2-phase6-result-audit-v1', status: 'rejected', errors: [{ code: 'manifest_invalid' }], noModelExecution: true }
   const expectedIds = manifest.tasks.map(task => task.executionId)
@@ -61,7 +62,7 @@ export function auditPhase6Run({ manifest, state = null, exportManifest = null }
   if (state !== null) {
     for (const [key, expected] of [['schemaVersion', 'gaia2-run-state-v1'], ['runId', manifest.runId], ['manifestHash', manifest.manifestHash]]) if (state[key] !== expected) issue(errors, 'state_binding_mismatch', null, key)
     if (!Array.isArray(state.tasks) || digest(records.map(item => item?.executionId)) !== digest(expectedIds)) issue(errors, 'state_task_set_mismatch')
-    const runtimePath = resolve(root, manifest.runRoot, 'runtime-settings.json')
+    const runtimePath = resolve(workspaceRoot, manifest.runRoot, 'runtime-settings.json')
     let runtime = null
     try { runtime = existsSync(runtimePath) ? readJson(runtimePath) : null } catch { runtime = null }
     // phase1_runner binds runtimeHash to the canonical settings value, not
@@ -79,9 +80,13 @@ export function auditPhase6Run({ manifest, state = null, exportManifest = null }
     if (status === 'pending' && sessions.length !== 0) issue(errors, 'pending_has_sessions', task.executionId)
     if (status !== 'pending' && sessions.length === 0) issue(errors, 'used_task_has_no_session', task.executionId)
     const taskForSession = { ...task, __sessions: sessions }
-    sessions.forEach((session, index) => validateSession(errors, manifest, taskForSession, session, index))
+    sessions.forEach((session, index) => validateSession(errors, manifest, taskForSession, session, index, workspaceRoot))
     const session = sessions.at(-1)
-    const result = session ? validateResult(errors, manifest, task, record, session) : null
+    const pathNull = record.resultPath === null, hashNull = record.resultSha256 === null
+    if (pathNull !== hashNull) issue(errors, 'result_reference_incomplete', task.executionId)
+    if (['pending', 'running'].includes(status) && (!pathNull || !hashNull)) issue(errors, 'nonterminal_has_result', task.executionId)
+    if (status === 'running' && session?.endedAt !== null && session?.endedAt !== undefined) issue(errors, 'running_session_already_ended', task.executionId)
+    const result = session && ['completed', 'retry_pending', 'terminal_failure'].includes(status) ? validateResult(errors, manifest, task, record, session, workspaceRoot, state?.runtimeHash ?? null) : null
     if (status === 'completed' && (!result || result.evaluationComplete !== true || typeof result.businessPassed !== 'boolean')) issue(errors, 'completed_without_judgment', task.executionId)
     if (status === 'terminal_failure' && (record.failure?.retryable !== false || record.failure?.category === 'business_failure')) issue(errors, 'terminal_failure_invalid', task.executionId)
     const outcome = status === 'completed' ? (result?.businessPassed === true ? 'business_success' : 'business_failure') : status
