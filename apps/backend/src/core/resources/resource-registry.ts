@@ -1,3 +1,4 @@
+import { assertAssetWriteAllowed, auditedAssetWrite } from '#core/asset-write-policy'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -233,6 +234,7 @@ export class ProjectResourceRegistry {
   }
 
   saveSkill(id: string, value: unknown): SkillResourceModule {
+    assertAssetWriteAllowed(this.projectDir, 'skill.save')
     if (!isObject(value) || typeof value.content !== 'string' || typeof value.revision !== 'string') {
       throw new Error('skill update requires string content and revision')
     }
@@ -245,7 +247,7 @@ export class ProjectResourceRegistry {
       throw new ResourceRevisionConflict('skill changed on disk; reload before saving')
     }
     registry.validateContent(skill, value.content)
-    fs.writeFileSync(skill.entryFile, value.content, 'utf8')
+    auditedAssetWrite(this.projectDir, `skill.write:${id}`, () => fs.writeFileSync(skill.entryFile, value.content as string, 'utf8'))
     const saved = this.list().items.find(
       (item): item is SkillResourceModule =>
         item.kind === 'skill' && item.skills.some((definition) => definition.id === id),
@@ -255,6 +257,7 @@ export class ProjectResourceRegistry {
   }
 
   saveHarness(id: string, value: unknown): HarnessResourceModule {
+    assertAssetWriteAllowed(this.projectDir, 'harness.save')
     if (!isObject(value) || typeof value.content !== 'string' || typeof value.revision !== 'string') {
       throw new Error('harness update requires string content and revision')
     }
@@ -266,7 +269,7 @@ export class ProjectResourceRegistry {
     if (fileHash(harness.entryFile) !== value.revision) {
       throw new ResourceRevisionConflict('harness changed on disk; reload before saving')
     }
-    fs.writeFileSync(harness.entryFile, value.content, 'utf8')
+    auditedAssetWrite(this.projectDir, `harness.write:${id}`, () => fs.writeFileSync(harness.entryFile, value.content as string, 'utf8'))
     const saved = this.list().items.find(
       (item): item is HarnessResourceModule =>
         item.kind === 'harness' && item.harnesses.some((definition) => definition.id === id),

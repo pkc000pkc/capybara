@@ -6,8 +6,30 @@ import { test } from 'node:test'
 
 import { ToolDispatcher } from '#core/tools/tool-dispatcher'
 import { ToolRegistry } from '#core/tools/tool-registry'
+import { withAssetWritePolicy, type AssetWriteAudit } from '#core/asset-write-policy'
 
 const projectDir = path.resolve(process.env.CAPYBARA_TEST_PROJECT_DIR ?? 'test-project')
+
+test('read-only dispatch blocks asset file tools and permits ordinary task output', async context => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-tool-assets-'))
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.cpSync(path.join(projectDir, 'tools'), path.join(root, 'tools'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'main.j2'), 'original')
+  const registry = new ToolRegistry(root)
+  registry.load(['tools/files/manifest.json'])
+  const dispatcher = new ToolDispatcher(registry, root, { permissions: ['filesystem:write'] })
+  const events: AssetWriteAudit[] = []
+  await withAssetWritePolicy({ projectDir: root, readonly: true, onAudit: event => events.push(event) }, async () => {
+    const blocked = await dispatcher.dispatch({ id: 'blocked', name: 'write_file', arguments: { file_name: 'main.j2', content: 'changed' } })
+    assert.equal(blocked.error?.code, 'PERMISSION_DENIED')
+    assert.match(blocked.error?.message ?? '', /Read-only evaluation/)
+    const output = await dispatcher.dispatch({ id: 'output', name: 'write_file', arguments: { file_name: 'answer.txt', content: 'allowed' } })
+    assert.equal(output.ok, true, JSON.stringify(output.error))
+  })
+  assert.equal(fs.readFileSync(path.join(root, 'main.j2'), 'utf8'), 'original')
+  assert.equal(fs.readFileSync(path.join(root, 'answer.txt'), 'utf8'), 'allowed')
+  assert.equal(events.filter(event => event.status === 'blocked').length, 1)
+})
 
 test('registry loads project manifests and dispatcher enforces schemas and permissions', async () => {
   const registry = new ToolRegistry(projectDir)

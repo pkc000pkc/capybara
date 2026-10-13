@@ -1,3 +1,4 @@
+import { assertAssetWriteAllowed, auditedAssetWrite } from '#core/asset-write-policy'
 import fs from 'node:fs'
 import path from 'node:path'
 import nunjucks from 'nunjucks'
@@ -101,6 +102,7 @@ export class ContextBuilder {
   }
 
   saveTemplate(file: string, content: string): string {
+    assertAssetWriteAllowed(this.projectDir, 'template.save')
     const name = this.normalizeTemplateName(file)
     const target = path.resolve(this.projectDir, name)
     const relative = path.relative(this.projectDir, target)
@@ -109,7 +111,7 @@ export class ContextBuilder {
     }
 
     this.ignoredFileEvents.set(name, Date.now() + 500)
-    fs.writeFileSync(target, content, 'utf8')
+    auditedAssetWrite(this.projectDir, `template.write:${name}`, () => fs.writeFileSync(target, content, 'utf8'))
     return this.render('template', name)
   }
 

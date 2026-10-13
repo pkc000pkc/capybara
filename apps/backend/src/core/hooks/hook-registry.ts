@@ -1,3 +1,4 @@
+import { assertAssetWriteAllowed, auditedAssetWrite } from '#core/asset-write-policy'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -436,6 +437,7 @@ export class HookRegistry {
 
   createMany(files: readonly { name: string; source: string }[]): RegisteredHook[] {
     if (files.length === 0) return []
+    assertAssetWriteAllowed(this.projectDir, 'hook.create')
     this.reload()
     const names = new Set<string>()
     const systemNames = new Set(this.listSystem().map((hook) => hook.id))
@@ -451,10 +453,10 @@ export class HookRegistry {
     fs.mkdirSync(this.hooksDir, { recursive: true })
     try {
       for (const [index, hook] of validated.entries()) {
-        fs.writeFileSync(hook.entryFile, files[index]?.source ?? '', {
+        auditedAssetWrite(this.projectDir, `hook.write:${hook.id}`, () => fs.writeFileSync(hook.entryFile, files[index]?.source ?? '', {
           encoding: 'utf8',
           flag: 'wx',
-        })
+        }))
         created.push(hook.entryFile)
       }
     } catch (error) {
@@ -470,6 +472,7 @@ export class HookRegistry {
   }
 
   save(id: string, source: string, revision: string): RegisteredHook {
+    assertAssetWriteAllowed(this.projectDir, 'hook.save')
     const current = this.getProject(id)
     if (!current) throw new Error('Hook resource was not found')
     if (current.revision !== revision) throw new Error('HOOK_REVISION_CONFLICT')
@@ -477,16 +480,17 @@ export class HookRegistry {
       throw new Error(`User Hook name conflicts with system Hook: ${current.name}`)
     }
     const next = this.validateContent(current.name, source)
-    fs.writeFileSync(current.entryFile, source, 'utf8')
+    auditedAssetWrite(this.projectDir, `hook.write:${id}`, () => fs.writeFileSync(current.entryFile, source, 'utf8'))
     this.reload()
     return next
   }
 
   remove(id: string, revision: string): void {
+    assertAssetWriteAllowed(this.projectDir, 'hook.remove')
     const current = this.getProject(id)
     if (!current) throw new Error('Hook resource was not found')
     if (current.revision !== revision) throw new Error('HOOK_REVISION_CONFLICT')
-    fs.unlinkSync(current.entryFile)
+    auditedAssetWrite(this.projectDir, `hook.remove:${id}`, () => fs.unlinkSync(current.entryFile))
     this.reload()
   }
 

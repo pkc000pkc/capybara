@@ -139,6 +139,7 @@ export interface ExperimentFailure {
 }
 
 export interface ExperimentConfig {
+  readonlyAssets?: boolean
   concurrency: number
   repetitions: number
   timeoutMs: number
@@ -202,6 +203,8 @@ export interface ExperimentToolCall {
 }
 
 export interface ExperimentTrace {
+  llmRequests?: import('#core/experiments/llm-audit').ExperimentLlmAudit[]
+  assetWrites?: import('#core/asset-write-policy').AssetWriteAudit[]
   actorMessages?: Array<{ role: 'user' | 'assistant'; content: string }>
   runtimeRunId?: string
   failure?: RuntimeFailure

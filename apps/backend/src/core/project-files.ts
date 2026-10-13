@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { assertAssetWriteAllowed, auditedAssetWrite, isAssetPath } from '#core/asset-write-policy'
 
 import { resourceLanguage } from '#core/resources/resource-registry'
 
@@ -137,6 +138,7 @@ export class ProjectFileService {
 
   write(input: { path?: unknown; content?: unknown; revision?: unknown }): ProjectTextFile {
     const relative = relativePath(input.path, false)
+    this.guardAsset(relative, 'file.write')
     if (typeof input.content !== 'string') throw new Error('file content must be a string')
     if (typeof input.revision !== 'string' || !input.revision) throw new Error('file revision is required')
     const bytes = Buffer.byteLength(input.content, 'utf8')
@@ -150,7 +152,7 @@ export class ProjectFileService {
     if (revision(current) !== input.revision) {
       throw new ProjectFileRevisionConflict('project file changed on disk; reload it before saving')
     }
-    fs.writeFileSync(file, input.content, 'utf8')
+    this.mutateAsset(relative, 'file.write', () => fs.writeFileSync(file, input.content as string, 'utf8'))
     return this.read(relative)
   }
 
@@ -163,40 +165,66 @@ export class ProjectFileService {
     const directory = this.existingTarget(parent)
     if (!fs.statSync(directory).isDirectory()) throw new Error(`project directory was not found: ${parent || '.'}`)
     const relative = parent ? `${parent}/${name}` : name
+    this.guardAsset(relative, 'file.create')
     const target = this.lexicalTarget(relative)
     if (fs.existsSync(target)) throw new Error(`project entry already exists: ${relative}`)
-    if (input.type === 'directory') fs.mkdirSync(target)
-    else fs.writeFileSync(target, '', { encoding: 'utf8', flag: 'wx' })
+    this.mutateAsset(relative, 'file.create', () => {
+      if (input.type === 'directory') fs.mkdirSync(target)
+      else fs.writeFileSync(target, '', { encoding: 'utf8', flag: 'wx' })
+    })
     return this.describe(relative)
   }
 
   rename(input: { path?: unknown; name?: unknown }): ProjectFileEntry {
     const relative = relativePath(input.path, false)
+    this.guardAsset(relative, 'file.rename')
     const name = entryName(input.name)
     const source = this.mutableTarget(relative)
     const parent = path.posix.dirname(relative)
     const destinationRelative = parent === '.' ? name : `${parent}/${name}`
+    this.guardAsset(destinationRelative, 'file.rename.destination')
     const destination = this.lexicalTarget(destinationRelative)
     this.assertParentInside(destination)
     if (fs.existsSync(destination)) throw new Error(`project entry already exists: ${destinationRelative}`)
-    fs.renameSync(source, destination)
+    this.mutateAsset(this.guardAsset(relative, 'file.rename') ? relative : destinationRelative, 'file.rename', () => fs.renameSync(source, destination))
     return this.describe(destinationRelative)
   }
 
   remove(input: { path?: unknown; recursive?: unknown }): { deleted: true; path: string } {
     const relative = relativePath(input.path, false)
+    this.guardAsset(relative, 'file.remove')
     const target = this.mutableTarget(relative)
     const stats = fs.lstatSync(target)
-    if (stats.isDirectory()) {
-      const recursive = input.recursive === true
-      if (!recursive && fs.readdirSync(target).length > 0) {
-        throw new Error('directory is not empty; recursive deletion must be confirmed')
+    this.mutateAsset(relative, 'file.remove', () => {
+      if (stats.isDirectory()) {
+        const recursive = input.recursive === true
+        if (!recursive && fs.readdirSync(target).length > 0) {
+          throw new Error('directory is not empty; recursive deletion must be confirmed')
+        }
+        fs.rmSync(target, { recursive, force: false })
+      } else {
+        fs.unlinkSync(target)
       }
-      fs.rmSync(target, { recursive, force: false })
-    } else {
-      fs.unlinkSync(target)
-    }
+    })
     return { deleted: true, path: relative }
+  }
+
+  private guardAsset(relative: string, operation: string): boolean {
+    let protectedAsset = isAssetPath(relative)
+    const target = this.lexicalTarget(relative)
+    const existing = fs.existsSync(target) ? target : path.dirname(target)
+    if (fs.existsSync(existing)) {
+      const resolved = path.relative(this.realProjectDir, fs.realpathSync(existing)).replaceAll('\\', '/')
+      protectedAsset ||= isAssetPath(resolved)
+    }
+    if (protectedAsset) assertAssetWriteAllowed(this.projectDir, `${operation}:${relative}`)
+    return protectedAsset
+  }
+
+  private mutateAsset<T>(relative: string, operation: string, task: () => T): T {
+    return this.guardAsset(relative, operation)
+      ? auditedAssetWrite(this.projectDir, `${operation}:${relative}`, task)
+      : task()
   }
 
   private describe(relative: string): ProjectFileEntry {

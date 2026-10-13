@@ -832,6 +832,7 @@ export class TrainingManager {
         repetitions: 1,
         timeoutMs: Math.min(timeoutMs, remainingMs),
         keepWorkspaces: false,
+        readonlyAssets: item.phase === 'testing',
         sampleIds: [item.sampleId],
       }, {
         allowDirtyProject: true,

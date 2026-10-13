@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { withAssetWritePolicy, type AssetWriteAudit } from '#core/asset-write-policy'
 import { diagnosticLog } from '#util/llm/diagnostic-log'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -6,6 +7,7 @@ import nunjucks from 'nunjucks'
 
 import { DatasetStore, type DatasetRecord } from '#core/datasets/dataset-store'
 import { budgetedLlm } from '#core/experiments/llm-budget'
+import { auditedLlm, type ExperimentLlmAudit } from '#core/experiments/llm-audit'
 import { ExperimentAdapterRunner } from '#core/experiments/experiment-adapter'
 import {
   EMPTY_EXPERIMENT_METRICS,
@@ -45,6 +47,7 @@ export interface CreateExperimentInput {
   timeoutMs?: unknown
   keepWorkspaces?: unknown
   sampleIds?: unknown
+  readonlyAssets?: unknown
 }
 
 export interface ExperimentManagerOptions {
@@ -230,6 +233,8 @@ export class ExperimentManager {
     const timeoutMs = boundedInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, 1_000, MAX_TIMEOUT_MS, 'timeoutMs')
     const keepWorkspaces = input.keepWorkspaces === undefined ? false : input.keepWorkspaces
     if (typeof keepWorkspaces !== 'boolean') throw new Error('keepWorkspaces must be a boolean')
+    const readonlyAssets = input.readonlyAssets ?? false
+    if (typeof readonlyAssets !== 'boolean') throw new Error('readonlyAssets must be a boolean')
     const totalCases = selected.length * repetitions
     if (totalCases > MAX_EXPERIMENT_CASES) {
       throw new Error(`experiment cannot exceed ${MAX_EXPERIMENT_CASES} cases`)
@@ -264,7 +269,7 @@ export class ExperimentManager {
       expectedTools: record.expectedTools,
       metadata: record.metadata,
     })))
-    const runConfig = { concurrency, repetitions, timeoutMs, keepWorkspaces, sampleIds: selected.map((record) => record.id) }
+    const runConfig = { concurrency, repetitions, timeoutMs, keepWorkspaces, readonlyAssets, sampleIds: selected.map((record) => record.id) }
     const cases: CreateExperimentCase[] = []
     let ordinal = 0
     for (let repetition = 1; repetition <= repetitions; repetition += 1) {
@@ -524,6 +529,9 @@ export class ExperimentManager {
     const started = Date.now()
     this.store.startCase(item.id, startedAt)
     const workspaceDir = this.prepareWorkspace(run.id, item.id)
+    const assetWrites: AssetWriteAudit[] = []
+    const llmRequests: ExperimentLlmAudit[] = []
+    const runtimeLlm = auditedLlm(active.llm, 'actor', llmRequests)
     if (active.variableOverrides && Object.keys(active.variableOverrides).length > 0) {
       const resources = new ProjectResources(workspaceDir)
       const projectKeys = new Set(resources.readSystemVariables().variables.map(variable => variable.key))
@@ -536,7 +544,7 @@ export class ExperimentManager {
       projectDir: workspaceDir,
       workspaceDir,
       initialVariableOverrides: active.variableOverrides,
-      llm: active.maxTotalTokens ? budgetedLlm(active.llm, active.maxTotalTokens) : active.llm,
+      llm: active.maxTotalTokens ? budgetedLlm(runtimeLlm, active.maxTotalTokens) : runtimeLlm,
     })
     active.loops.add(loop)
     let adapter: ExperimentAdapterRunner | undefined
@@ -663,11 +671,19 @@ export class ExperimentManager {
         })
         armTimeout()
       })
-      this.command(loop, 'chat.message.send', {
+      withAssetWritePolicy({
+        projectDir: workspaceDir,
+        readonly: run.config.readonlyAssets === true,
+        assetPaths: (() => {
+          const settings = new ProjectResources(workspaceDir).readSettings()
+          return [...settings.skills, ...settings.harnesses, ...settings.tools, ...settings.tools.map(file => path.dirname(file))]
+        })(),
+        onAudit: event => assetWrites.push(event),
+      }, () => this.command(loop, 'chat.message.send', {
         clientMessageId: `experiment-${item.id}`,
         content: [{ type: 'text', text: item.question }],
         autoStart: true,
-      })
+      }))
       const runState = await terminal
       const state = loop.exportState()
       const snapshot = state.snapshot
@@ -692,6 +708,8 @@ export class ExperimentManager {
         ...(observation.durationMs === undefined ? {} : { durationMs: observation.durationMs }),
       }))
       const trace: ExperimentTrace = {
+        assetWrites,
+        llmRequests,
         actorMessages: snapshot.conversation.messages.map((message) => ({
           role: message.role, content: messageText(message),
         })),
@@ -767,7 +785,7 @@ export class ExperimentManager {
         })
         return
       }
-      const score = await this.score(active.llm, run, item, actualAnswer, actualTools, timeoutController.signal)
+      const score = await this.score(auditedLlm(active.llm, 'scorer', llmRequests), run, item, actualAnswer, actualTools, timeoutController.signal)
       const scoringUsage = usage(score.response.usage)
       trace.scoring = { prompt: score.prompt, response: score.response.text, usage: scoringUsage }
       this.store.completeCase(item.id, {
@@ -821,6 +839,8 @@ export class ExperimentManager {
         ...(runtimeRunId ? { runtimeRunId } : {}),
         failure: caseFailure,
         trace: {
+          assetWrites,
+          llmRequests,
           actorMessages: snapshot.conversation.messages.map((message) => ({
             role: message.role, content: messageText(message),
           })),

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { assertAssetWriteAllowed, auditedAssetWrite } from '#core/asset-write-policy'
 
 import { loadLlmConfig } from '#util/llm/config'
 import type { LlmProtocol, LlmProviderName } from '#util/llm/types'
@@ -503,6 +504,7 @@ export class ProjectResources {
   }
 
   saveSettings(value: unknown): ProjectSettings {
+    assertAssetWriteAllowed(this.projectDir, 'settings.update')
     const settings = this.resolveSettings(value)
     const { api_key: apiKey, profiles, ...llm } = settings.llm
     const persistedProfiles = profiles.map(({ api_key: _profileApiKey, ...profile }) => profile)
@@ -1109,6 +1111,10 @@ export class ProjectResources {
   }
 
   private writeJsonAtomic(file: string, value: unknown): void {
+    return auditedAssetWrite(this.projectDir, `resource.write:${path.relative(this.projectDir, file)}`, () => this.writeJsonAtomicUnchecked(file, value))
+  }
+
+  private writeJsonAtomicUnchecked(file: string, value: unknown): void {
     fs.mkdirSync(path.dirname(file), { recursive: true })
     const temporary = `${file}.${process.pid}.${Date.now()}.tmp`
     try {

@@ -50,7 +50,7 @@ function experimentUsage(value: Partial<ExperimentUsage> | undefined): Experimen
   return { ...EMPTY_USAGE, ...value }
 }
 
-function hiddenContext(
+export function hiddenTrainingContext(
   context: Omit<HookTrainingContext, 'parameters'>,
 ): Omit<HookTrainingContext, 'parameters'> {
   const passed = context.evaluation.passed === true
@@ -300,7 +300,7 @@ export class LearningHookRunner {
     }
     const referencePolicy = options.referencePolicy ?? 'hidden'
     if (checkpoint === 'after_replay' || referencePolicy === 'hidden') {
-      context = hiddenContext(context)
+      context = hiddenTrainingContext(context)
     } else if (checkpoint === 'after_evaluation') {
       const reference = resolveTrainingReference(
         context.case.expectedAnswer,

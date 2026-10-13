@@ -96,6 +96,39 @@ function experimentLlm(requests: LlmChatRequest[]): RuntimeLlm {
   }
 }
 
+test('read-only evaluation rejects actor variable mutation and persists the attempted write', async context => {
+  const projectDir = temporaryExperimentProject()
+  let app: Awaited<ReturnType<typeof buildApp>> | undefined
+  context.after(async () => {
+    await app?.close()
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  })
+  const datasets = new DatasetStore(projectDir)
+  const dataset = datasets.create({ name: 'Read-only boundary', storage: 'jsonl', path: 'datasets/readonly.jsonl', scoringPrompt: 'SCORER_REQUEST {{ actual_json }}' })
+  datasets.createRecord(dataset.id, { question: 'Attempt a persistent variable update.', answer: 'blocked' })
+  commitProject(projectDir, 'test: readonly boundary')
+  const llm = experimentLlm([])
+  llm.chat = async request => {
+    if (request.messages[0]?.content.includes('SCORER_REQUEST')) return response('{"score":1,"passed":true,"rationale":"Mutation was blocked."}')
+    if (request.messages.some(message => message.toolCallId === 'asset-write')) {
+      assert.match(JSON.stringify(request.messages), /Read-only evaluation blocked asset mutation/)
+      return response('{"status":"completed","content":"blocked"}')
+    }
+    return response('', [{ id: 'asset-write', name: 'apply_system_variable_changes', arguments: {
+      base_revision: 'test-revision', changes: [{ op: 'upsert', key: 'experiment_memory', value: 'must not persist', expected_value_sha256: null, scope: 'project' }],
+    } }])
+  }
+  app = await buildApp({ runtimeLoop: { projectDir, llm, streamDelayMs: 0, stepDelayMs: 0 } })
+  const query = `projectPath=${encodeURIComponent(projectDir)}`
+  const started = await app.inject({ method: 'POST', url: `/api/experiments?${query}`, payload: { datasetId: dataset.id, readonlyAssets: true, timeoutMs: 20000 } })
+  assert.equal(started.statusCode, 202, started.body)
+  const run = await waitForRun(app, query, started.json().id)
+  assert.equal(run.status, 'completed', JSON.stringify(run.failure))
+  const cases = await app.inject({ method: 'GET', url: `/api/experiments/${run.id}/cases?${query}` })
+  const detail = await app.inject({ method: 'GET', url: `/api/experiments/${run.id}/cases/${cases.json().items[0].id}?${query}` })
+  assert.ok(detail.json().trace.assetWrites.some((event: { status: string }) => event.status === 'blocked'))
+})
+
 function commitProject(projectDir: string, message: string): void {
   if (!fs.existsSync(path.join(projectDir, '.git'))) {
     git(projectDir, 'init', '--initial-branch=main')
@@ -288,17 +321,18 @@ test('experiment API runs dataset cases through tools and scoring, then persists
   })
   const projectQuery = `projectPath=${encodeURIComponent(projectDir)}`
 
-  const start = async (name: string, options: { repetitions?: number; sampleIds?: string[] } = {}) => {
+  const start = async (name: string, options: { repetitions?: number; sampleIds?: string[]; readonlyAssets?: boolean } = {}) => {
     const response = await app.inject({
       method: 'POST',
       url: `/api/experiments?${projectQuery}`,
-      payload: { datasetId: dataset.id, name, concurrency: 1, repetitions: options.repetitions ?? 1, timeoutMs: 10_000, ...(options.sampleIds ? { sampleIds: options.sampleIds } : {}) },
+      payload: { datasetId: dataset.id, name, concurrency: 1, repetitions: options.repetitions ?? 1, timeoutMs: 10_000, ...(options.sampleIds ? { sampleIds: options.sampleIds } : {}), ...(options.readonlyAssets === undefined ? {} : { readonlyAssets: options.readonlyAssets }) },
     })
     assert.equal(response.statusCode, 202, response.body)
     return waitForRun(app, projectQuery, (response.json() as ExperimentRunDetail).id)
   }
 
-  const first = await start('baseline')
+  const first = await start('baseline', { readonlyAssets: true })
+  assert.equal(first.config.readonlyAssets, true)
   assert.equal(first.status, 'completed', JSON.stringify(first.failure))
   assert.deepEqual(first.progress, { total: 2, completed: 2 })
   assert.equal(first.metrics.averageScore, 0.9)
@@ -328,6 +362,10 @@ test('experiment API runs dataset cases through tools and scoring, then persists
   })
   assert.equal(caseResponse.statusCode, 200)
   const caseDetail = caseResponse.json()
+  assert.ok(Array.isArray(caseDetail.trace.assetWrites))
+  assert.ok(caseDetail.trace.llmRequests.some((request: { role: string }) => request.role === 'actor'))
+  assert.ok(caseDetail.trace.llmRequests.some((request: { role: string }) => request.role === 'scorer'))
+  assert.ok(caseDetail.trace.llmRequests.every((request: { status: string; usage: unknown }) => request.status === 'completed' && request.usage !== null))
   assert.deepEqual(caseDetail.actualTools, ['search_resources', 'load_resources', 'read_file'])
   assert.equal(caseDetail.toolCalls.length, 3)
   assert.match(caseDetail.toolCalls[2].resultPreview, /main\.j2/)

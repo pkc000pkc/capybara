@@ -32,6 +32,10 @@ npm run test:backend
 
 The service listens on port `3005` by default.
 
+For frozen evaluations, the experiment API accepts `readonlyAssets: true`.
+See [evaluation integrity](docs/evaluation-integrity.md) for protected resources,
+write audit records, model usage accounting, and isolation boundaries.
+
 To use another project, copy `.env.example` to `.env` and set `CAPYBARA_PROJECT_DIR`. The local `.env` file and project runtime data are ignored by Git.
 
 ## Standalone Runner from source

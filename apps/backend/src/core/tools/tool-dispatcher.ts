@@ -1,5 +1,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import path from 'node:path'
+import fs from 'node:fs'
+import { assetWriteAudit, assertAssetWriteAllowed, isAssetPath } from '#core/asset-write-policy'
 
 import { ToolRegistry } from '#core/tools/tool-registry'
 import { toolNetworkRetrySettings, parseToolProgress, type ToolNetworkRetrySettings, type ToolProgress } from '#core/tools/network-retry'
@@ -91,6 +93,31 @@ export class ToolDispatcher {
     }
     if (!tool.validateInput(request.arguments)) {
       return Promise.resolve(fail('INVALID_ARGUMENTS', 'tool arguments failed schema validation', tool.validateInput.errors))
+    }
+    if (tool.permissions.includes('filesystem:write') && assetWriteAudit(this.workspaceDir, 'tool.write').readonly) {
+      const args = request.arguments && typeof request.arguments === 'object'
+        ? request.arguments as Record<string, unknown> : {}
+      const paths = ['file_name', 'path', 'source', 'destination', 'source_path', 'destination_path']
+        .flatMap(key => typeof args[key] === 'string' ? [args[key] as string] : [])
+      try {
+        // Unspecified filesystem writes cannot establish an asset boundary.
+        if (paths.length === 0) assertAssetWriteAllowed(this.workspaceDir, `tool.write:${tool.name}:unspecified-path`)
+        for (const input of paths) {
+          const target = path.resolve(this.workspaceDir, input)
+          const relative = path.relative(this.workspaceDir, target).replaceAll('\\', '/')
+          if (relative === '' || isAssetPath(relative) || relative.startsWith('../') || path.isAbsolute(relative)) {
+            assertAssetWriteAllowed(this.workspaceDir, `tool.write:${tool.name}`)
+          }
+          let ancestor = target
+          while (!fs.existsSync(ancestor) && path.dirname(ancestor) !== ancestor) ancestor = path.dirname(ancestor)
+          const resolved = path.relative(fs.realpathSync(this.workspaceDir), fs.realpathSync(ancestor)).replaceAll('\\', '/')
+          if (isAssetPath(resolved) || resolved.startsWith('../') || path.isAbsolute(resolved)) {
+            assertAssetWriteAllowed(this.workspaceDir, `tool.write:${tool.name}:resolved-path`)
+          }
+        }
+      } catch (error) {
+        return Promise.resolve(fail('PERMISSION_DENIED', error instanceof Error ? error.message : String(error)))
+      }
     }
     if (options.signal?.aborted) return Promise.resolve(fail('ABORTED', 'tool call was aborted'))
 
