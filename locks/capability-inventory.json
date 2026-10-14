@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-capability-inventory-v1",
-  "generatedAt": "2026-10-14T01:35:22.472Z",
+  "generatedAt": "2026-10-14T05:53:34.512Z",
   "noModelExecution": true,
   "plugins": [
     {
@@ -446,7 +446,7 @@
       },
       {
         "path": "D:/gitlocals/kanli8-human/capybara-backend/src/core/plugins/runtime-plugin-host.ts",
-        "sha256": "ff8bf2e834ce11d0a738e40088608692c12f5bea9ef64b55251ef39940fb3efd"
+        "sha256": "363d237baf318a5cd8c34a407e4468ccb3a9c4cbb6da37fcb5a40e73cac36a1d"
       }
     ],
     "gaps": [],

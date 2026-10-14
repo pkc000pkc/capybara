@@ -1,6 +1,6 @@
 {
   "schemaVersion": "gaia2-environment-lock-v1",
-  "generatedAt": "2026-10-14T01:35:22.472Z",
+  "generatedAt": "2026-10-14T05:53:34.512Z",
   "timeSource": "client-system-clock-new-Date-ISO-not-authoritative-dataset-time",
   "noModelExecution": true,
   "secretConfigRead": false,
@@ -1686,8 +1686,8 @@
     },
     {
       "path": "package.json",
-      "sha256": "11aa6a846c0ef0b42e511b82ab3049b03dd968e866e72df71090e1fd7f7ef9ad",
-      "bytes": 2435
+      "sha256": "f9f1774110686ec90172bb3212acff6edfdc207cf71c9f3ac6ca13e337b03652",
+      "bytes": 2462
     },
     {
       "path": "plugins/gaia2-evaluation/capybara.plugin.json",
@@ -1846,8 +1846,8 @@
     },
     {
       "path": "scripts/gaia2_model_http_guard.py",
-      "sha256": "378a2451e126f4d46c9a72ecc242a1bd7a37974d5e1667514f88ba2bad390c5c",
-      "bytes": 22394
+      "sha256": "f1fefbeaa0aa97f54de98b203f178bc3ecfa5737102063a66c502a5c5ebc6e19",
+      "bytes": 22480
     },
     {
       "path": "scripts/gaia2_model_retry.py",
@@ -1861,8 +1861,8 @@
     },
     {
       "path": "scripts/gaia2_official_a2a.py",
-      "sha256": "7e41d241262d1b56d47d3cab347662b4386da2ce188e92fc6aa6a24a248643c9",
-      "bytes": 56271
+      "sha256": "b689a17ae3a4126a0af9e652243c19fc23b9350c1a89b50524854783741745b4",
+      "bytes": 58718
     },
     {
       "path": "scripts/gaia2_parent_a2a_coordinator.py",
@@ -1871,8 +1871,8 @@
     },
     {
       "path": "scripts/gaia2_private_native_binding.py",
-      "sha256": "5bc2b17f7cb2a8bae830a7f775ff6e58e9e330051bf76cccdc6d9665b04fdebe",
-      "bytes": 77370
+      "sha256": "5896a020c07d4b57df2f9585fd12c7930eef039b321fb70b92ea45c6654d3cfe",
+      "bytes": 81429
     },
     {
       "path": "scripts/gaia2_production_delegation.py",
@@ -1891,8 +1891,8 @@
     },
     {
       "path": "scripts/gaia2_scoped_model_broker.py",
-      "sha256": "0e9fbd5605857cba7ceadf9c244201dda655f9dc86e98eaf14fcda6e80983ca2",
-      "bytes": 39885
+      "sha256": "f2c8ca0f3040d81a3780f95f7e21b9841f8089bc8b6966d2b89a2682f5d0796e",
+      "bytes": 42537
     },
     {
       "path": "scripts/gaia2_source_pinned_reads.py",
@@ -2026,8 +2026,8 @@
     },
     {
       "path": "scripts/phase3_hook_server.ts",
-      "sha256": "0e7b319a5188a8849e033a1cc79dd47ece18e6dbea693ba6eae70d5f5aacf437",
-      "bytes": 18508
+      "sha256": "5e569cdcc5621c95b0d8f4de28118c08de1f9575b91c7dbff97867a9c081ce3d",
+      "bytes": 18706
     },
     {
       "path": "scripts/phase4_correction_replay.mjs",
@@ -2256,8 +2256,8 @@
     },
     {
       "path": "src/phase2_audit.mjs",
-      "sha256": "075f4ef99338b377f8bbbf352e77951b5132d856e6a1b9d37ba18c7916276368",
-      "bytes": 48066
+      "sha256": "d1475b4232343d5766ab79c5d4f3c2e45d7e69fee29261864a6c06ece34cecd5",
+      "bytes": 48214
     },
     {
       "path": "src/phase2_cli.mjs",
@@ -2276,8 +2276,8 @@
     },
     {
       "path": "src/phase3_runtime_evidence.mjs",
-      "sha256": "32ec9175275b6752e1277a1e76d5ab687d5cbc8c6670861eda7f9bd28666726b",
-      "bytes": 37716
+      "sha256": "f34f86af1e1cc893156ae0de76684c97df34fc2d6c5aab3089f116ee71ee7dd0",
+      "bytes": 37865
     },
     {
       "path": "src/phase4_correction_attribution.mjs",
@@ -2336,8 +2336,8 @@
     },
     {
       "path": "src/phase5_a2a_evidence.mjs",
-      "sha256": "fbf6cee79e5001bc5c803231d4c2423ffa5d3b46a73dcf7feab2bfb20ba6cae8",
-      "bytes": 56596
+      "sha256": "d016d8a8a927f90c8b29e31bc9b9280aee313958186a108835e0d6ad41be0000",
+      "bytes": 73684
     },
     {
       "path": "src/phase5_information_noise_evidence.mjs",
@@ -2351,13 +2351,13 @@
     },
     {
       "path": "src/phase6_budget.mjs",
-      "sha256": "ab10da60972dc21ccb131e731fe7b8fefba14d627daa61be2834f61a85792419",
-      "bytes": 36154
+      "sha256": "fd3f5dbb3d8fafa54ed0131c326e8cb6318635012b719b7140e24e156bb6194f",
+      "bytes": 37510
     },
     {
       "path": "src/phase6_http_evidence.mjs",
-      "sha256": "3a76fee58d4b021fbac5fa023071ff4e0d21a5f2d69838f8e3736aaf028ea78e",
-      "bytes": 28739
+      "sha256": "2cef9e877a6a8458421c738b6714334f7e8399545e208c8d5a5098d9f94d86b0",
+      "bytes": 29357
     },
     {
       "path": "src/phase6_process_identity.mjs",
@@ -2458,6 +2458,11 @@
       "path": "test/fixtures/phase5_private_pipe_worker.py",
       "sha256": "1e8fb918c1a5f015c0215acf55ab886e3db192d5a5285017ceeb108422b20d85",
       "bytes": 2239
+    },
+    {
+      "path": "test/fixtures/phase6_native_admission_pipe_worker.py",
+      "sha256": "4079397aed641b4a28c454afabe3ba1d7de8aff603e742d547763655367efeb0",
+      "bytes": 6361
     },
     {
       "path": "test/model_service_health.test.mjs",
@@ -2646,8 +2651,8 @@
     },
     {
       "path": "test/phase5_a2a_evidence.test.mjs",
-      "sha256": "4c146a9db79dfcf403cbc82b6c710d4e6b5a6214b9dafc253c193c7287aaab6a",
-      "bytes": 40811
+      "sha256": "7515eb0ffe38913b0bb7a6b5cadf62759be0108c11079f636cd7e94d45320d65",
+      "bytes": 67212
     },
     {
       "path": "test/phase5_a2a_runtime_test.py",
@@ -2661,8 +2666,8 @@
     },
     {
       "path": "test/phase5_blocked_dispatch_test.py",
-      "sha256": "e5c60cec85c3e61115607c23040974b3dd528fc35cb14b69a822c47a29a9dd25",
-      "bytes": 35015
+      "sha256": "5379d91efcf0e50163ab1c86074740dd2f0918ea8e8f05038c86cddf7f96b94f",
+      "bytes": 35158
     },
     {
       "path": "test/phase5_bridge_notification_test.py",
@@ -2716,8 +2721,8 @@
     },
     {
       "path": "test/phase5_model_usage.test.mjs",
-      "sha256": "aacd26eeeba0a66270358df47fcbb78ae4ca8845c93ae45bcb60720c37c04638",
-      "bytes": 9530
+      "sha256": "f635409b4bd4f3bda7f5cf9e83eae1eb40cac94f18fadafd3b672a16a9fe6768",
+      "bytes": 9586
     },
     {
       "path": "test/phase5_multiapp_pipe.test.mjs",
@@ -2746,8 +2751,8 @@
     },
     {
       "path": "test/phase5_official_a2a_contract_test.py",
-      "sha256": "e5b2bfdce6e77053760eb855f254f126c6d5aa84a328a5e9ca3b85bb11953df6",
-      "bytes": 29356
+      "sha256": "a9b98c7c640ebbee27347f1be88f97ce88235249a854ea846f139304703b1201",
+      "bytes": 32334
     },
     {
       "path": "test/phase5_official_a2a_pool_test.py",
@@ -2766,8 +2771,8 @@
     },
     {
       "path": "test/phase5_production_bridge.test.mjs",
-      "sha256": "94dbfb4db3a2023d90db71cbc9c0ee4f3c4660d653c4875c4547731f0dda9772",
-      "bytes": 7297
+      "sha256": "cbce00da7ac7e57b90311998dab5ef63f7547bd453ac8e68d1caf7fe54076773",
+      "bytes": 7419
     },
     {
       "path": "test/phase5_scoped_app_agent_test.py",
@@ -2776,8 +2781,8 @@
     },
     {
       "path": "test/phase5_scoped_model_broker_test.py",
-      "sha256": "ec1534d1a984119ea935c39c0b6c81ac8b8959c91436c91d9566c3073e9c2058",
-      "bytes": 21431
+      "sha256": "5f97235a15d68c4ebf660a5a63e38f8ff575c46f0228deb858a9a54cb3c49c5a",
+      "bytes": 23408
     },
     {
       "path": "test/phase5_shopping_native_subset_test.py",
@@ -2790,14 +2795,19 @@
       "bytes": 3717
     },
     {
+      "path": "test/phase6_a2a_clock_sync_test.py",
+      "sha256": "4a8bb42f2d096a88d7c920d03336ab2db87359fa2120710f8084b6a17f996d26",
+      "bytes": 11600
+    },
+    {
       "path": "test/phase6_budget.test.mjs",
-      "sha256": "bd4a6eb8febcd2814d0511d400f1a7dab6a1a2636d419156f77ffa6e923f0b64",
-      "bytes": 20543
+      "sha256": "0be7baf5f151057267d5f992dbdb34ead0bd92ca286a28c314e1e08730fdc337",
+      "bytes": 24353
     },
     {
       "path": "test/phase6_http_evidence.test.mjs",
-      "sha256": "2cd55f9c2a90a2453bfcea736d490e8dba3a7a3dee2a2f411a9c357622c6c8f5",
-      "bytes": 20534
+      "sha256": "85b96fdca63160529393392b150eac8a6275a7691a7d072b444005a1a221c9b4",
+      "bytes": 23204
     },
     {
       "path": "test/phase6_http_scope.test.mjs",
@@ -2811,8 +2821,8 @@
     },
     {
       "path": "test/phase6_model_http_guard_test.py",
-      "sha256": "f9b4421b3ccceaf8a2222c7a2b94a20185d65a12719094f97944f289a264a3aa",
-      "bytes": 51906
+      "sha256": "a4f0802c5ca5b0bf391028f7c9d41def664b3c15af654a04f7ae9e8f661b2a76",
+      "bytes": 77228
     },
     {
       "path": "test/phase6_model_http_guard.test.mjs",
@@ -2823,6 +2833,11 @@
       "path": "test/phase6_native_compat.test.mjs",
       "sha256": "f219402cf01c88576597b34a9d1bd9412bf41de6d1ab5e3901d74f40f2c8b7f3",
       "bytes": 13110
+    },
+    {
+      "path": "test/phase6_native_deadline_admission_test.py",
+      "sha256": "4d4e12d6af2fabd80c7a8853dcb8ff74ac3dca567f7cfc7385b20dcd6bf604ca",
+      "bytes": 20067
     },
     {
       "path": "test/phase6_native_schema_test.py",
@@ -2900,12 +2915,17 @@
       "bytes": 26491
     },
     {
+      "path": "test/test_discovery.test.mjs",
+      "sha256": "0d906f20f97d95920661055f3c72e6e468558ca0561b69dae72d167f97afd1ba",
+      "bytes": 1892
+    },
+    {
       "path": "test/trace_verifier.test.mjs",
       "sha256": "719ef350474d439ba815b90f2f64324a776b237225047b66a0f74347dc33604b",
       "bytes": 1443
     }
   ],
-  "contentTreeSha256": "7bdf70fb0971eec051285c0ffc1902d8306ebcde0fc7b238bb5a6a0c8a1cb037",
+  "contentTreeSha256": "110d884c007639356afb27e20250be2a68610aefee7613ba8d2182e885fbce76",
   "officialCodeInputs": [
     {
       "path": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.official-python/are/__init__.py",
@@ -4798,8 +4818,8 @@
       },
       {
         "path": "src/core/plugins/runtime-delegation-host-adapter.ts",
-        "sha256": "71f944d851d61e61f405b845db5e0a229beca8214000f0a2484ad06c467c4f24",
-        "bytes": 12034
+        "sha256": "b9204f0078170f02e05661d7944d820b12eca8930a60920cb14bd50a2797d55c",
+        "bytes": 13971
       },
       {
         "path": "src/core/plugins/runtime-delegation-model.ts",
@@ -4808,8 +4828,8 @@
       },
       {
         "path": "src/core/plugins/runtime-delegation-native-pipe.ts",
-        "sha256": "ddadaeaf75c7cd2a07c3ae7729b927efaece8d924f8af093cfc50248308d2e9f",
-        "bytes": 40692
+        "sha256": "8015ad2052d54d747aa929b7aac3825dd933f58e08f7b95fc0ccf9c53adeee67",
+        "bytes": 46320
       },
       {
         "path": "src/core/plugins/runtime-delegation-pipe-listener.ts",
@@ -4823,8 +4843,8 @@
       },
       {
         "path": "src/core/plugins/runtime-delegation-registry.ts",
-        "sha256": "5e4c99c59957ec3dbb1e5b96eaceff29bf650553fb804ed8e581cfa3487547c6",
-        "bytes": 56557
+        "sha256": "e508623f75291dd1566a93c8e3cc10a8df62e845d46050574390ff7a91f5af0e",
+        "bytes": 64602
       },
       {
         "path": "src/core/plugins/runtime-delegation-wire.ts",
@@ -4833,8 +4853,8 @@
       },
       {
         "path": "src/core/plugins/runtime-plugin-host.ts",
-        "sha256": "ff8bf2e834ce11d0a738e40088608692c12f5bea9ef64b55251ef39940fb3efd",
-        "bytes": 83429
+        "sha256": "363d237baf318a5cd8c34a407e4468ccb3a9c4cbb6da37fcb5a40e73cac36a1d",
+        "bytes": 89369
       },
       {
         "path": "src/core/plugins/training-plugin-host.ts",
@@ -5008,8 +5028,8 @@
       },
       {
         "path": "test/runtime-delegation-app-agent.test.ts",
-        "sha256": "6bdb40d25535f093077defc90ecc7cdb5799c96216fa6a9a6a2085db7ca3a039",
-        "bytes": 32820
+        "sha256": "c05647e8af28d70a4d635abbe96b0917466361002bd90583abe7850ad0644874",
+        "bytes": 32880
       },
       {
         "path": "test/runtime-delegation-child-identity.test.ts",
@@ -5018,8 +5038,8 @@
       },
       {
         "path": "test/runtime-delegation-model-gate.test.ts",
-        "sha256": "ef1335870978cc9acb93b7e712ea6c042821dccc13f78dd14069f9c2308d9eea",
-        "bytes": 25054
+        "sha256": "dc8a5062cb18df4d0bddd20cd1d439f0ce7b98cbe3abaa89a4b731ae587ed729",
+        "bytes": 25141
       },
       {
         "path": "test/runtime-delegation-model.test.ts",
@@ -5028,18 +5048,23 @@
       },
       {
         "path": "test/runtime-delegation-multi-app-host.test.ts",
-        "sha256": "298f2f0442b02371096ca3c7b7f143d5fb9b7d9bc80ba39040cf2d0258da6db9",
-        "bytes": 17613
+        "sha256": "aaff541976603e4917e2a467d5bb5f8383f47d9f37c006a26c883e1c2e12384f",
+        "bytes": 17673
+      },
+      {
+        "path": "test/runtime-delegation-native-admission.test.ts",
+        "sha256": "12c7c3fbedf11f6cc4a1cecdbaa7a2d17ac45925ac0fc7fbb34ca80eedcd21f0",
+        "bytes": 22022
       },
       {
         "path": "test/runtime-delegation-native-clock.test.ts",
-        "sha256": "2f79e5e75325f7a891fb095612aa6cd8da1cfde1386e7608e897f88eb0425343",
-        "bytes": 21805
+        "sha256": "90f130a4ce778a3a48b2706dc2e8c722df6562783b7e20c84344e89ff4da9487",
+        "bytes": 25174
       },
       {
         "path": "test/runtime-delegation-native-pipe.test.ts",
-        "sha256": "0d9be6aec623fbf2d6626e4a17bb49a30809a809921e96793c16f67bbc8cc6a7",
-        "bytes": 44072
+        "sha256": "4ca46e87026c5f6ffbdbbc1e73bd072f606d867b8221d0e43ed9c051edb6d45f",
+        "bytes": 44132
       },
       {
         "path": "test/runtime-delegation-pipe-cross.test.ts",
@@ -5053,8 +5078,8 @@
       },
       {
         "path": "test/runtime-delegation-registry.test.ts",
-        "sha256": "12600d36ba1df8f2b8c72b9698e479bbb51cd76f4bb6297261b76cffd6754021",
-        "bytes": 36848
+        "sha256": "e882f6a776d905bce63f16cad98828531368e97cb5a81ebac4796b98f87bfceb",
+        "bytes": 39777
       },
       {
         "path": "test/runtime-delegation-source-return.test.ts",
@@ -5068,8 +5093,8 @@
       },
       {
         "path": "test/runtime-plugin-host.test.ts",
-        "sha256": "266d61925685629633706bdeb5afb335135eee71478e53bbe4edf62122956218",
-        "bytes": 37174
+        "sha256": "07c5a2cd0cdc3f3697090931c096bbed67460ca98adbd28c130374bc1b2e39a7",
+        "bytes": 42681
       },
       {
         "path": "test/runtime-plugin-observation-metadata.test.ts",
@@ -5102,7 +5127,7 @@
         "bytes": 3649
       }
     ],
-    "contentTreeSha256": "babfaed2612b803b3a64b7c3c011b9aba3843dd4da0456024dc182278c2f53f7",
+    "contentTreeSha256": "ea1e2beed6f605b66c6216e3793f3cff3c2e27dc0374872678bf4a8bd6e5d70c",
     "dependencyVersions": {
       "packageLockSha256": "465ffed3ad1a262cd4233fabd18231e77492093d42415b1fc3affce76f2d42e6",
       "installedDirect": [
@@ -5780,17 +5805,17 @@
     "project": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "4a31f31f3b49f687a15676cfd8aa8f1521b0ec1a",
-      "gitHead": "4a31f31f3b49f687a15676cfd8aa8f1521b0ec1a",
+      "head": "b4916f849caf79f5ab6d9eb3010cab2f97ef0770",
+      "gitHead": "b4916f849caf79f5ab6d9eb3010cab2f97ef0770",
       "dirty": true,
-      "statusSha256": "9e41b25ea4f2a74b058aa5d9d577a733f76f6d026c03e8f969e08157d2851481",
-      "dirtyEntryCount": 37
+      "statusSha256": "af10d256294641488fa97af6696d2b13ed11053a301f4ff180db5d430367b781",
+      "dirtyEntryCount": 44
     },
     "backend": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-backend",
-      "head": "9fd221299c10eef3e58dcfaffea891effd7df4b7",
-      "gitHead": "9fd221299c10eef3e58dcfaffea891effd7df4b7",
+      "head": "64c1d630061e2a7273781da19f25e0544fd7040c",
+      "gitHead": "64c1d630061e2a7273781da19f25e0544fd7040c",
       "dirty": true,
       "statusSha256": "a225a132ffc44b4e600f5f1a3b99881903f5ac73edc3b4f086bf42acbb7ccf79",
       "dirtyEntryCount": 2
@@ -5798,11 +5823,11 @@
     "pluginSource": {
       "status": "captured",
       "root": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project",
-      "head": "4a31f31f3b49f687a15676cfd8aa8f1521b0ec1a",
-      "gitHead": "4a31f31f3b49f687a15676cfd8aa8f1521b0ec1a",
+      "head": "b4916f849caf79f5ab6d9eb3010cab2f97ef0770",
+      "gitHead": "b4916f849caf79f5ab6d9eb3010cab2f97ef0770",
       "dirty": true,
-      "statusSha256": "9e41b25ea4f2a74b058aa5d9d577a733f76f6d026c03e8f969e08157d2851481",
-      "dirtyEntryCount": 37
+      "statusSha256": "af10d256294641488fa97af6696d2b13ed11053a301f4ff180db5d430367b781",
+      "dirtyEntryCount": 44
     }
   },
   "hashingPolicy": {

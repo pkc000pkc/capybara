@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "gaia2-protocol-v1",
+  "datasets": {
+    "source": {
+      "id": "meta-agents-research-environments/gaia2-cli",
+      "revision": "240ac47bfc62b24c934f95d014ffa5a3cab8b04c",
+      "split": "test",
+      "configs": ["execution", "search", "adaptability", "time", "ambiguity"],
+      "cacheDir": "data/source"
+    },
+    "submission": {
+      "id": "meta-agents-research-environments/gaia2",
+      "revision": "78ea3bdbdeec2bdcd6afa5420915d8a22f23ed99",
+      "split": "validation",
+      "configs": ["execution", "search", "adaptability", "time", "ambiguity", "mini"],
+      "cacheDir": "data/submission"
+    }
+  },
+  "runtime": {
+    "areVersion": "1.2.0",
+    "python": ".runtime-python/python-3.12.14-d41bad46673f/python.exe",
+    "officialPythonPath": ".official-python",
+    "backendRoot": "D:/gitlocals/kanli8-human/capybara-backend",
+    "pluginSourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/plugins",
+    "executionBinding": "phase3_live_plugin_host_required"
+  },
+  "models": {
+    "actor": {"model": "gpt-6-luna", "provider": "local", "protocol": "chat-completions"},
+    "judge": {"model": "gpt-6-luna", "provider": "local", "protocol": "chat-completions"},
+    "configurationSource": "gaia2-model-config.json",
+    "endpointReference": "base_url",
+    "credentialReference": "apiKeySource",
+    "sourceProtocol": "responses"
+  },
+  "requestedRuntime": {
+    "processTimeoutMinutes": 8000,
+    "scenarioTimeoutSeconds": 480000,
+    "modelRequestTimeoutSeconds": 60,
+    "concurrency": 1
+  },
+  "modes": {
+    "internal_pass5": {
+      "initialRunsPerScenario": 5,
+      "maxCorrections": 0,
+      "phases": ["standard"],
+      "datasetKind": "source",
+      "entrypoint": "scripts/official_integrated_pilot.mjs",
+      "metrics": ["initial_pass_at_5", "corrected_task_success", "infrastructure_error_rate"],
+      "seedBinding": "capybara_orchestrator_only"
+    },
+    "official_submission": {
+      "initialRunsPerScenario": 3,
+      "maxCorrections": 0,
+      "phases": ["standard", "agent2agent", "noise"],
+      "datasetKind": "submission",
+      "entrypoint": "are-benchmark gaia2-run",
+      "metrics": ["official_validation_report"],
+      "seedBinding": "official_phase_configuration",
+      "pipelineConfigured": false
+    }
+  },
+  "rootSeed": 20261008,
+  "learningPolicy": "freeze_before_evaluation",
+  "officialProtocolSource": "https://github.com/facebookresearch/meta-agents-research-environments/blob/main/docs/user_guide/gaia2_evaluation.rst"
+}
