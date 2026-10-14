@@ -172,6 +172,7 @@ class _Journal:
                 self.previous = record_hash
                 self.expected_size = len(actual)
                 self.expected_hash = _sha(actual)
+                return record_hash
             except BaseException:
                 self.failed = True
                 _fail("HTTP_GUARD_JOURNAL_FAILED")
@@ -221,6 +222,48 @@ def _attempt_identity(role, request_id, request_attempt, additional):
     return identity
 
 
+class _AttemptFailureReceipt:
+    """Caller-owned, single-use evidence; never an SDK exception attribute.
+
+    The receipt is kept outside SDK kwargs. Only a fully journaled, healthy
+    lease closure can seal it, and consumption must name the exact exception
+    and trusted attempt that created it. No request or response text is stored.
+    """
+    def __init__(self, role, request_id, request_attempt):
+        self.identity = _attempt_identity(role, request_id, request_attempt, None)
+        self.owner = threading.get_ident()
+        self.consumed = False
+        self._proof = None
+
+    def _seal(self, lease, failure, closed_hash):
+        if (self.consumed or self._proof is not None or self.identity != lease.identity
+                or self.owner != lease.owner or self.owner != threading.get_ident()
+                or not isinstance(failure, Exception) or lease.failure_code is not None
+                or lease.before_dispatch_failure is not None or not lease.closed
+                or lease.admitted != 1 or lease.denied != 0 or lease.responses != 1
+                or type(lease.response_status) is not int or lease.journal.failed
+                or type(closed_hash) is not str or not _HASH.fullmatch(closed_hash)):
+            return
+        self._proof = (failure, lease.journal, lease.response_status, closed_hash)
+
+    def consume(self, error, role, request_id, request_attempt):
+        """An unsuccessful/mismatched consumption also burns the receipt."""
+        proof, self._proof = self._proof, None
+        if self.consumed:
+            return None
+        self.consumed = True
+        if (proof is None or self.owner != threading.get_ident()
+                or type(request_id) is not str or type(request_attempt) is not int
+                or self.identity != {"modelRole": role, "requestId": request_id,
+                    "requestAttempt": request_attempt}):
+            return None
+        failure, journal, status, closed_hash = proof
+        if (failure is not error or journal is not _controller or journal.failed
+                or journal.fd is None or install_model_http_guard() is not journal):
+            return None
+        return {"responseStatus": status, "closedRecordSha256": closed_hash}
+
+
 class _Lease:
     def __init__(self, journal, identity, before_dispatch=None):
         self.journal, self.identity = journal, identity
@@ -228,6 +271,7 @@ class _Lease:
         self.lock = threading.RLock()
         self.admitted = self.denied = self.responses = 0
         self.body_hash = None
+        self.response_status = None
         self.failure_code = None
         self.closed = False
         self.expected_url = None
@@ -240,7 +284,7 @@ class _Lease:
 
     def emit(self, kind, **fields):
         try:
-            self.journal.append(kind, attempt=self.identity, **fields)
+            return self.journal.append(kind, attempt=self.identity, **fields)
         except BaseException:
             self.failure_code = "HTTP_GUARD_JOURNAL_FAILED"
             _fail(self.failure_code)
@@ -292,6 +336,7 @@ class _Lease:
                 self.fail("HTTP_GUARD_RESPONSE_INVALID")
             self.emit("dispatch_response", admittedDispatches=1, requestBodyHash=self.body_hash,
                 responseStatus=response.status_code)
+            self.response_status = response.status_code
             self.responses += 1
 
 
@@ -313,7 +358,7 @@ def _sdk_completion_url(sdk_client):
 
 
 def guarded_sdk_attempt(completion, role, request_id, request_attempt, *, kwargs,
-                        args=(), additional_identity=None, before_dispatch=None):
+                        args=(), additional_identity=None, before_dispatch=None, _failure_receipt=None):
     """Trusted retry callers supply identity; SDK/Actor kwargs never supply it."""
     journal = install_model_http_guard()
     if journal is None:
@@ -325,6 +370,10 @@ def guarded_sdk_attempt(completion, role, request_id, request_attempt, *, kwargs
     if active is not None:
         active.fail("HTTP_GUARD_NESTED_ATTEMPT")
     identity = _attempt_identity(role, request_id, request_attempt, additional_identity)
+    if (_failure_receipt is not None and (type(_failure_receipt) is not _AttemptFailureReceipt
+            or _failure_receipt.identity != identity or _failure_receipt.owner != threading.get_ident()
+            or _failure_receipt.consumed or _failure_receipt._proof is not None)):
+        _fail("HTTP_GUARD_IDENTITY_INVALID")
     if role == "child_actor" and (identity["parentExecutionId"] != journal.identity["executionId"]
             or identity["parentSessionId"] != journal.identity["sessionId"]):
         _fail("HTTP_GUARD_IDENTITY_INVALID")
@@ -401,11 +450,14 @@ def guarded_sdk_attempt(completion, role, request_id, request_attempt, *, kwargs
             else "SDK_CALL_FAILED" if sdk_status == "failed" else None)
         transport_status = "failed" if lease.failure_code else sdk_status
         try:
-            lease.emit("sdk_attempt_closed", sdkCallStatus=sdk_status, transportStatus=transport_status,
+            closed_hash = lease.emit("sdk_attempt_closed", sdkCallStatus=sdk_status, transportStatus=transport_status,
                 admittedDispatches=lease.admitted, deniedDispatches=lease.denied, responseCount=lease.responses,
                 clientClosed=client_closed, leaseClosed=True, failureCode=code)
         finally:
             _active_lease.reset(token)
+        if (_failure_receipt is not None and sdk_status == "failed" and code == "SDK_CALL_FAILED"
+                and client_closed and observed_closed):
+            _failure_receipt._seal(lease, failure, closed_hash)
     if lease.failure_code:
         _fail(lease.failure_code)
     if lease.before_dispatch_failure is not None:

@@ -40,7 +40,7 @@ export async function controlledReplayFixture(t, { caseName = 'unknown', trainin
   let actorProcess, hostProcess
   try {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/(?:API_KEY|ACCESS_TOKEN|AUTHORIZATION|HF_TOKEN|HUGGINGFACE_TOKEN|GAIA2_HOOK_|GAIA2_CORRECTION_)/i.test(key)))
-    actorProcess = await runChildProcess({ command: protocol.runtime.python,
+    actorProcess = await runChildProcess({ command: resolve(root, protocol.runtime.python),
       args: [join(root, 'scripts/phase4_replay_controlled.py'), '--case', caseName, '--report', resolve(root, session.outputDir, 'fixture-report.json'), ...(typeof passed === 'boolean' ? ['--grade', passed ? 'passed' : 'failed'] : [])],
       cwd: resolve(root, session.workspaceDir), outputDir: resolve(root, session.outputDir, 'actor-process'),
       env: { ...env, PYTHONPATH: resolve(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1',
@@ -66,7 +66,7 @@ export async function controlledReplayFixture(t, { caseName = 'unknown', trainin
   assert.equal(verified.trainingHooksExecuted, false)
   assert.equal(verified.actorInputHashReconstructed, false, 'production collector must not overclaim full Actor prompt reconstruction')
   assert.equal(verified.readonlyInitializationVerified, true)
-  assert.equal(verified.typedVariableCount, 13); assert.equal(verified.persistentHarnessCount, 2)
+  assert.equal(verified.typedVariableCount, 14); assert.equal(verified.persistentHarnessCount, 2)
   assert.equal(verified.strategyConsumedModelRequests, actors.length)
   assert.equal(proof.actorInputHashReconstructed, true)
   assert.equal(proof.realModelCalls, 0); assert.equal(proof.externalNetworkAttempts, 0)

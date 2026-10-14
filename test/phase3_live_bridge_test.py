@@ -647,17 +647,24 @@ class Tests(unittest.TestCase):
     def test_12_reply_does_not_end_scenario_without_turn_limit(self):
         scenario,env,aui,system,ledger=setup_scenario(turns=None)
         calls=[]
+        reply_observed=threading.Event()
         def model(messages,*unused):
             calls.append(messages)
             return response('AgentUserInterface__send_message_to_user',{'content':'First turn complete'})
+        def after_reply(request,state):
+            if (request['action'].get('canonicalName')=='AgentUserInterface__send_message_to_user'
+                    and request['outcome']['status']=='succeeded'):
+                reply_observed.set()
         def later():
             # Lifecycle stop comes from a real environment operation, not Actor silence.
             import time
-            time.sleep(.1)
+            if reply_observed.wait(5):
+                time.sleep(.1)
             env.stop()
         stopper=threading.Thread(target=later);stopper.start()
-        with hook_server():self.run_bridge(scenario,env,model)
+        with hook_server(after_hook=after_reply):self.run_bridge(scenario,env,model)
         stopper.join(2)
+        self.assertTrue(reply_observed.is_set(),'the real reply must execute before environment stop')
         self.assertEqual(self.end_event()['terminationReason'],'environment_stop')
         self.assertEqual(len(calls),1)
 

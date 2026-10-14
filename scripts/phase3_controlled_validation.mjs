@@ -96,7 +96,7 @@ function inspectCaseEvidence({ root, workspace, output, fixture, capabilities, r
       assert.ok(event, 'after_tool must bind an actual ARE invocation')
       assert.equal(value.input.outcome.resultHash, event.resultHash)
       assert.equal(value.input.outcome.status, event.status)
-      if (value.input.outcome.status === 'succeeded' && ['ControlledLedger__write', 'ControlledLedger__read'].includes(value.input.action.name)) {
+      if (value.input.outcome.status === 'succeeded' && ['ControlledLedger__write', 'ControlledLedger__read', 'ControlledLedger__failed_read'].includes(value.input.action.name)) {
         const result = value.input.outcome.result
         assert.equal(typeof result.contact, 'string', 'official Contact must reach the strict real Host as Actor-visible text')
         assert.equal(result.nested[0].contact, result.contact)
@@ -153,16 +153,40 @@ function inspectCaseEvidence({ root, workspace, output, fixture, capabilities, r
     assert.equal(entry.resultHash, afterTool('unknown-first').input.outcome.resultHash)
     assert.equal(fixture.callbackCounts.write, 1)
   } else if (fixture.case === 'unverified_evidence') {
-    const gate = beforeTool('unverified-write')
-    assert.equal(gate.decision.action, 'read_back')
-    assert.ok(gate.hookReceipts.some(receipt => receipt.hookId === 'gaia2-conflict-gate' && receipt.decision?.action === 'read_back'))
-    assert.ok(gate.hookReceipts.some(receipt => receipt.hookId === 'gaia2-write-guard' && receipt.decision?.action === 'allow'))
-    assert.equal(afterTool('unverified-write'), undefined)
+    const failed = afterTool('unverified-read-failed')
+    assert.equal(failed.input.action.canonicalName, 'ControlledLedger__failed_read')
+    assert.equal(failed.input.outcome.status, 'failed_before_execution')
+    assert.deepEqual(failed.variables.gaia2_observation_state.unverified_ids, ['obs-unverified-read-failed'])
+    for (const id of ['unverified-write', 'unverified-write-after-different-read']) {
+      const gate = beforeTool(id)
+      assert.equal(gate.decision.action, 'read_back')
+      assert.ok(gate.hookReceipts.some(receipt => receipt.hookId === 'gaia2-conflict-gate' && receipt.decision?.action === 'read_back'))
+      assert.ok(gate.hookReceipts.some(receipt => receipt.hookId === 'gaia2-write-guard' && receipt.decision?.action === 'allow'))
+      assert.deepEqual(gate.variables.gaia2_observation_state.unverified_ids, ['obs-unverified-read-failed'])
+      assert.equal(afterTool(id), undefined)
+    }
+    const different = afterTool('unverified-different-read')
+    assert.equal(beforeTool('unverified-different-read').decision.action, 'allow')
+    assert.equal(different.input.outcome.status, 'succeeded')
+    assert.equal(different.input.action.resourceKey, failed.input.action.resourceKey)
+    assert.notEqual(different.input.action.canonicalName, failed.input.action.canonicalName)
+    assert.notEqual(different.input.action.mutationKey, failed.input.action.mutationKey)
+    assert.deepEqual(different.variables.gaia2_observation_state.unverified_ids, ['obs-unverified-read-failed'])
+    assert.ok(different.variables.gaia2_observation_state.observations.some(item => item.actionId === 'unverified-read-failed' && item.status === 'failed'))
     assert.equal(beforeTool('unverified-fresh-read').decision.action, 'allow')
-    const observation = afterTool('unverified-fresh-read').variables.gaia2_observation_state
+    const fresh = afterTool('unverified-fresh-read')
+    assert.equal(fresh.input.action.canonicalName, failed.input.action.canonicalName)
+    assert.equal(fresh.input.action.resourceKey, failed.input.action.resourceKey)
+    assert.equal(fresh.input.action.mutationKey, failed.input.action.mutationKey)
+    assert.deepEqual(fresh.input.action.arguments, failed.input.action.arguments)
+    assert.equal(fresh.input.action.authoritativeRead, true)
+    assert.equal(fresh.input.outcome.status, 'succeeded')
+    assert.equal(fresh.input.outcome.complete, true)
+    const observation = fresh.variables.gaia2_observation_state
     assert.deepEqual(observation.unverified_ids, [])
-    assert.ok(observation.observations.some(item => item.actionId === 'unverified-read-failed' && item.status === 'verified_by_fresh_read'))
-    assert.equal(fixture.callbackCounts.write, 0)
+    assert.ok(observation.observations.some(item => item.actionId === 'unverified-read-failed' && item.status === 'verified_by_fresh_read' && item.verifiedBy === 'unverified-fresh-read'))
+    assert.deepEqual(fixture.callbackCounts, { write: 0, read: 1, failed_read: 2 })
+    assert.equal(fixture.fakeActorRequests, 6)
   } else if (fixture.case === 'wait') {
     assert.equal(beforeTool('official-wait').input.action.canonicalName, 'SystemApp__wait_for_notification')
     assert.equal(afterTool('official-wait').decision.action, 'allow')

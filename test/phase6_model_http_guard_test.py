@@ -68,9 +68,11 @@ def server(mode="normal"):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            status = 400 if mode in TRIGGERS else 503 if mode == "503" and state["received"] == 1 else 200
+            status = (400 if mode in TRIGGERS else 408 if mode == "408-always" or mode == "408" and state["received"] == 1
+                else int(mode) if mode in ("400", "401", "403", "422")
+                else 503 if mode == "503" and state["received"] == 1 else 200)
             value = {"error": {"message": TRIGGERS[mode], "code": "invalid_request_error"}} if mode in TRIGGERS else (
-                {"error": {"message": "controlled transient", "type": "server_error"}} if status == 503 else {
+                {"error": {"message": "controlled transient", "type": "invalid_request_error" if status == 408 else "server_error"}} if status >= 400 else {
                 "id": "controlled", "object": "chat.completion", "created": 1, "model": "gpt-6-luna",
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": "controlled-ok"}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
@@ -424,6 +426,276 @@ console.log(JSON.stringify(result));
         self.assertEqual([row["requestAttempt"] for row in closes], [1, 2])
         self.assertEqual(len(set(row["requestId"] for row in closes)), 1)
         self.assertEqual(waits, [2])
+
+    def test_real_litellm_http408_sdk400_retry_preserves_diagnostics_and_body(self):
+        events, waits, caller_tool_effects = [], [], []
+        call = wrap_completion(litellm.completion, "judge", emit_to(events),
+            policy=ModelRetryPolicy(request_timeout_seconds=5), sleep=waits.append)
+        with server("408") as (state, endpoint):
+            kwargs = sdk_kwargs(endpoint)
+            original = copy.deepcopy(kwargs)
+            def caller_turn():
+                caller_tool_effects.append("controlled tool effect")
+                return call(**kwargs)
+            self.assertEqual(caller_turn().choices[0].message.content, "controlled-ok")
+            self.assertEqual(kwargs, original)
+            self.assertEqual(state["received"], 2)
+            self.assertEqual(len(set(state["hashes"])), 1)
+        failed = next(row for row in events if row["type"] == "model_request_failed")
+        self.assertEqual(failed["diagnostic"]["sdkReportedStatus"], 400)
+        self.assertEqual(failed["diagnostic"]["exceptionClass"], "BadRequestError")
+        self.assertEqual(failed["httpStatus"], 408)
+        self.assertEqual(failed["category"], "request_timeout")
+        self.assertTrue(failed["retryable"])
+        self.assertEqual(failed["classificationSource"], "trusted_http_guard")
+        self.assertEqual(failed["httpStatusSource"], "trusted_http_guard")
+        closed = next(row for row in self.rows() if row["type"] == "sdk_attempt_closed")
+        self.assertEqual(failed["httpGuardClosedRecordSha256"], closed["recordSha256"])
+        self.assertEqual(waits, [2])
+        self.assertEqual(caller_tool_effects, ["controlled tool effect"])
+        self.assertEqual(EXTERNAL_ATTEMPTS, [])
+        self.assertEqual(self.verify_http(events)["attempts"], 2)
+        serialized = json.dumps(events)
+        for forbidden in ("controlled private prompt", "controlled-non-secret", "http://", "Authorization", "api_key"):
+            self.assertNotIn(forbidden, serialized)
+        self.assertNotIn("usage", failed)
+
+    def test_http408_retry_ceiling_remains_six(self):
+        events, waits = [], []
+        call = wrap_completion(litellm.completion, "actor", emit_to(events),
+            policy=ModelRetryPolicy(request_timeout_seconds=5), sleep=waits.append)
+        with server("408-always") as (state, endpoint):
+            with self.assertRaises(ModelRequestFailure) as caught:
+                call(**sdk_kwargs(endpoint))
+            self.assertEqual(state["received"], 6)
+            self.assertEqual(len(set(state["hashes"])), 1)
+        self.assertEqual(waits, [2, 4, 8, 16, 30, 2])
+        self.assertEqual(caught.exception.metadata["requestAttempt"], 6)
+        self.assertTrue(caught.exception.metadata["retryExhausted"])
+        self.assertEqual(self.verify_http(events)["attempts"], 6)
+        self.assertEqual(sum(row["type"] == "model_request_failed" for row in events), 6)
+
+    def test_real_permanent_http_statuses_never_get_408_override(self):
+        for role, mode in (("actor", "400"), ("judge", "401"), ("correction", "403"), ("actor", "422")):
+            events, waits = [], []
+            call = wrap_completion(litellm.completion, role, emit_to(events),
+                policy=ModelRetryPolicy(request_timeout_seconds=5), sleep=waits.append)
+            with self.subTest(mode=mode), server(mode) as (state, endpoint):
+                with self.assertRaises(ModelRequestFailure) as caught:
+                    call(**sdk_kwargs(endpoint))
+                self.assertEqual(state["received"], 1)
+                self.assertFalse(caught.exception.retryable)
+                self.assertNotIn("classificationSource", caught.exception.metadata)
+                self.assertEqual(waits, [])
+        self.rows()
+
+    def test_absent_guard_and_forged_exception_receipt_cannot_enable_retry(self):
+        class BadRequestError(RuntimeError):
+            status_code = 400
+            body = {"error": {"type": "invalid_request_error"}}
+            responseStatus = 408
+            trusted_http_status = 408
+            httpGuardClosedRecordSha256 = "f" * 64
+            classificationSource = "trusted_http_guard"
+        events, waits, calls = [], [], []
+        def fail(**kwargs):
+            calls.append(True)
+            raise BadRequestError("controlled private error")
+        call = wrap_completion(fail, "judge", emit_to(events), sleep=waits.append)
+        with patch.dict(os.environ, {"GAIA2_MODEL_HTTP_GUARD_REQUIRED": "0"}):
+            with self.assertRaises(ModelRequestFailure) as caught:
+                call(messages=[{"role": "user", "content": "controlled private prompt"}])
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(waits, [])
+        self.assertFalse((self.out / "model-http-dispatch.jsonl").exists())
+        self.assertNotIn("classificationSource", caught.exception.metadata)
+
+    def test_http200_sdk400_has_no_timeout_receipt(self):
+        class BadRequestError(RuntimeError):
+            status_code = 400
+            body = {"error": {"type": "invalid_request_error"}}
+        events, waits = [], []
+        def fail_after_http(**kwargs):
+            self.assertNotIn("_failure_receipt", kwargs)
+            litellm.completion(**kwargs)
+            raise BadRequestError("controlled private error")
+        call = wrap_completion(fail_after_http, "judge", emit_to(events), sleep=waits.append)
+        with server() as (state, endpoint):
+            with self.assertRaises(ModelRequestFailure) as caught:
+                call(**sdk_kwargs(endpoint))
+            self.assertEqual(state["received"], 1)
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(waits, [])
+        self.assertNotIn("classificationSource", caught.exception.metadata)
+        self.assertEqual(self.verify_http(events)["responseCount"], 1)
+
+    def test_http408_permanent_unknown_codes_and_types_fail_closed(self):
+        class BadRequestError(RuntimeError):
+            status_code = 400
+        for index, body in enumerate(({"code": "invalid_api_key"}, {"code": "unknown_controlled_code"},
+                {"code": ""}, {"type": "authentication_error"}, {"type": "unknown_controlled_type"},
+                {"type": []}, {"type": {}}), 1):
+            events, waits = [], []
+            def mapped(**kwargs):
+                try:
+                    litellm.completion(**kwargs)
+                except Exception:
+                    error = BadRequestError("controlled private error")
+                    error.body = {"error": body}
+                    raise error from None
+                self.fail("controlled server must fail")
+            call = wrap_completion(mapped, "judge", emit_to(events), sleep=waits.append)
+            with self.subTest(index=index), server("408-always") as (state, endpoint):
+                with self.assertRaises(ModelRequestFailure) as caught:
+                    call(**sdk_kwargs(endpoint))
+                self.assertEqual(state["received"], 1)
+            self.assertFalse(caught.exception.retryable)
+            self.assertEqual(waits, [])
+            self.assertNotIn("classificationSource", caught.exception.metadata)
+        self.rows()
+
+    def test_http408_unreadable_sdk_structure_cannot_be_treated_as_no_code(self):
+        class BadRequestError(RuntimeError):
+            status_code = 400
+        class UnreadableResponse:
+            def json(self):
+                raise ValueError("controlled private error")
+        for index, body in enumerate((None, "unknown structure", [], {"error": "unknown structure"}), 1):
+            events, waits = [], []
+            def mapped(**kwargs):
+                try:
+                    litellm.completion(**kwargs)
+                except Exception:
+                    error = BadRequestError("controlled private error")
+                    error.body, error.response = body, UnreadableResponse()
+                    raise error from None
+                self.fail("controlled server must fail")
+            call = wrap_completion(mapped, "judge", emit_to(events), sleep=waits.append)
+            with self.subTest(index=index), server("408-always") as (state, endpoint):
+                with self.assertRaises(ModelRequestFailure) as caught:
+                    call(**sdk_kwargs(endpoint))
+                self.assertEqual(state["received"], 1)
+            self.assertFalse(caught.exception.retryable)
+            self.assertEqual(waits, [])
+            self.assertNotIn("classificationSource", caught.exception.metadata)
+        self.rows()
+
+    def test_http408_bad_sdk_metadata_getters_fail_closed(self):
+        class BadRequestError(RuntimeError):
+            status_code = 400
+            body = {"error": {"type": "invalid_request_error"}}
+        class UnreadableBody(BadRequestError):
+            @property
+            def body(self):
+                raise ValueError("controlled private error")
+        class UnreadableCode(BadRequestError):
+            @property
+            def code(self):
+                raise ValueError("controlled private error")
+        class UnreadableType(BadRequestError):
+            @property
+            def type(self):
+                raise ValueError("controlled private error")
+        for error_class in (UnreadableBody, UnreadableCode, UnreadableType):
+            events, waits = [], []
+            def mapped(**kwargs):
+                try:
+                    litellm.completion(**kwargs)
+                except Exception:
+                    raise error_class("controlled private error") from None
+                self.fail("controlled server must fail")
+            call = wrap_completion(mapped, "judge", emit_to(events), sleep=waits.append)
+            with self.subTest(kind=error_class.__name__), server("408-always") as (state, endpoint):
+                with self.assertRaises(ModelRequestFailure) as caught:
+                    call(**sdk_kwargs(endpoint))
+                self.assertEqual(state["received"], 1)
+            self.assertFalse(caught.exception.retryable)
+            self.assertEqual(waits, [])
+            self.assertNotIn("classificationSource", caught.exception.metadata)
+        self.rows()
+
+    def test_receipt_identity_exception_and_single_consumption(self):
+        for index, mismatch in enumerate(("role", "request", "attempt", "bool", "exception", "none"), 1):
+            request_id = str(index) * 32
+            receipt = guard._AttemptFailureReceipt("judge", request_id, 1)
+            with server("408-always") as (state, endpoint):
+                try:
+                    guard.guarded_sdk_attempt(litellm.completion, "judge", request_id, 1,
+                        kwargs=sdk_kwargs(endpoint), _failure_receipt=receipt)
+                except Exception as error:
+                    role = "actor" if mismatch == "role" else "judge"
+                    req = "f" * 32 if mismatch == "request" else request_id
+                    attempt = 2 if mismatch == "attempt" else True if mismatch == "bool" else 1
+                    exception = RuntimeError() if mismatch == "exception" else error
+                    proof = receipt.consume(exception, role, req, attempt)
+                    if mismatch == "none":
+                        self.assertEqual(proof["responseStatus"], 408)
+                    else:
+                        self.assertIsNone(proof)
+                    self.assertIsNone(receipt.consume(error, "judge", request_id, 1))
+                else:
+                    self.fail("controlled server must fail")
+                self.assertEqual(state["received"], 1)
+        unsealed = guard._AttemptFailureReceipt("judge", "f" * 32, 1)
+        self.assertIsNone(unsealed.consume(RuntimeError(), "judge", "f" * 32, 1))
+        self.rows()
+
+    def test_receipt_uses_its_own_close_hash_during_legitimate_interleaving(self):
+        original_emit = guard._Lease.emit
+        def interleaved_emit(lease, kind, **fields):
+            record_hash = original_emit(lease, kind, **fields)
+            if kind == "sdk_attempt_closed" and lease.identity["requestId"] == "1" * 32:
+                with server() as (_state, endpoint):
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        pool.submit(lambda: self.call(endpoint, request_id="2" * 32)).result()
+            return record_hash
+        receipt = guard._AttemptFailureReceipt("judge", "1" * 32, 1)
+        with patch.object(guard._Lease, "emit", interleaved_emit), server("408-always") as (_state, endpoint):
+            try:
+                guard.guarded_sdk_attempt(litellm.completion, "judge", "1" * 32, 1,
+                    kwargs=sdk_kwargs(endpoint), _failure_receipt=receipt)
+            except Exception as error:
+                proof = receipt.consume(error, "judge", "1" * 32, 1)
+            else:
+                self.fail("controlled server must fail")
+        closes = [row for row in self.rows() if row["type"] == "sdk_attempt_closed"]
+        self.assertEqual([row["requestId"] for row in closes], ["1" * 32, "2" * 32])
+        self.assertEqual(proof["closedRecordSha256"], closes[0]["recordSha256"])
+        self.assertNotEqual(proof["closedRecordSha256"], guard._controller.previous)
+
+    def test_http408_guard_cleanup_failure_or_redispatch_never_retries(self):
+        original_write = guard.os.write
+        def fail_close_record(fd, raw):
+            if json.loads(raw)["type"] == "sdk_attempt_closed":
+                raise OSError("controlled journal failure")
+            return original_write(fd, raw)
+        def swallowed_redispatch(**kwargs):
+            try:
+                litellm.completion(**kwargs)
+            except Exception as original_error:
+                try:
+                    kwargs["client"].chat.completions.create(model=kwargs["model"], messages=kwargs["messages"])
+                except Exception:
+                    pass
+                raise original_error
+        cases = (("close", patch.object(openai.OpenAI, "close", side_effect=RuntimeError("controlled close failure")), litellm.completion),
+            ("redispatch", patch.object(litellm, "num_retries", 0), swallowed_redispatch),
+            ("journal", patch.object(guard.os, "write", fail_close_record), litellm.completion))
+        for index, (label, patched, completion) in enumerate(cases, 1):
+            self.close_journal()
+            path = self.out / "model-http-dispatch.jsonl"
+            if path.exists():
+                path.unlink()
+            events, waits = [], []
+            call = wrap_completion(completion, "judge", emit_to(events), sleep=waits.append)
+            with self.subTest(label=label), patched, server("408-always") as (state, endpoint):
+                with self.assertRaises(ModelRequestFailure) as caught:
+                    call(**sdk_kwargs(endpoint))
+                self.assertEqual(state["received"], 1)
+            self.assertFalse(caught.exception.retryable)
+            self.assertNotIn("classificationSource", caught.exception.metadata)
+            self.assertEqual(waits, [])
 
     def test_sdk_swallow_denial_still_fails(self):
         def completion(**kwargs):

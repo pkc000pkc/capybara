@@ -175,6 +175,35 @@ export function verifyModelHttpDispatchEvidence({ journalBytes, events, identity
     // A real response can be discarded by the child STOP/notification/deadline
     // safe point after SDK return. That is not fabricated SDK success or usage.
     if (outcome.type === 'model_request_failed') requireProof(lease.closed.transportStatus !== 'succeeded', 'sdk_failure_after_successful_return')
+    const claimsTrustedClassification = ['classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256'].some(field => Object.hasOwn(outcome, field))
+    const correctsSdk400To408 = outcome.httpStatus === 408 && outcome.diagnostic?.sdkReportedStatus === 400
+    if (claimsTrustedClassification || correctsSdk400To408) {
+      requireProof(outcome.type === 'model_request_failed' && outcome.modelRole !== 'child_actor'
+        && outcome.classificationSource === 'trusted_http_guard' && outcome.httpStatusSource === 'trusted_http_guard'
+        && outcome.category === 'request_timeout' && outcome.retryable === true && outcome.httpStatus === 408
+        && outcome.diagnostic?.schemaVersion === 'gaia2-model-diagnostic-v1'
+        && outcome.diagnostic.sdkReportedStatus === 400 && outcome.diagnostic.exceptionClass === 'BadRequestError'
+        && outcome.diagnostic.errorCode === null && outcome.diagnostic.codeSource === null
+        && [null, 'invalid_request_error', 'server_error'].includes(outcome.diagnostic.errorType), 'trusted_status_classification_invalid')
+      requireProof(lease.responseStatus === 408 && lease.admitted === 1 && lease.response === 1 && lease.denied === 0
+        && lease.closed.sdkCallStatus === 'failed' && lease.closed.transportStatus === 'failed'
+        && lease.closed.failureCode === 'SDK_CALL_FAILED' && lease.closed.clientClosed === true && lease.closed.leaseClosed === true
+        && outcome.httpGuardClosedRecordSha256 === lease.closed.recordSha256, 'trusted_status_lease_mismatch')
+    }
+  }
+  const trustedSchedules = new Set()
+  for (const outcome of events.filter(event => event.type === 'model_retry_scheduled')) {
+    const claimsTrustedClassification = ['classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256'].some(field => Object.hasOwn(outcome, field))
+    const correctsSdk400To408 = outcome.httpStatus === 408 && outcome.diagnostic?.sdkReportedStatus === 400
+    const value = sdk.get(keyFor(outcome)), failure = value?.outcomes[0]?.event
+    if (!claimsTrustedClassification && !correctsSdk400To408 && failure?.classificationSource !== 'trusted_http_guard') continue
+    requireProof(failure?.type === 'model_request_failed' && failure.classificationSource === 'trusted_http_guard', 'trusted_retry_without_failure')
+    requireProof(!trustedSchedules.has(keyFor(outcome)), 'duplicate_trusted_retry_schedule')
+    trustedSchedules.add(keyFor(outcome))
+    for (const field of ['category', 'retryable', 'httpStatus', 'classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256']) {
+      requireProof(outcome[field] === failure[field], 'trusted_retry_classification_mismatch')
+    }
+    requireProof(digest(outcome.diagnostic) === digest(failure.diagnostic), 'trusted_retry_diagnostic_mismatch')
   }
   return { status: 'passed', schemaVersion: 'gaia2-phase6-http-evidence-v1', attempts: sdk.size, admittedDispatches: [...leases.values()].reduce((sum, value) => sum + value.admitted, 0), responseCount: responses, deniedRedispatches: denials, localGuardFailures: guardedFailures, preSdkRejections, logicalOnlyRejections, inferredRejectedAttempts, allAttemptsClosed: true, allClientsClosed: true, singleDispatchPerSdkAttempt: true, physicalPacketCountClaimed: false, entrySha256, pythonProcessId, journalSha256: sha(journalBytes), recordCount: records.length, finalRecordSha256: previous }
 }

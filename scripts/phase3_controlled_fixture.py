@@ -93,11 +93,13 @@ class ControlledLedger(App):
     @app_tool()
     @event_registered(operation_type=OperationType.READ)
     def failed_read(self) -> dict:
-        """A controlled retrieval that fails without returning evidence.
-        :returns: no usable evidence because the retrieval fails
+        """Read one controlled query that fails once before recovering.
+        :returns: authoritative ledger evidence after the first failed retrieval
         """
         self.calls["failed_read"] += 1
-        raise RuntimeError("Controlled read did not return authoritative evidence")
+        if self.calls["failed_read"] == 1:
+            raise RuntimeError("Controlled read did not return authoritative evidence")
+        return self._observed_result()
 
 
 class ControlledScenario(Scenario):
@@ -190,7 +192,9 @@ def run_fixture(case: str, report_path: Path) -> dict:
             steps = [
                 ("ControlledLedger__failed_read", {}, "unverified-read-failed"),
                 ("ControlledLedger__write", {"value": "must-not-execute"}, "unverified-write"),
-                ("ControlledLedger__read", {}, "unverified-fresh-read"),
+                ("ControlledLedger__read", {}, "unverified-different-read"),
+                ("ControlledLedger__write", {"value": "must-not-execute"}, "unverified-write-after-different-read"),
+                ("ControlledLedger__failed_read", {}, "unverified-fresh-read"),
                 ("AgentUserInterface__send_message_to_user", {"content": "Fresh evidence obtained; the blocked write did not execute."}, "unverified-finish"),
             ]
             assert index < len(steps)
@@ -224,8 +228,10 @@ def run_fixture(case: str, report_path: Path) -> dict:
         assert len(actor_calls) == 5
         assert len([event for event in runtime_events if event["type"] == "tool_call_blocked"]) == 2
     elif case == "unverified_evidence":
-        assert ledger.values == [] and ledger.calls == {"write": 0, "read": 1, "failed_read": 1}
-        assert len(actor_calls) == 4
+        assert ledger.values == [] and ledger.calls == {"write": 0, "read": 1, "failed_read": 2}
+        assert len(actor_calls) == 6
+        blocked = [event["callId"] for event in runtime_events if event["type"] == "tool_call_blocked"]
+        assert blocked == ["unverified-write", "unverified-write-after-different-read"]
     elif case == "wait":
         assert ledger.calls == {"write": 0, "read": 0, "failed_read": 0} and env.time_manager.time() >= 1010
         assert len(actor_calls) == 2
@@ -238,10 +244,10 @@ def run_fixture(case: str, report_path: Path) -> dict:
     ended = next(event for event in reversed(runtime_events) if event["type"] == "attempt_execution_ended")
     observed_result_hashes = [event["resultHash"] for event in runtime_events
                              if event["type"] == "tool_call_completed" and event.get("status") == "succeeded"
-                             and event.get("function") in ("ControlledLedger__write", "ControlledLedger__read")]
+                             and event.get("function") in ("ControlledLedger__write", "ControlledLedger__read", "ControlledLedger__failed_read")]
     for actor in actor_calls:
         for message in actor["messages"]:
-            if message.get("role") == "tool" and message.get("name") in ("ControlledLedger__write", "ControlledLedger__read"):
+            if message.get("role") == "tool" and message.get("name") in ("ControlledLedger__write", "ControlledLedger__read", "ControlledLedger__failed_read"):
                 result = json.loads(message["content"])
                 if "contact" in result:
                     assert result["contact"] == str(ledger.contact) == result["nested"][0]["contact"]

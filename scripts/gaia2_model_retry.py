@@ -20,7 +20,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Mapping
 
 from gaia2_model_diagnostics import safe_model_diagnostics, safe_request_summary
-from gaia2_model_http_guard import guarded_sdk_attempt
+from gaia2_model_http_guard import guarded_sdk_attempt, _AttemptFailureReceipt
 
 
 @dataclass(frozen=True)
@@ -178,6 +178,43 @@ def classify_model_error(error: Exception) -> dict[str, Any]:
     return {"category": category, "retryable": retryable, "httpStatus": status}
 
 
+def _classify_attempt_failure(error, diagnostic, trusted_http):
+    candidate = (trusted_http is not None and trusted_http["responseStatus"] == 408
+        and diagnostic["sdkReportedStatus"] == 400 and diagnostic["exceptionClass"] == "BadRequestError")
+    if not candidate:
+        return classify_model_error(error)
+    try:
+        classification = classify_model_error(error)
+    except Exception:
+        # Only this trusted mismatch candidate gains a fail-closed fallback;
+        # the public/unguarded classifier retains its previous behavior.
+        return {"category": "configuration_error", "retryable": False, "httpStatus": 400}
+    # Pinned LiteLLM can map an actual HTTP 408 to SDK 400/BadRequestError.
+    # Only the trusted, closed attempt receipt can correct that mismatch.
+    # A sanitized null diagnostic code is NOT proof that the raw code is absent.
+    try:
+        # Unlike the legacy classifier's best-effort fallback, this opt-in
+        # correction requires readable raw structure. Unknown is not absent.
+        body = getattr(error, "body", None)
+        if body is None:
+            response = getattr(error, "response", None)
+            body = response.json() if response is not None else None
+        if type(body) is not dict or "error" in body and type(body["error"]) is not dict:
+            return classification
+        nested = body.get("error", body)
+        codes = (nested.get("code"), body.get("code"), getattr(error, "code", None))
+        types = (nested.get("type"), body.get("type"), getattr(error, "type", None))
+        eligible = (all(code is None for code in codes)
+            and all(value is None or type(value) is str and value in ("invalid_request_error", "server_error") for value in types))
+    except Exception:
+        eligible = False
+    if eligible:
+        return {"category": "request_timeout", "retryable": True, "httpStatus": 408,
+            "classificationSource": "trusted_http_guard", "httpStatusSource": "trusted_http_guard",
+            "httpGuardClosedRecordSha256": trusted_http["closedRecordSha256"]}
+    return classification
+
+
 def _safe_usage(result: Any) -> dict[str, Any]:
     """Token counters only; absent/invalid usage is unknown, never inferred."""
     try:
@@ -222,14 +259,21 @@ def wrap_completion(
         for attempt in range(1, active.max_attempts + 1):
             operational = {"modelRole": role, "requestId": request_id, "requestAttempt": attempt, "maxRequestAttempts": active.max_attempts, "cumulativeWaitSeconds": waited}
             emit("model_request_attempt", **operational, requestSummary=request_summary)
+            failure_receipt = _AttemptFailureReceipt(role, request_id, attempt)
             try:
                 result = guarded_sdk_attempt(completion, role, request_id, attempt,
-                    args=args, kwargs=kwargs)
+                    args=args, kwargs=kwargs, _failure_receipt=failure_receipt)
             except Exception as error:
-                classification = classify_model_error(error)
                 diagnostic = safe_model_diagnostics(error, request_summary)
+                trusted_http = failure_receipt.consume(error, role, request_id, attempt)
+                classification = _classify_attempt_failure(error, diagnostic, trusted_http)
                 now = clock()
-                hint, hint_source = retry_delay_hint(error, now)
+                if trusted_http is not None and trusted_http["responseStatus"] == 408 and not classification["retryable"]:
+                    # Failed/unknown raw metadata already denied correction.
+                    # No retry is possible, so do not re-read it for cooldowns.
+                    hint, hint_source = None, None
+                else:
+                    hint, hint_source = retry_delay_hint(error, now)
             else:
                 emit("model_request_succeeded", **operational, **_safe_usage(result))
                 return result

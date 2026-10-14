@@ -41,6 +41,105 @@ function events(attempt = base, outcome = 'model_request_succeeded') {
 function verify(records = attemptRecords(), modelEvents = events(), overrides = {}) {
   return verifyModelHttpDispatchEvidence({ journalBytes: journal(records), events: modelEvents, identity, officialEntryBytes: entryBytes, pythonProcessId: 10, ...overrides })
 }
+
+function corrected408Fixture(records = attemptRecords(base, { responseStatus: 408, status: 'failed' }), attempt = base) {
+  const closed = journal(records).toString('utf8').trim().split('\n').map(JSON.parse)
+    .find(row => row.type === 'sdk_attempt_closed' && row.modelRole === attempt.modelRole && row.requestId === attempt.requestId && row.requestAttempt === attempt.requestAttempt)
+  const modelEvents = events(attempt, 'model_request_failed')
+  Object.assign(modelEvents[1], { category: 'request_timeout', retryable: true, httpStatus: 408,
+    classificationSource: 'trusted_http_guard', httpStatusSource: 'trusted_http_guard',
+    httpGuardClosedRecordSha256: closed.recordSha256,
+    diagnostic: { schemaVersion: 'gaia2-model-diagnostic-v1', sdkReportedStatus: 400,
+      exceptionClass: 'BadRequestError', errorCode: null, codeSource: null,
+      errorType: 'invalid_request_error', typeSource: 'sdk_body', dispatchObserved: null } })
+  return { records, modelEvents }
+}
+
+test('HTTP 408 correcting SDK 400 requires the exact healthy, closed attempt receipt', () => {
+  const fixture = corrected408Fixture()
+  const next = { ...base, requestAttempt: 2 }
+  assert.equal(verify([...fixture.records, ...attemptRecords(next)], [...fixture.modelEvents, ...events(next)]).attempts, 2)
+  assert.equal(fixture.modelEvents[1].diagnostic.sdkReportedStatus, 400)
+  for (const status of [200, 400, 401, 403, 422, 503]) {
+    const wrong = corrected408Fixture(attemptRecords(base, { responseStatus: status, status: 'failed' }))
+    assert.throws(() => verify(wrong.records, wrong.modelEvents), /trusted_status_lease_mismatch/)
+  }
+})
+
+test('new trusted status fields cannot be missing, forged, or copied from a foreign lease', () => {
+  const { records, modelEvents } = corrected408Fixture()
+  for (const field of ['classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256']) {
+    const changed = structuredClone(modelEvents)
+    delete changed[1][field]
+    assert.throws(() => verify(records, changed), /trusted_status_classification_invalid|trusted_status_lease_mismatch/)
+  }
+  for (const [field, value] of [['category', 'configuration_error'], ['retryable', false], ['httpStatus', 400],
+    ['classificationSource', 'sdk'], ['httpStatusSource', 'sdk'], ['httpGuardClosedRecordSha256', 'f'.repeat(64)]]) {
+    const changed = structuredClone(modelEvents)
+    changed[1][field] = value
+    assert.throws(() => verify(records, changed), /trusted_status_classification_invalid|trusted_status_lease_mismatch/)
+  }
+  const missingAll = structuredClone(modelEvents)
+  for (const field of ['classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256']) delete missingAll[1][field]
+  assert.throws(() => verify(records, missingAll), /trusted_status_classification_invalid/)
+  const judge = { ...base, modelRole: 'judge', requestId: '7'.repeat(32) }
+  const interleaved = [...records, ...attemptRecords(judge)]
+  const fixture = corrected408Fixture(interleaved)
+  assert.equal(verify(interleaved, [...fixture.modelEvents, ...events(judge)]).attempts, 2)
+  fixture.modelEvents[1].httpGuardClosedRecordSha256 = journal(interleaved).toString('utf8').trim().split('\n').map(JSON.parse).at(-1).recordSha256
+  assert.throws(() => verify(interleaved, [...fixture.modelEvents, ...events(judge)]), /trusted_status_lease_mismatch/)
+})
+
+test('trusted HTTP status cannot override guard failure, cancellation, or child rejection', () => {
+  const denied = attemptRecords(base, { responseStatus: 408, status: 'failed', denied: true })
+  const fixture = corrected408Fixture(denied)
+  assert.throws(() => verify(denied, fixture.modelEvents), /trusted_status_lease_mismatch/)
+  for (const code of ['HTTP_GUARD_SCOPE_INVALID', 'HTTP_GUARD_CLIENT_CLOSE_FAILED', 'SDK_CALL_CANCELLED']) {
+    const changed = attemptRecords(base, { responseStatus: 408, status: 'failed' })
+    changed.at(-1).failureCode = code
+    assert.throws(() => verify(changed, corrected408Fixture(changed).modelEvents), /trusted_status_lease_mismatch/)
+  }
+  const childRecords = attemptRecords(child, { responseStatus: 408, status: 'failed' })
+  assert.throws(() => verify(childRecords, corrected408Fixture(childRecords, child).modelEvents), /trusted_status_classification_invalid/)
+})
+
+test('permanent SDK diagnostics cannot be disguised as trusted timeout metadata', () => {
+  const { records, modelEvents } = corrected408Fixture()
+  for (const [field, value] of [['errorCode', 'invalid_api_key'], ['codeSource', 'sdk_body'],
+    ['errorType', 'authentication_error'], ['exceptionClass', 'AuthenticationError'], ['sdkReportedStatus', 401]]) {
+    const changed = structuredClone(modelEvents)
+    changed[1].diagnostic[field] = value
+    assert.throws(() => verify(records, changed), /trusted_status_classification_invalid/)
+  }
+})
+
+test('trusted retry schedule repeats the validated failure provenance without mutation', () => {
+  const { records, modelEvents } = corrected408Fixture()
+  const schedule = { ...modelEvents[1], type: 'model_retry_scheduled', waitSeconds: 2 }
+  assert.equal(verify(records, [...modelEvents, schedule]).attempts, 1)
+  for (const field of ['classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256']) {
+    const changed = { ...schedule }
+    delete changed[field]
+    assert.throws(() => verify(records, [...modelEvents, changed]), /trusted_retry_classification_mismatch/)
+  }
+  const changed = structuredClone(schedule)
+  changed.diagnostic.sdkReportedStatus = 408
+  assert.throws(() => verify(records, [...modelEvents, changed]), /trusted_retry_diagnostic_mismatch/)
+  const stripped = { ...schedule, httpStatus: 400 }
+  for (const field of ['classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256']) delete stripped[field]
+  assert.throws(() => verify(records, [...modelEvents, stripped]), /trusted_retry_classification_mismatch/)
+  assert.throws(() => verify(records, [...modelEvents, schedule, { ...schedule }]), /duplicate_trusted_retry_schedule/)
+})
+
+test('historical SDK 400 configuration failures over actual HTTP 408 remain valid uncorrected evidence', () => {
+  const records = attemptRecords(base, { responseStatus: 408, status: 'failed' })
+  const modelEvents = events(base, 'model_request_failed')
+  Object.assign(modelEvents[1], { category: 'configuration_error', retryable: false, httpStatus: 400,
+    diagnostic: { schemaVersion: 'gaia2-model-diagnostic-v1', sdkReportedStatus: 400,
+      exceptionClass: 'BadRequestError', errorCode: null, codeSource: null,
+      errorType: 'invalid_request_error', typeSource: 'sdk_body', dispatchObserved: null } })
+  assert.equal(verify(records, modelEvents).status, 'passed')
+})
 test('HTTP report CLI accepts explicit selection and rejects missing or ambiguous arguments', () => {
   const parsed = parsePhase6HttpArgs(['--manifest', 'runs/new/run-manifest.json', '--execution-id', 'one', '--execution-id', 'two'])
   assert.deepEqual(parsed.selection.executionIds, ['one', 'two'])
