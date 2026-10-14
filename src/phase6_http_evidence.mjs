@@ -178,17 +178,20 @@ export function verifyModelHttpDispatchEvidence({ journalBytes, events, identity
     const claimsTrustedClassification = ['classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256'].some(field => Object.hasOwn(outcome, field))
     const correctsSdk400To408 = outcome.httpStatus === 408 && outcome.diagnostic?.sdkReportedStatus === 400
     if (claimsTrustedClassification || correctsSdk400To408) {
-      requireProof(outcome.type === 'model_request_failed' && outcome.modelRole !== 'child_actor'
+      const safeDiagnostic = outcome.modelRole === 'child_actor' ? outcome.diagnostic === undefined
+        : outcome.diagnostic?.schemaVersion === 'gaia2-model-diagnostic-v1'
+          && outcome.diagnostic.sdkReportedStatus === 400 && outcome.diagnostic.exceptionClass === 'BadRequestError'
+          && outcome.diagnostic.errorCode === null && outcome.diagnostic.codeSource === null
+          && [null, 'invalid_request_error', 'server_error'].includes(outcome.diagnostic.errorType)
+      requireProof(outcome.type === 'model_request_failed'
         && outcome.classificationSource === 'trusted_http_guard' && outcome.httpStatusSource === 'trusted_http_guard'
         && outcome.category === 'request_timeout' && outcome.retryable === true && outcome.httpStatus === 408
-        && outcome.diagnostic?.schemaVersion === 'gaia2-model-diagnostic-v1'
-        && outcome.diagnostic.sdkReportedStatus === 400 && outcome.diagnostic.exceptionClass === 'BadRequestError'
-        && outcome.diagnostic.errorCode === null && outcome.diagnostic.codeSource === null
-        && [null, 'invalid_request_error', 'server_error'].includes(outcome.diagnostic.errorType), 'trusted_status_classification_invalid')
+        && safeDiagnostic, 'trusted_status_classification_invalid')
       requireProof(lease.responseStatus === 408 && lease.admitted === 1 && lease.response === 1 && lease.denied === 0
         && lease.closed.sdkCallStatus === 'failed' && lease.closed.transportStatus === 'failed'
         && lease.closed.failureCode === 'SDK_CALL_FAILED' && lease.closed.clientClosed === true && lease.closed.leaseClosed === true
         && outcome.httpGuardClosedRecordSha256 === lease.closed.recordSha256, 'trusted_status_lease_mismatch')
+      if (outcome.modelRole === 'child_actor') requireProof(outcome.schemaVersion === 'gaia2-scoped-model-event-v1', 'trusted_child_event_schema')
     }
   }
   const trustedSchedules = new Set()
@@ -200,10 +203,14 @@ export function verifyModelHttpDispatchEvidence({ journalBytes, events, identity
     requireProof(failure?.type === 'model_request_failed' && failure.classificationSource === 'trusted_http_guard', 'trusted_retry_without_failure')
     requireProof(!trustedSchedules.has(keyFor(outcome)), 'duplicate_trusted_retry_schedule')
     trustedSchedules.add(keyFor(outcome))
+    for (const field of [...ATTEMPT, ...(outcome.modelRole === 'child_actor' ? ['schemaVersion', ...CHILD] : [])]) {
+      requireProof(outcome[field] === failure[field], 'trusted_retry_binding_mismatch')
+    }
     for (const field of ['category', 'retryable', 'httpStatus', 'classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256']) {
       requireProof(outcome[field] === failure[field], 'trusted_retry_classification_mismatch')
     }
-    requireProof(digest(outcome.diagnostic) === digest(failure.diagnostic), 'trusted_retry_diagnostic_mismatch')
+    if (outcome.modelRole === 'child_actor') requireProof(outcome.diagnostic === undefined && failure.diagnostic === undefined, 'trusted_child_diagnostic_public')
+    else requireProof(digest(outcome.diagnostic) === digest(failure.diagnostic), 'trusted_retry_diagnostic_mismatch')
   }
   return { status: 'passed', schemaVersion: 'gaia2-phase6-http-evidence-v1', attempts: sdk.size, admittedDispatches: [...leases.values()].reduce((sum, value) => sum + value.admitted, 0), responseCount: responses, deniedRedispatches: denials, localGuardFailures: guardedFailures, preSdkRejections, logicalOnlyRejections, inferredRejectedAttempts, allAttemptsClosed: true, allClientsClosed: true, singleDispatchPerSdkAttempt: true, physicalPacketCountClaimed: false, entrySha256, pythonProcessId, journalSha256: sha(journalBytes), recordCount: records.length, finalRecordSha256: previous }
 }

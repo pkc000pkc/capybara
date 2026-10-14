@@ -58,6 +58,10 @@ def _finite_number(value: Any) -> bool:
         return False
 
 
+# The source-pinned reader uses this marker, not optional event fields, to
+# distinguish the ARE-seconds contract from legacy millisecond registries.
+A2A_DEADLINE_CLOCK_CONTRACT = "gaia2-official-a2a-clock-v2"
+
 _ID32 = re.compile(r"^[a-f0-9]{32}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
 _HASH = re.compile(r"^[a-f0-9]{64}$")
@@ -80,6 +84,7 @@ _MODEL_EVENT_FIELDS = frozenset((
     "retryExhausted", "waitSeconds", "delaySource", "cumulativeWaitSecondsAfterRetry",
     "remainingWaitSeconds", "outputHash", "usageAvailable", "usage", "status",
     "sdkAttempts", "failureCode",
+    "classificationSource", "httpStatusSource", "httpGuardClosedRecordSha256",
 ))
 
 
@@ -291,6 +296,7 @@ class OfficialA2AClient:
                 parent_execution_id=self.__execution_id, parent_session_id=self.__session_id,
                 evidence_root=evidence_root, clock=env.time_manager.time,
                 clock_environment=env, trusted_source_files=source_files,
+                deadline_clock_unit="seconds",
             )
             manifest = self.__owner.manifest()
             self.__excluded_tools = self.__owner.excluded_tool_snapshot()
@@ -522,7 +528,9 @@ class OfficialA2AClient:
             raise OfficialA2AError("A2A_MODEL_REQUEST_INVALID")
         if self.__scope is None or value_hash(self.__scope) != model_scope.get("delegationScopeHash"):
             raise OfficialA2AError("A2A_CHILD_SCOPE_INVALID")
-        self.__model_requests += 1
+        # Only the constructor-bound ARE TimeManager advances admission time.
+        # A request's clock projection is never the registry clock authority.
+        self.sync_clock()
         original_hash = value_hash(messages)
         response = self.__peer.call("a2a_before_model", {"handleToken": self.__handle_token, "input": {
             "requestId": request_id, "modelScope": model_scope, "originalMessagesHash": original_hash,
@@ -541,6 +549,8 @@ class OfficialA2AClient:
                           "attachments": None})
         actual_hash = value_hash(actual)
         permit = uuid.uuid4().hex
+        # Rejected/invalid admission is not a child logical-request receipt.
+        self.__model_requests += 1
         return {"schemaVersion": "capybara-scoped-model-gate-v1", "permitId": permit,
             "requestId": request_id, "scopeHash": value_hash(self.__scope),
             "modelScopeHash": model_scope_hash, "originalMessagesHash": original_hash,
@@ -549,7 +559,9 @@ class OfficialA2AClient:
             "revision": response["revision"], "beforeEvidenceRef": response["evidence"]}
 
     def _model_attempt(self, payload: dict[str, Any], *, model_scope_hash: str) -> dict[str, Any]:
-        self.__sdk_attempts += 1
+        # Retry/cooldown and generation bookkeeping can advance ARE time even
+        # when no native tool has run since the previous logical admission.
+        self.sync_clock()
         try:
             reply = self.__peer.call("a2a_assert_model", {"handleToken": self.__handle_token,
                 "requestId": payload["requestId"]})
@@ -557,12 +569,15 @@ class OfficialA2AClient:
             raise OfficialA2AError("A2A_MODEL_ATTEMPT_REJECTED") from None
         if type(reply) is not dict or set(reply) != {"ok"} or reply.get("ok") is not True:
             raise OfficialA2AError("A2A_MODEL_ATTEMPT_REJECTED")
+        # Count only the successful trusted ACK, never an unstarted SDK call.
+        self.__sdk_attempts += 1
         return {"schemaVersion": "capybara-scoped-model-sdk-attempt-v1", **payload,
             "scopeHash": value_hash(self.__scope), "modelScopeHash": model_scope_hash,
             "logicalRequestsUsed": self.__model_requests - self.__child_model_requests_base,
             "sdkAttemptsUsed": self.__sdk_attempts - self.__child_sdk_attempts_base}
 
     def _model_finish(self, payload: dict[str, Any], *, model_scope_hash: str) -> dict[str, Any]:
+        self.sync_clock()
         try:
             reply = self.__peer.call("a2a_complete_model", {"handleToken": self.__handle_token,
                 "requestId": payload["requestId"]})
@@ -601,6 +616,20 @@ class OfficialA2AClient:
                     or fields.get("modelScopeHash") != model_scope_hash
                     or fields.get("configHash") != config_hash):
                 raise OfficialA2AError("A2A_MODEL_EVENT_INVALID")
+            proof_fields = ("classificationSource", "httpStatusSource", "httpGuardClosedRecordSha256")
+            if any(key in fields for key in proof_fields):
+                if (not all(key in fields for key in proof_fields)
+                        or kind not in ("model_request_failed", "model_retry_scheduled")
+                        or type(fields["classificationSource"]) is not str or fields["classificationSource"] != "trusted_http_guard"
+                        or type(fields["httpStatusSource"]) is not str or fields["httpStatusSource"] != "trusted_http_guard"
+                        or type(fields["httpGuardClosedRecordSha256"]) is not str or not _HASH.fullmatch(fields["httpGuardClosedRecordSha256"])
+                        or type(fields.get("category")) is not str or fields["category"] != "request_timeout" or fields.get("retryable") is not True
+                        or type(fields.get("retryExhausted")) is not bool
+                        or kind == "model_retry_scheduled" and fields["retryExhausted"] is not False
+                        or type(fields.get("httpStatus")) is not int or fields["httpStatus"] != 408
+                        or type(fields.get("requestAttempt")) is not int or fields["requestAttempt"] < 1
+                        or type(fields.get("maxRequestAttempts")) is not int or fields["maxRequestAttempts"] < fields["requestAttempt"]):
+                    raise OfficialA2AError("A2A_MODEL_EVENT_INVALID")
             # These identities are produced by the broker, not SDK text.
             if any(type(fields.get(key)) is not str or not pattern.fullmatch(fields[key])
                    for key, pattern in (("permitId", _ID32), ("requestId", _ID32),
@@ -766,6 +795,8 @@ class OfficialA2AClient:
             "closed": self.__closed,
             "modelRequests": self.__model_requests,
             "sdkAttempts": self.__sdk_attempts,
+            "deadlineClockContract": A2A_DEADLINE_CLOCK_CONTRACT,
+            "deadlineClockUnit": "seconds",
             "childScopeHashes": list(self.__child_scope_hashes),
             "failed": self.__failure_code is not None,
             "failureCode": self.__failure_code,

@@ -27,7 +27,7 @@ for (const mode of ['normal', 'user-after-sdk', 'user-after-offset', 'stop-after
     writeFileSync(capability, JSON.stringify({ syntheticFixtureOnly: true, plugins }))
     const workspace = join(capture, 'workspace'), output = join(capture, 'output')
     mkdirSync(workspace); mkdirSync(output)
-    const manifest = { runRoot, runId: 'controlled-production-a2a-' + mode,
+    const manifest = { runRoot, runId: 'controlled-production-a2a-' + mode, requestedRuntime: { scenarioTimeoutSeconds: 90 },
       manifestHash: 'f'.repeat(64), syntheticFixtureOnly: true, lockRefs: { capabilities: {
       path: portable(relative(project, capability)), sha256: fileDigest(capability) } } }
     const task = { phase: 'agent2agent', config: 'mini', executionId: 'production-a2a-' + mode,
@@ -82,6 +82,7 @@ for (const mode of ['normal', 'user-after-sdk', 'user-after-offset', 'stop-after
     const events = readFileSync(eventPath, 'utf8').trim().split(/\r?\n/).map(JSON.parse)
     const verified = verifyOfficialA2ARuntimeEvidence({ events,
       identity: { executionId: task.executionId, sessionId: session.sessionId },
+      deadlineRequestTimeoutMs: settings.scenarioTimeoutSeconds * 1000,
       readEvidence: path => readFileSync(join(project, path)) })
     assert.equal(verified.childCount, report.childSnapshots)
     assert.ok(verified.consumedEvidencePaths.length > 0)

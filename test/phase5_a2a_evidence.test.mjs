@@ -11,7 +11,10 @@ const id = character => character.repeat(32)
 const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : value && typeof value === 'object'
   ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}` : JSON.stringify(value)
 
-function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore = false, blockedArguments } = {}) {
+function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore = false, blockedArguments,
+  deadlineClock = false, scopeDeadline = 1000, clockTimeoutMs = 900000, clockUnit = 'seconds', nativeAdmission = false, nativeRefusal = false } = {}) {
+  if (nativeAdmission || nativeRefusal) deadlineClock = true
+  const clockVersion = nativeAdmission || nativeRefusal ? 'gaia2-official-a2a-clock-v2' : 'gaia2-official-a2a-clock-v1'
   const buffers = new Map(), refs = [], appId = sourceReturn ? 'Shopping' : 'Calendar'
   const root = 'C:/evidence/native', ledgerRoot = `${root}/generation-time/${id('a')}`
   const store = (sourcePath, value) => {
@@ -19,7 +22,8 @@ function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore
     const ref = { path: `runs/fixture/workspaces/session/capture/${refs.length}.bin`, sha256: sha(bytes), sourcePath }
     refs.push(ref); buffers.set(ref.path, bytes); return { path: sourcePath, sha256: ref.sha256 }
   }
-  const sourceBytes = Buffer.from('trusted source fixture'), source = { path: 'C:/source/owner.py', sha256: sha(sourceBytes), bytes: sourceBytes.length }
+  const sourceBytes = Buffer.from(deadlineClock ? `A2A_DEADLINE_CLOCK_CONTRACT = "${clockVersion}"\n` : 'trusted source fixture'),
+    source = { path: deadlineClock ? 'C:/source/scripts/gaia2_official_a2a.py' : 'C:/source/owner.py', sha256: sha(sourceBytes), bytes: sourceBytes.length }
   store(source.path, sourceBytes)
   const sources = [source]
   if (sourceReturn) {
@@ -32,11 +36,12 @@ function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore
     completionEvidenceKind: 'source_pinned_return', sourcePinId: 'are-1.2-shopping-discount-codes-read-v1' }
   if (sourceReturn) Object.assign(final, { completionEvidenceKind: 'child_final_answer', sourcePinId: null })
   const writer = { toolId: 'native-writer', publicName: 'Calendar__create_event', canonicalName: 'Calendar__create_event', effect: 'write', toolKind: 'app_tool', resourceKey: appId, signatureHash: h('8'), formatterSourceHash: null }
-  const tools = sourceReturn ? [getter, final] : blockedBefore ? [writer, final] : [final]
+  const tools = sourceReturn ? [getter, final] : blockedBefore || nativeRefusal ? [writer, final] : [final]
   const manifest = { schemaVersion: `gaia2-native-app-binding-v${sourceReturn ? 2 : 1}`, environmentGeneration: 'official-exec', parentExecutionId: 'exec', parentSessionId: 'session', appId,
     appType: sourceReturn ? 'are.simulation.apps.shopping.Shopping' : 'fixture.Calendar', evidenceRoot: root, parentCanonicalName: 'AppAgent__expert_agent', taskArgumentKey: 'task', sourceRefs: sources, tools, toolInventoryHash: wire(tools) }
+  if (nativeAdmission || nativeRefusal) manifest.nativeAdmissionDeadline = { schemaVersion: 'gaia2-native-admission-deadline-v1', unit: 'seconds', clockAuthority: 'ARE' }
   const scope = { environmentGeneration: manifest.environmentGeneration, parentExecutionId: 'exec', parentSessionId: 'session', appId, parentCanonicalName: manifest.parentCanonicalName,
-    taskArgumentKey: 'task', toolInventoryHash: manifest.toolInventoryHash, taskHash: h('3'), task: 'fixture task', requestId: id('b'), parentActionId: 'parent-action', childExecutionId: 'child', childSessionId: 'child-session', deadline: 1000, maxNativeActions: 10 }
+    taskArgumentKey: 'task', toolInventoryHash: manifest.toolInventoryHash, taskHash: h('3'), task: 'fixture task', requestId: id('b'), parentActionId: 'parent-action', childExecutionId: 'child', childSessionId: 'child-session', deadline: scopeDeadline, maxNativeActions: 10 }
   const scopeHash = wire(scope)
   const modelScope = { modelRole: 'child_actor', delegationScopeHash: scopeHash, configHash: h('4') }
   const modelAdmission = { delegationScopeHash: scopeHash, modelScope, modelScopeHash: wire(modelScope), originalMessagesHash: h('6') }
@@ -46,7 +51,7 @@ function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore
     generationLedgerRoot: ledgerRoot, generationOwnerSourceRefs: [source] }
   record.sdkAttempts.push({ schemaVersion: 'capybara-scoped-model-sdk-attempt-v1', permitId: record.permitId, requestId: record.requestId, actualInputHash: record.actualInputHash, scopeHash, modelScopeHash: record.modelScopeHash, attempt: 1 })
   record.beforeEvidenceRef = store('C:/evidence/child-host/before.json', { schemaVersion: 'capybara-runtime-plugin-invocation-v1', executionId: 'child', sessionId: 'child-session',
-    input: { checkpoint: 'before_model' }, decision: { action: 'allow' }, trustedModelAdmission: modelAdmission,
+    input: { checkpoint: 'before_model', ...(deadlineClock ? { clock: { now: 100, revision: 1 } } : {}) }, decision: { action: 'allow' }, trustedModelAdmission: modelAdmission,
     context: 'trusted context', contextHash: record.contextHash, variablesHash: record.variablesHash, revision: record.revision, hookReceipts: [{ status: 'passed', matched: true }] })
   const lease = { leaseId: id('d'), scopeHash, modelScopeHash: record.modelScopeHash, permitId: record.permitId, requestId: record.requestId, actualInputHash: record.actualInputHash, sourceManifestHash: genSourceHash,
     beforeNow: 100, pausedNow: 100, pausePassedTime: 100, released: false }
@@ -74,8 +79,9 @@ function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore
       parentExecutionId: 'exec', parentSessionId: 'session', sequence: registrySequence, previousHash: registryPrevious, kind, data })
     registryPrevious = ref.sha256; return ref
   }
-  registry('initialized', { apps: [{ appId, toolInventoryHash: manifest.toolInventoryHash, tools: tools.map(({ publicName: _name, signatureHash: _signature, formatterSourceHash: _formatter, ...tool }) => tool) }] })
-  registry('registered', { scope }); registry('model_admitted', { scope, requestId: record.requestId, admission: modelAdmission, beforeEvidence: record.beforeEvidenceRef })
+  registry('initialized', { apps: [{ appId, toolInventoryHash: manifest.toolInventoryHash, ...(deadlineClock ? { requestTimeoutMs: clockTimeoutMs } : {}), tools: tools.map(({ publicName: _name, signatureHash: _signature, formatterSourceHash: _formatter, ...tool }) => tool) }],
+    ...(deadlineClock ? { clockContract: { schemaVersion: 'capybara-runtime-delegation-clock-v1', unit: clockUnit } } : {}) })
+  registry('registered', { scope, ...(deadlineClock ? { deadlineClock: { schemaVersion: 'capybara-runtime-delegation-clock-v1', unit: clockUnit, issuedAt: 100, requestTimeoutMs: clockTimeoutMs, deadline: scopeDeadline } } : {}) }); registry('model_admitted', { scope, requestId: record.requestId, admission: modelAdmission, beforeEvidence: record.beforeEvidenceRef })
   const blockedActions = []
   if (blockedBefore) {
     const argumentsValue = blockedArguments ?? { title: 'fixture' }, argumentsHash = sha(canonical(argumentsValue))
@@ -101,10 +107,11 @@ function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore
   }
   const actions = [], selectedTool = sourceReturn ? getter : final, value = sourceReturn ? { discountCodes: ['fixture'] } : 'done'
   let completion = null
-  if (!failedGeneration) {
+  if (!failedGeneration && !nativeRefusal) {
     const common = { sourceManifestHash: wire(manifest), scopeHash, ticketId: id('e'), dispatchId: '00000000-0000-4000-8000-000000000001', toolId: selectedTool.toolId,
       canonicalName: selectedTool.canonicalName, toolKind: selectedTool.toolKind, effect: selectedTool.effect, rawArgumentsHash: wire({}), effectiveArgumentsHash: wire({}) }
-    const dispatched = store(`${root}/json/dispatch-${id('f')}.json`, { schemaVersion: 'gaia2-private-native-dispatch-v1', ...common, status: 'pending', ownerClock: 102 })
+    const dispatched = store(`${root}/json/dispatch-${id('f')}.json`, { schemaVersion: 'gaia2-private-native-dispatch-v1', ...common, status: 'pending', ownerClock: 102,
+      ...(nativeAdmission ? { nativeAdmission: { schemaVersion: 'gaia2-native-admission-v1', unit: 'seconds', clockAuthority: 'ARE', checkedAt: 102, deadline: scopeDeadline, status: 'admitted' } } : {}) })
     const returned = { schemaVersion: `gaia2-private-native-return-v${sourceReturn ? 2 : 1}`, ...common, status: 'succeeded', returned: true, agentObservation: value,
       agentObservationHash: wire(value), nativeRawResultHash: wire(value), nativeCompletedEventRef: null, dispatchEvidenceRef: { ...dispatched, path: `json/dispatch-${id('f')}.json` }, errorCode: null,
       ...(sourceReturn ? { completionEvidenceKind: getter.completionEvidenceKind, sourcePinId: getter.sourcePinId, nativeRawProjection: value, ownerClock: 102 } : {}) }
@@ -126,7 +133,33 @@ function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore
     actions.push({ dispatchId: common.dispatchId, toolId: selectedTool.toolId, toolKind: selectedTool.toolKind, status: 'completed', childCompleted: !sourceReturn })
     if (!sourceReturn) completion = registry('completed', { scope, finalDispatchId: common.dispatchId })
   }
-  const failed = sourceReturn || failedGeneration
+  if (nativeRefusal) {
+    const tool = sourceReturn ? getter : writer, argumentsValue = { title: 'fixture' }, argumentsHash = sha(canonical(argumentsValue))
+    const { publicName: _name, signatureHash: _signature, formatterSourceHash: _formatter, ...binding } = tool
+    const action = { ...binding, id: '00000000-0000-4000-8000-000000000003', dispatchId: '00000000-0000-4000-8000-000000000003', arguments: argumentsValue,
+      argumentsHash, mutationKey: sha(canonical([scope.environmentGeneration, scope.appId, tool.resourceKey, tool.canonicalName, argumentsHash])) }
+    const common = { sourceManifestHash: wire(manifest), scopeHash, ticketId: id('3'), dispatchId: action.dispatchId,
+      toolId: tool.toolId, canonicalName: tool.canonicalName, toolKind: tool.toolKind, effect: tool.effect,
+      rawArgumentsHash: wire(argumentsValue), effectiveArgumentsHash: wire(argumentsValue) }
+    const clock = { now: 102, revision: 1 }
+    const clockRef = store(`${root}/json/clock-${id('3')}.json`, { schemaVersion: 'gaia2-private-native-clock-receipt-v1', ...common,
+      checkpoint: 'before_tool', clock, clockAuthority: 'ARE', revisionMeaning: 'owner_observation_sequence_not_are_revision', nativeReturnEvidenceRef: null })
+    const beforeEvidence = store('C:/evidence/child-host/refusal-before.json', { schemaVersion: 'capybara-runtime-plugin-invocation-v1', sequence: 2,
+      executionId: 'child', sessionId: 'child-session', input: { checkpoint: 'before_tool', clock,
+        action: { id: action.id, name: tool.toolId, canonicalName: tool.canonicalName, effect: tool.effect, resourceKey: tool.resourceKey,
+          mutationKey: action.mutationKey, arguments: argumentsValue, authoritativeRead: tool.effect === 'read' } }, decision: { action: 'allow' }, safetyFailure: null,
+      hookReceipts: [{ hookId: 'gaia2-a2a-guard', status: 'passed', matched: true, decision: { action: 'allow' } }], trustedNativeCheckpoint: {
+        schemaVersion: 'capybara-trusted-native-checkpoint-v1', scopeHash, checkpoint: 'before_tool', actionHash: wire(action), clockEvidenceRef: clockRef, hookOutcome: null } })
+    registry('native_started', { scope, action, beforeEvidence, mutationStatus: tool.effect === 'write' ? 'pending' : null })
+    const proof = store(`${root}/json/admission-refusal-${id('3')}.json`, { schemaVersion: 'gaia2-private-native-admission-refusal-receipt-v1', ...common,
+      status: 'rejected', errorCode: 'NATIVE_SCOPE_DEADLINE_EXPIRED', nativeBodyStarted: false, ticketRevoked: true, childTerminated: true,
+      unit: 'seconds', clockAuthority: 'ARE', observedAt: scopeDeadline, deadline: scopeDeadline,
+      beforeClockEvidenceRef: { path: `json/clock-${id('3')}.json`, sha256: clockRef.sha256 } })
+    registry('native_rejected', { scope, action, started: true, nativeReturned: false, resultHash: sha('native_outcome_unknown'),
+      code: 'DELEGATION_NATIVE_ADMISSION_REFUSED', reservationCharged: true, physicalNativeStarted: false,
+      nativeAdmissionRefusalEvidenceRef: proof, beforeEvidence })
+  }
+  const failed = sourceReturn || failedGeneration || nativeRefusal
   const runner = { schemaVersion: 'gaia2-scoped-app-agent-v1', scopeHash, sourceManifestHash: wire(manifest), sourceRefs: sources,
     modelScopeHash: record.modelScopeHash, modelGateEnabled: true, notificationReaderAttached: true, notificationPumpAttached: true, deadlineOptIn: true,
     generationTimeOptIn: true, generationTimeOwnerFactoryBound: true, generationLedgerFactoryBound: true, generationTimingOffsetMode: 'successfulSdkElapsedSeconds',
@@ -138,6 +171,7 @@ function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore
     scopeHash: null, childActive: false, closed: false, modelRequests: 1, sdkAttempts: 1, notificationReaderFactoryBound: true, deadlineFactoryBound: true,
     notificationPumpRequired: true, generationTimeRequired: true, notificationPumpFactoryBound: true, generationTimeFactoryBound: true,
     childScopeHashes: [scopeHash], failed: false, failureCode: null, guard }
+  if (deadlineClock) Object.assign(client, { deadlineClockContract: clockVersion, deadlineClockUnit: 'seconds' })
   const event = { type: 'a2a_child_runtime_snapshot', executionId: 'exec', sessionId: 'session', appId, scopeHash, childExecutionId: 'child', childSessionId: 'child-session', runnerSnapshot: runner, nativeManifest: manifest, evidenceRefs: refs }
   const pump = stage => ({ type: 'a2a_parent_notification_pumped', executionId: 'exec', sessionId: 'session', appId, scopeHash, childExecutionId: 'child', childSessionId: 'child-session', stage,
     clockNow: 104, parentRevisionBefore: 1, parentRevisionAfter: 1, publishedCount: 0, stopped: false, originRevoked: false })
@@ -147,7 +181,7 @@ function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore
   const events = [{ type: 'official_tool_inventory', tools: [{ canonicalName: 'AppAgent__expert_agent', appName: appId }] }, pump('pre_step'), pump('model_admission'), broker('model_logical_request_started'), pump('sdk_attempt_before'),
     broker('model_request_attempt', { requestAttempt: 1 }), pump('sdk_attempt_after'),
     ...(failedGeneration ? [broker('model_request_rejected', { failureCode: 'SCOPED_MODEL_SAFE_POINT_DENIED' })] : [broker('model_request_succeeded', { outputHash: record.outputHash })]),
-    broker('model_logical_request_finished', { status: failedGeneration ? 'rejected' : 'succeeded', sdkAttempts: 1 }), pump('model_returned'), ...(blockedBefore ? [pump('native_before')] : []), ...(actions.length ? [pump('native_before')] : []), pump('child_close'), event,
+    broker('model_logical_request_finished', { status: failedGeneration ? 'rejected' : 'succeeded', sdkAttempts: 1 }), pump('model_returned'), ...(blockedBefore ? [pump('native_before')] : []), ...(actions.length || nativeRefusal ? [pump('native_before')] : []), pump('child_close'), event,
     { type: 'a2a_client_pool_snapshot', schemaVersion: 'gaia2-official-a2a-client-pool-v1', executionId: 'exec', sessionId: 'session', status: 'committed', expectedAppIds: [appId], usedAppIds: [appId], clients: [client] },
     { type: 'a2a_client_snapshot', ...structuredClone(client) }]
   const identity = { phase: 'agent2agent', executionId: 'exec', scenarioId: 'scenario' }
@@ -175,7 +209,10 @@ function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore
     }
     throw new Error('fixture rebind failed to converge')
   }
-  return { events, event, client, identity, buffers, refs, record, ledger, rebind, store, options: { readEvidence: path => { assert.ok(!/^[A-Za-z]:|^\//.test(path)); return buffers.get(path) } },
+  return { events, event, client, identity, buffers, refs, record, ledger, rebind, store, options: { readEvidence: path => { assert.ok(!/^[A-Za-z]:|^\//.test(path)); return buffers.get(path) },
+    ...(deadlineClock ? { deadlineRequestTimeoutMs: 900000, environmentLock: {
+      codeInputs: [{ path: 'scripts/gaia2_official_a2a.py', sha256: source.sha256, bytes: source.bytes }],
+      officialCodeInputs: sources.filter(ref => ref.path.includes('/are/')).map(ref => ({ ...ref })) } } : {}) },
     replace: (schema, mutate) => { const ref = refs.find(ref => { try { return JSON.parse(buffers.get(ref.path)).schemaVersion === schema } catch { return false } }); assert.ok(ref); const value = JSON.parse(buffers.get(ref.path)); mutate(value); buffers.set(ref.path, Buffer.from(`${JSON.stringify(value)}\n`)); return ref } }
 }
 
@@ -186,6 +223,243 @@ function mutateReceipt(value, predicate, mutate) {
   value.buffers.set(ref.path, Buffer.from(`${JSON.stringify(receipt)}\n`))
   return ref
 }
+
+function rebindManifest(value, mutate) {
+  const prior = value.event.runnerSnapshot.sourceManifestHash
+  mutate(value.event.nativeManifest)
+  const next = wire(value.event.nativeManifest)
+  const visit = item => {
+    if (item === prior) return next
+    if (Array.isArray(item)) return item.map(visit)
+    if (item && typeof item === 'object') for (const key of Object.keys(item)) item[key] = visit(item[key])
+    return item
+  }
+  visit(value.events)
+  for (const [path, buffer] of value.buffers) {
+    try { value.buffers.set(path, Buffer.from(`${JSON.stringify(visit(JSON.parse(buffer)))}\n`)) } catch { /* source bytes */ }
+  }
+  value.rebind()
+}
+
+test('clock-v2 requires a sealed native deadline contract and checks physical admission independently', () => {
+  for (const sourceReturn of [false, true]) {
+    const value = fixture({ nativeAdmission: true, sourceReturn })
+    assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), [])
+    const proof = verifyOfficialA2ARuntimeEvidence({ events: value.events, identity: value.identity, ...value.options })
+    assert.equal(proof.nativeAdmissionGuardedChildCount, 1)
+    assert.equal(proof.nativeAdmissionRefusalCount, 0)
+    assert.equal(proof.nativeReturnCount, 1)
+    assert.equal(proof.consumedEvidencePaths.length, value.refs.length)
+  }
+  for (const deadlineClock of [false, true]) {
+    const legacy = fixture({ deadlineClock })
+    const proof = verifyOfficialA2ARuntimeEvidence({ events: legacy.events, identity: legacy.identity, ...legacy.options })
+    assert.equal(proof.nativeAdmissionGuardedChildCount, 0)
+    assert.equal(proof.nativeAdmissionRefusalCount, 0)
+  }
+})
+
+test('owner expiry after allowed Hook charges the reservation but proves zero physical native body', () => {
+  for (const sourceReturn of [false, true]) {
+    const value = fixture({ nativeRefusal: true, sourceReturn })
+    assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), [])
+    const proof = verifyOfficialA2ARuntimeEvidence({ events: value.events, identity: value.identity, ...value.options })
+    assert.equal(proof.nativeAdmissionRefusalCount, 1)
+    assert.equal(proof.nativeAdmissionGuardedChildCount, 1)
+    assert.equal(proof.nativeReturnCount, 0)
+    assert.equal(value.event.runnerSnapshot.failed, true)
+    assert.equal(value.event.runnerSnapshot.completed, false)
+    assert.equal(proof.consumedEvidencePaths.length, value.refs.length)
+  }
+})
+
+for (const [name, mutate, expected] of [
+  ['missing native manifest marker', value => rebindManifest(value, manifest => { delete manifest.nativeAdmissionDeadline }), 'a2a_native_admission_contract_missing'],
+  ['manifest milliseconds downgrade', value => rebindManifest(value, manifest => { manifest.nativeAdmissionDeadline.unit = 'milliseconds' }), 'a2a_native_admission_contract_invalid'],
+  ['manifest wrong authority', value => rebindManifest(value, manifest => { manifest.nativeAdmissionDeadline.clockAuthority = 'OS' }), 'a2a_native_admission_contract_invalid'],
+  ['dispatch marker deleted', value => value.replace('gaia2-private-native-dispatch-v1', row => { delete row.nativeAdmission }), 'a2a_native_admission_invalid'],
+  ['checked at deadline', value => value.replace('gaia2-private-native-dispatch-v1', row => { row.nativeAdmission.checkedAt = 1000; row.ownerClock = 1000 }), 'a2a_native_admission_invalid'],
+  ['checked before issue', value => value.replace('gaia2-private-native-dispatch-v1', row => { row.nativeAdmission.checkedAt = 99; row.ownerClock = 99 }), 'a2a_native_admission_invalid'],
+  ['checked before beforeclock', value => value.replace('gaia2-private-native-dispatch-v1', row => { row.nativeAdmission.checkedAt = 101; row.ownerClock = 101 }), 'a2a_native_admission_invalid'],
+  ['owner clock differs', value => value.replace('gaia2-private-native-dispatch-v1', row => { row.ownerClock = 103 }), 'a2a_native_admission_invalid'],
+  ['wrong deadline', value => value.replace('gaia2-private-native-dispatch-v1', row => { row.nativeAdmission.deadline = 1000000 }), 'a2a_native_admission_invalid'],
+  ['wrong unit', value => value.replace('gaia2-private-native-dispatch-v1', row => { row.nativeAdmission.unit = 'milliseconds' }), 'a2a_native_admission_invalid'],
+  ['wrong authority', value => value.replace('gaia2-private-native-dispatch-v1', row => { row.nativeAdmission.clockAuthority = 'SDK' }), 'a2a_native_admission_invalid'],
+  ['wrong admitted status', value => value.replace('gaia2-private-native-dispatch-v1', row => { row.nativeAdmission.status = 'rejected' }), 'a2a_native_admission_invalid'],
+  ['unknown admission permission', value => value.replace('gaia2-private-native-dispatch-v1', row => { row.nativeAdmission.permission = true }), 'a2a_native_admission_invalid'],
+]) test(`source-bound native admission rejects ${name} after all SHA references rebind`, () => {
+  const value = fixture({ nativeAdmission: true }); mutate(value); value.rebind()
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), [expected])
+})
+
+const refusalSchema = 'gaia2-private-native-admission-refusal-receipt-v1'
+const refusedDispatch = '00000000-0000-4000-8000-000000000003'
+for (const [name, mutate, expected] of [
+  ['not charged reservation', value => mutateReceipt(value, row => row.kind === 'native_rejected', row => { row.data.reservationCharged = false }), 'a2a_native_refusal_reservation_invalid'],
+  ['physical body claimed', value => mutateReceipt(value, row => row.kind === 'native_rejected', row => { row.data.physicalNativeStarted = true }), 'a2a_native_refusal_reservation_invalid'],
+  ['reservation not started', value => mutateReceipt(value, row => row.kind === 'native_rejected', row => { row.data.started = false }), 'a2a_native_refusal_reservation_invalid'],
+  ['native returned', value => mutateReceipt(value, row => row.kind === 'native_rejected', row => { row.data.nativeReturned = true }), 'a2a_native_refusal_reservation_invalid'],
+  ['invented native value', value => mutateReceipt(value, row => row.kind === 'native_rejected', row => { row.data.resultHash = h('0') }), 'a2a_native_refusal_reservation_invalid'],
+  ['wrong registry action', value => mutateReceipt(value, row => row.kind === 'native_rejected', row => { row.data.action.arguments.title = 'changed' }), 'a2a_native_refusal_action_invalid'],
+  ['Hook block mislabeled owner refusal', value => mutateReceipt(value, row => row.input?.checkpoint === 'before_tool', row => { row.decision.action = 'block' }), 'a2a_native_refusal_hook_invalid'],
+  ['Hook source failure', value => mutateReceipt(value, row => row.input?.checkpoint === 'before_tool', row => { row.safetyFailure = 'HOOK_ERROR' }), 'a2a_native_refusal_hook_invalid'],
+  ['wrong child Hook', value => mutateReceipt(value, row => row.input?.checkpoint === 'before_tool', row => { row.sessionId = 'foreign' }), 'a2a_native_refusal_hook_invalid'],
+  ['wrong action clock join', value => mutateReceipt(value, row => row.input?.checkpoint === 'before_tool', row => { row.trustedNativeCheckpoint.actionHash = h('0') }), 'a2a_native_refusal_hook_invalid'],
+  ['wrong clock scope', value => value.replace('gaia2-private-native-clock-receipt-v1', row => { row.scopeHash = h('0') }), 'a2a_native_refusal_clock_invalid'],
+  ['clock at deadline', value => {
+    value.replace('gaia2-private-native-clock-receipt-v1', row => { row.clock.now = 1000 })
+    mutateReceipt(value, row => row.input?.checkpoint === 'before_tool', row => { row.input.clock.now = 1000 })
+  }, 'a2a_authorization_after_deadline'],
+  ['wrong proof identity', value => value.replace(refusalSchema, row => { row.ticketId = id('0') }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong dispatch identity', value => value.replace(refusalSchema, row => { row.dispatchId = '00000000-0000-4000-8000-000000000099' }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong scope identity', value => value.replace(refusalSchema, row => { row.scopeHash = h('0') }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong raw arguments', value => value.replace(refusalSchema, row => { row.rawArgumentsHash = h('0') }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong source manifest', value => value.replace(refusalSchema, row => { row.sourceManifestHash = h('0') }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong effective arguments', value => value.replace(refusalSchema, row => { row.effectiveArgumentsHash = h('0') }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong refusal status', value => value.replace(refusalSchema, row => { row.status = 'completed' }), 'a2a_native_refusal_proof_invalid'],
+  ['ordinary native error mislabeled expiry', value => value.replace(refusalSchema, row => { row.errorCode = 'NATIVE_ACTION_FAILED' }), 'a2a_native_refusal_proof_invalid'],
+  ['started body', value => value.replace(refusalSchema, row => { row.nativeBodyStarted = true }), 'a2a_native_refusal_proof_invalid'],
+  ['ticket not revoked', value => value.replace(refusalSchema, row => { row.ticketRevoked = false }), 'a2a_native_refusal_proof_invalid'],
+  ['child not terminated', value => value.replace(refusalSchema, row => { row.childTerminated = false }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong proof unit', value => value.replace(refusalSchema, row => { row.unit = 'milliseconds' }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong proof authority', value => value.replace(refusalSchema, row => { row.clockAuthority = 'OS' }), 'a2a_native_refusal_proof_invalid'],
+  ['refused before expiry', value => value.replace(refusalSchema, row => { row.observedAt = 999 }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong proof deadline', value => value.replace(refusalSchema, row => { row.deadline = 1000000 }), 'a2a_native_refusal_proof_invalid'],
+  ['unknown proof permission', value => value.replace(refusalSchema, row => { row.permission = true }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong beforeclock reference', value => value.replace(refusalSchema, row => { row.beforeClockEvidenceRef.path = 'json/foreign-clock.json' }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong beforeclock SHA', value => value.replace(refusalSchema, row => { row.beforeClockEvidenceRef.sha256 = h('0') }), 'a2a_native_refusal_proof_invalid'],
+  ['unsafe absolute beforeclock', value => value.replace(refusalSchema, row => { row.beforeClockEvidenceRef.path = 'C:/evidence/native/json/clock.json' }), 'a2a_native_refusal_proof_invalid'],
+  ['wrong intent action', value => mutateReceipt(value, row => row.kind === 'native_started', row => { row.data.action.arguments.title = 'changed' }), 'a2a_native_refusal_registry_join_invalid'],
+  ['wrong intent Hook', value => mutateReceipt(value, row => row.kind === 'native_started', row => { row.data.beforeEvidence = { ...value.record.beforeEvidenceRef } }), 'a2a_native_refusal_registry_join_invalid'],
+  ['after clock fabricated', value => value.store('C:/evidence/native/json/clock-fake.json', { schemaVersion: 'gaia2-private-native-clock-receipt-v1', scopeHash: value.event.scopeHash, dispatchId: refusedDispatch, checkpoint: 'after_tool' }), 'a2a_native_refusal_execution_claim'],
+  ['CE fabricated', value => value.store('C:/evidence/native/json/ce-fake.json', { schemaVersion: 'gaia2-private-native-ce-v1', scopeHash: value.event.scopeHash, dispatchId: refusedDispatch }), 'a2a_native_refusal_execution_claim'],
+  ['ordinary return fabricated', value => value.store('C:/evidence/native/json/return-fake.json', { schemaVersion: 'gaia2-private-native-return-v1', scopeHash: value.event.scopeHash, dispatchId: refusedDispatch }), 'a2a_native_refusal_execution_claim'],
+  ['ordinary dispatch fabricated', value => value.store('C:/evidence/native/json/dispatch-fake.json', { schemaVersion: 'gaia2-private-native-dispatch-v1', scopeHash: value.event.scopeHash, dispatchId: refusedDispatch }), 'a2a_native_refusal_execution_claim'],
+  ['after Hook fabricated', value => value.store('C:/evidence/child-host/refused-after.json', { schemaVersion: 'capybara-runtime-plugin-invocation-v1', executionId: 'child', sessionId: 'child-session', input: { checkpoint: 'after_tool', action: { id: refusedDispatch } } }), 'a2a_native_refusal_execution_claim'],
+  ['unknown transport relabeled refusal', value => mutateReceipt(value, row => row.kind === 'native_rejected', row => { row.data.code = 'DELEGATION_NATIVE_FAILED' }), 'a2a_runtime_evidence_unconsumed'],
+  ['Hook block relabeled refusal', value => mutateReceipt(value, row => row.kind === 'native_rejected', row => { row.data.code = 'DELEGATION_BEFORE_BLOCKED' }), 'a2a_native_blocked_inventory_invalid'],
+  ['child fake completion', value => { value.event.runnerSnapshot.failed = false; value.event.runnerSnapshot.completed = true; value.event.runnerSnapshot.failureCode = null }, 'a2a_native_refusal_reservation_invalid'],
+  ['failed child claims successful action', value => value.event.runnerSnapshot.actions.push({ dispatchId: refusedDispatch }), 'a2a_native_refusal_execution_claim'],
+  ['Hook blocked history claims owner refusal', value => { value.event.runnerSnapshot.blockedActions = [{ dispatchId: refusedDispatch }] }, 'a2a_native_blocked_inventory_invalid'],
+  ['native pump omitted', value => { value.events.splice(value.events.findIndex(event => event.stage === 'native_before'), 1) }, 'a2a_notification_native_pump_missing'],
+]) test(`owner refusal semantic audit rejects ${name} after full SHA rebinding`, () => {
+  const value = fixture({ nativeRefusal: true }); mutate(value); value.rebind()
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), [expected])
+})
+
+for (const directory of ['json/nested', 'json/../json', 'foreign']) test(`owner refusal proof rejects sealed ${directory} directory aliases`, () => {
+  const value = fixture({ nativeRefusal: true })
+  const ref = value.refs.find(ref => ref.sourcePath.includes('/admission-refusal-'))
+  const path = ref.sourcePath.replace('/json/', `/${directory}/`)
+  ref.sourcePath = path
+  mutateReceipt(value, row => row.kind === 'native_rejected', row => { row.data.nativeAdmissionRefusalEvidenceRef.path = path })
+  value.rebind()
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), ['a2a_native_refusal_reference_invalid'])
+})
+
+test('owner refusal proof cannot consume an unrelated orphan receipt', () => {
+  const value = fixture({ nativeRefusal: true })
+  const ref = value.refs.find(ref => ref.sourcePath.includes('/admission-refusal-'))
+  const receipt = JSON.parse(value.buffers.get(ref.path))
+  receipt.dispatchId = '00000000-0000-4000-8000-000000000099'; receipt.ticketId = id('9')
+  value.store(`C:/evidence/native/json/admission-refusal-${id('9')}.json`, receipt)
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), ['a2a_runtime_evidence_unconsumed'])
+})
+
+test('clock-v2 downgrade by deleting native markers fails even after every local SHA rebind', () => {
+  const value = fixture({ nativeAdmission: true })
+  rebindManifest(value, manifest => { delete manifest.nativeAdmissionDeadline })
+  value.replace('gaia2-private-native-dispatch-v1', row => { delete row.nativeAdmission })
+  for (const event of value.events) if (event.type === 'a2a_client_pool_snapshot') for (const client of event.clients) client.deadlineClockContract = 'gaia2-official-a2a-clock-v1'
+  else if (event.type === 'a2a_client_snapshot') event.deadlineClockContract = 'gaia2-official-a2a-clock-v1'
+  value.rebind()
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), ['a2a_native_admission_contract_missing'])
+})
+
+test('clock-v2 source declaration removal is rejected by the external frozen source lock', () => {
+  const value = fixture({ nativeAdmission: true }), source = value.refs.find(ref => ref.sourcePath.endsWith('/scripts/gaia2_official_a2a.py'))
+  const bytes = Buffer.alloc(value.buffers.get(source.path).length, 32)
+  Buffer.from('A2A_DEADLINE_CLOCK_CONTRACT = "gaia2-official-a2a-clock-v1"').copy(bytes)
+  value.buffers.set(source.path, bytes)
+  value.rebind()
+  rebindManifest(value, () => {})
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), ['a2a_frozen_source_mismatch'])
+})
+
+test('new frozen clock contract verifies ARE seconds while preserving a millisecond timeout policy', () => {
+  const value = fixture({ deadlineClock: true })
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), [])
+  const verified = verifyOfficialA2ARuntimeEvidence({ events: value.events, identity: value.identity, ...value.options })
+  assert.equal(verified.childCount, 1); assert.equal(verified.consumedEvidencePaths.length, value.refs.length)
+})
+
+test('a fully rebound scope deadline multiplied by 1000 fails semantics rather than merely a SHA check', () => {
+  // Build every scope/wire identity/hash consistently around the wrong value.
+  const value = fixture({ deadlineClock: true, scopeDeadline: 1000000 })
+  value.rebind()
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), ['a2a_deadline_clock_semantics_invalid'])
+})
+
+test('rebinding both timeout policy and a consistent deadline cannot change the trusted run timeout', () => {
+  const value = fixture({ deadlineClock: true, scopeDeadline: 900100, clockTimeoutMs: 900000000 })
+  value.rebind()
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), ['a2a_deadline_clock_policy_mismatch'])
+})
+
+test('new frozen source cannot be downgraded by deleting all clock markers and rebinding every receipt SHA', () => {
+  const value = fixture({ deadlineClock: true })
+  for (const event of value.events) if (event.type === 'a2a_client_pool_snapshot') for (const client of event.clients) {
+    delete client.deadlineClockContract; delete client.deadlineClockUnit
+  } else if (event.type === 'a2a_client_snapshot') { delete event.deadlineClockContract; delete event.deadlineClockUnit }
+  mutateReceipt(value, row => row.kind === 'initialized', row => { delete row.data.clockContract })
+  mutateReceipt(value, row => row.kind === 'registered', row => { delete row.data.deadlineClock })
+  value.rebind()
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), ['a2a_deadline_clock_contract_missing'])
+})
+
+test('new frozen source cannot be downgraded into nonproduction by deleting the production flags', () => {
+  const value = fixture({ deadlineClock: true })
+  delete value.client.notificationPumpRequired; delete value.client.generationTimeRequired; value.client.guard = null
+  value.rebind()
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), ['a2a_production_pool_mixed_contract'])
+})
+
+test('new ARE source rejects a self-consistent milliseconds registration and missing trusted policy', () => {
+  const milliseconds = fixture({ deadlineClock: true, clockUnit: 'milliseconds', scopeDeadline: 900100 })
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(milliseconds.events, milliseconds.identity, milliseconds.options), ['a2a_deadline_clock_contract_missing'])
+  const missingPolicy = fixture({ deadlineClock: true }); delete missingPolicy.options.deadlineRequestTimeoutMs
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(missingPolicy.events, missingPolicy.identity, missingPolicy.options), ['a2a_deadline_clock_policy_mismatch'])
+})
+
+for (const [name, mutate] of [
+  ['model admission at exact deadline', value => mutateReceipt(value, row => row.schemaVersion === 'capybara-runtime-plugin-invocation-v1' && row.input.checkpoint === 'before_model', row => { row.input.clock.now = 1000 })],
+  ['native completion at exact deadline', value => mutateReceipt(value, row => row.schemaVersion === 'capybara-runtime-plugin-invocation-v1' && row.input.checkpoint === 'after_tool', row => { row.input.clock.now = 1000 })],
+  ['SDK admission after exact deadline', value => { for (const event of value.events) if (event.type === 'a2a_parent_notification_pumped') event.clockNow = 1000 }],
+]) test(`rebound clock evidence rejects ${name}`, () => {
+  const value = fixture({ deadlineClock: true }); mutate(value); value.rebind()
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), ['a2a_authorization_after_deadline'])
+})
+
+test('removing the new source declaration cannot bypass its frozen source hash', () => {
+  const value = fixture({ deadlineClock: true }), source = value.refs.find(ref => ref.sourcePath.endsWith('/scripts/gaia2_official_a2a.py'))
+  const bytes = Buffer.alloc(value.buffers.get(source.path).length, 32)
+  Buffer.from('legacy source without declaration').copy(bytes)
+  const oldManifestHash = value.event.runnerSnapshot.sourceManifestHash
+  value.buffers.set(source.path, bytes); value.rebind()
+  const newManifestHash = wire(value.event.nativeManifest)
+  const replace = item => {
+    if (item === oldManifestHash) return newManifestHash
+    if (Array.isArray(item)) return item.map(replace)
+    if (item && typeof item === 'object') for (const key of Object.keys(item)) item[key] = replace(item[key])
+    return item
+  }
+  replace(value.events)
+  for (const [path, buffer] of value.buffers) {
+    try { value.buffers.set(path, Buffer.from(`${JSON.stringify(replace(JSON.parse(buffer)))}\n`)) } catch { /* source is not JSON */ }
+  }
+  value.rebind()
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), ['a2a_frozen_source_mismatch'])
+})
 
 test('a sealed read_back denial discards only its untouched ticket and remains separate from later successful completion', () => {
   const value = fixture({ blockedBefore: true })

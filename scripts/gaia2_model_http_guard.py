@@ -229,8 +229,8 @@ class _AttemptFailureReceipt:
     lease closure can seal it, and consumption must name the exact exception
     and trusted attempt that created it. No request or response text is stored.
     """
-    def __init__(self, role, request_id, request_attempt):
-        self.identity = _attempt_identity(role, request_id, request_attempt, None)
+    def __init__(self, role, request_id, request_attempt, *, additional_identity=None):
+        self.identity = _attempt_identity(role, request_id, request_attempt, additional_identity)
         self.owner = threading.get_ident()
         self.consumed = False
         self._proof = None
@@ -246,16 +246,19 @@ class _AttemptFailureReceipt:
             return
         self._proof = (failure, lease.journal, lease.response_status, closed_hash)
 
-    def consume(self, error, role, request_id, request_attempt):
+    def consume(self, error, role, request_id, request_attempt, *, additional_identity=None):
         """An unsuccessful/mismatched consumption also burns the receipt."""
         proof, self._proof = self._proof, None
         if self.consumed:
             return None
         self.consumed = True
-        if (proof is None or self.owner != threading.get_ident()
-                or type(request_id) is not str or type(request_attempt) is not int
-                or self.identity != {"modelRole": role, "requestId": request_id,
-                    "requestAttempt": request_attempt}):
+        if proof is None or self.owner != threading.get_ident():
+            return None
+        try:
+            identity = _attempt_identity(role, request_id, request_attempt, additional_identity)
+        except ModelHttpGuardFailure:
+            return None
+        if self.identity != identity:
             return None
         failure, journal, status, closed_hash = proof
         if (failure is not error or journal is not _controller or journal.failed

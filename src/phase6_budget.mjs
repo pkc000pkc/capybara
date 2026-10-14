@@ -17,12 +17,14 @@ const COMMON = ['type', 'modelRole', 'requestId']
 const SCOPED = ['schemaVersion', 'modelScopeHash', 'configHash', 'permitId', 'actualInputHash']
 const OPERATIONAL = ['requestAttempt', 'maxRequestAttempts', 'cumulativeWaitSeconds']
 const FAILURE = [...OPERATIONAL, 'category', 'retryable', 'httpStatus', 'nextRetryAt', 'retryExhausted']
+const TRUSTED_STATUS = ['classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256']
+const CHILD_BINDING = ['parentExecutionId', 'parentSessionId', 'childExecutionId', 'childSessionId', 'delegationScopeHash']
 const FIELDS = {
   model_logical_request_started: [],
   model_request_attempt: [...OPERATIONAL, 'requestSummary'],
   model_request_succeeded: [...OPERATIONAL, 'outputHash', 'usageAvailable', 'usage'],
-  model_request_failed: [...FAILURE, 'diagnostic'],
-  model_retry_scheduled: [...FAILURE, 'waitSeconds', 'delaySource', 'cumulativeWaitSecondsAfterRetry', 'diagnostic'],
+  model_request_failed: [...FAILURE, 'diagnostic', ...TRUSTED_STATUS],
+  model_retry_scheduled: [...FAILURE, 'waitSeconds', 'delaySource', 'cumulativeWaitSecondsAfterRetry', 'diagnostic', ...TRUSTED_STATUS],
   model_retry_waiting: [...OPERATIONAL, 'nextRetryAt', 'remainingWaitSeconds'],
   model_request_rejected: ['failureCode'],
   model_logical_request_finished: ['status', 'sdkAttempts'],
@@ -92,7 +94,7 @@ function validateEvent(event, execution) {
     && REQUEST_ID.test(event.requestId ?? '') && event.executionId === execution.executionId
     && event.sessionId === execution.sessionId, 'foreign_model_event')
   const scoped = event.schemaVersion === SCOPED_SCHEMA
-  const required = FIELDS[event.type].filter(key => !['requestSummary', 'diagnostic', 'usage', 'outputHash', 'usageAvailable'].includes(key))
+  const required = FIELDS[event.type].filter(key => !['requestSummary', 'diagnostic', 'usage', 'outputHash', 'usageAvailable', ...TRUSTED_STATUS].includes(key))
   check(required.every(key => Object.hasOwn(event, key)), 'missing_model_event_fields')
   check(event.schemaVersion === undefined || scoped, 'unknown_model_event_schema')
   check(event.modelRole !== 'child_actor' || scoped, 'unversioned_child_model_event')
@@ -113,6 +115,14 @@ function validateEvent(event, execution) {
   if (Object.hasOwn(event, 'category')) check(['configuration_error', 'rate_limit', 'request_timeout', 'transport_error', 'runtime_error'].includes(event.category)
     && typeof event.retryable === 'boolean' && typeof event.retryExhausted === 'boolean'
     && (event.httpStatus === null || count(event.httpStatus) && event.httpStatus >= 100 && event.httpStatus <= 599), 'unsafe_failure_metadata')
+  const safeDiagnostic = event.modelRole === 'child_actor' ? event.diagnostic === undefined
+    : event.diagnostic?.schemaVersion === 'gaia2-model-diagnostic-v1' && event.diagnostic.sdkReportedStatus === 400
+      && event.diagnostic.exceptionClass === 'BadRequestError' && event.diagnostic.errorCode === null
+      && event.diagnostic.codeSource === null && [null, 'invalid_request_error', 'server_error'].includes(event.diagnostic.errorType)
+  if (TRUSTED_STATUS.some(key => Object.hasOwn(event, key)) || event.httpStatus === 408 && event.diagnostic?.sdkReportedStatus === 400) check(event.classificationSource === 'trusted_http_guard'
+    && event.httpStatusSource === 'trusted_http_guard' && HASH.test(event.httpGuardClosedRecordSha256 ?? '')
+    && event.category === 'request_timeout' && event.httpStatus === 408 && event.retryable === true
+    && safeDiagnostic, 'invalid_trusted_status_metadata')
   if (Object.hasOwn(event, 'nextRetryAt')) check(event.nextRetryAt === null
     || typeof event.nextRetryAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(event.nextRetryAt), 'invalid_retry_deadline')
   if (event.type === 'model_retry_scheduled') check(finite(event.waitSeconds) && finite(event.cumulativeWaitSecondsAfterRetry)
@@ -174,14 +184,14 @@ export function aggregatePhase6Budget({ executions = [] } = {}) {
           const permitKey = JSON.stringify([identity, event.permitId])
           check(!permits.has(permitKey), 'duplicate_permit'); permits.add(permitKey)
         }
-        request = { entries, scoped, identity: scoped ? Object.fromEntries(SCOPED.map(key => [key, event[key]])) : null,
+        request = { entries, scoped, identity: scoped ? Object.fromEntries([...SCOPED, ...(event.modelRole === 'child_actor' ? CHILD_BINDING : [])].map(key => [key, event[key]])) : null,
           attempts: [], pending: null, scheduled: false, succeeded: false, rejected: false, finished: false,
           lastFailure: null, reportedWait: 0, maximumAttempts: null }
         requests.set(key, request); increment('logicalRequests')
         if (scoped) continue
       }
       check(request && !request.preLogical && !request.finished && request.scoped === scoped, 'unbound_request_event')
-      if (scoped) check(SCOPED.every(key => request.identity[key] === event[key]), 'request_identity_changed')
+      if (scoped) check(Object.keys(request.identity).every(key => request.identity[key] === event[key]), 'request_identity_changed')
       if (Object.hasOwn(event, 'cumulativeWaitSeconds')) {
         if (request.maximumAttempts === null) request.maximumAttempts = event.maxRequestAttempts
         check(event.maxRequestAttempts === request.maximumAttempts, 'attempt_budget_changed')
@@ -211,6 +221,7 @@ export function aggregatePhase6Budget({ executions = [] } = {}) {
         check(!request.pending && !request.scheduled && !request.succeeded && request.lastFailure
           && event.requestAttempt === request.attempts.length && event.retryable && !event.retryExhausted
           && ['category', 'retryable', 'httpStatus', 'nextRetryAt', 'retryExhausted'].every(key => event[key] === request.lastFailure[key])
+          && TRUSTED_STATUS.every(key => event[key] === request.lastFailure[key])
           && event.cumulativeWaitSecondsAfterRetry === event.cumulativeWaitSeconds + event.waitSeconds, 'invalid_retry_sequence')
         request.scheduled = true; increment('retriesScheduled'); increment('scheduledCooldownSeconds', event.waitSeconds); continue
       }

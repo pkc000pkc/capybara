@@ -35,7 +35,8 @@ test('scoped Python broker uses actual ARE types and offline SDK callbacks only'
   const run = spawnSync(python, ['-B', join(root, 'test/phase5_scoped_model_broker_test.py')],
     { cwd: root, encoding: 'utf8', timeout: 60000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', HF_HUB_OFFLINE: '1', LITELLM_LOCAL_MODEL_COST_MAP: 'True' } })
   assert.equal(run.status, 0, run.stderr)
-  assert.match(run.stderr, /Ran 15 tests/)
+  assert.match(run.stderr, /^Ran 17 tests in [\d.]+s\r?$/m)
+  assert.match(run.stderr, /^OK\r?$/m)
   assert.equal(run.stdout, '')
 })
 

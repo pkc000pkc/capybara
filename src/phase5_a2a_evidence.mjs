@@ -7,6 +7,11 @@ const HASH = /^[a-f0-9]{64}$/, ID = /^[a-f0-9]{32}$/
 const PIN = 'are-1.2-shopping-discount-codes-read-v1'
 const PIN_SHA = '7436b99640628ef737418396287fe8b7fb4912bd81bfee72e251a748aaeae205'
 const PIN_BYTES = 25517
+const CLOCK_CONTRACT = 'gaia2-official-a2a-clock-v1'
+const NATIVE_CLOCK_CONTRACT = 'gaia2-official-a2a-clock-v2'
+const NATIVE_DEADLINE_SCHEMA = 'gaia2-native-admission-deadline-v1'
+const NATIVE_COMMON = ['sourceManifestHash', 'scopeHash', 'ticketId', 'dispatchId', 'toolId', 'canonicalName', 'toolKind', 'effect', 'rawArgumentsHash', 'effectiveArgumentsHash']
+const REGISTRY_CLOCK_CONTRACT = 'capybara-runtime-delegation-clock-v1'
 const portable = value => value.replaceAll('\\', '/')
 const sourceKey = value => portable(value).replace(/\/$/, '').toLowerCase()
 const sha = value => createHash('sha256').update(value).digest('hex')
@@ -135,6 +140,9 @@ function manifestTools(event, reader, environmentLock) {
     && Array.isArray(manifest.tools) && manifest.tools.length > 0 && a2aWireEvidenceHash(manifest.tools) === manifest.toolInventoryHash
     && runner.sourceManifestHash === a2aWireEvidenceHash(manifest), 'a2a_native_manifest_invalid')
   const version2 = manifest.schemaVersion === 'gaia2-native-app-binding-v2', tools = new Map(), publicNames = new Set(), canonicals = new Set()
+  if (manifest.nativeAdmissionDeadline !== undefined) check(exact(manifest.nativeAdmissionDeadline, ['schemaVersion', 'unit', 'clockAuthority'])
+    && manifest.nativeAdmissionDeadline.schemaVersion === NATIVE_DEADLINE_SCHEMA && manifest.nativeAdmissionDeadline.unit === 'seconds'
+    && manifest.nativeAdmissionDeadline.clockAuthority === 'ARE', 'a2a_native_admission_contract_invalid')
   let finalCount = 0, pinCount = 0
   const sources = sourceInventory(event, reader, environmentLock)
   for (const tool of manifest.tools) {
@@ -156,7 +164,7 @@ function manifestTools(event, reader, environmentLock) {
     tools.set(tool.toolId, tool); publicNames.add(tool.publicName); canonicals.add(tool.canonicalName)
   }
   check(finalCount === 1 && (!version2 || pinCount === 1), 'a2a_native_tool_inventory_invalid')
-  return { manifest, tools, version2, sources }
+  return { manifest, tools, version2, sources, nativeAdmissionRequired: manifest.nativeAdmissionDeadline !== undefined }
 }
 
 function makeReader(event, readEvidence) {
@@ -329,6 +337,98 @@ function blockedNativeEvidence(event, reader, inventory, entries, scope) {
   check(new Set(blocked.map(item => item?.dispatchId)).size === blocked.length, 'a2a_native_blocked_inventory_invalid')
 }
 
+function nativeDeadlineContext(event, entries, scope) {
+  const registered = entries.find(row => row.value?.schemaVersion === 'capybara-runtime-delegation-receipt-v1'
+    && row.value.kind === 'registered' && same(row.value.data?.scope, scope))
+  const deadline = registered?.value.data.deadlineClock
+  check(exact(deadline, ['schemaVersion', 'unit', 'issuedAt', 'requestTimeoutMs', 'deadline'])
+    && deadline.schemaVersion === REGISTRY_CLOCK_CONTRACT && deadline.unit === 'seconds'
+    && finite(deadline.issuedAt) && finite(deadline.requestTimeoutMs) && deadline.requestTimeoutMs > 0
+    && deadline.deadline === scope.deadline && scope.deadline === deadline.issuedAt + deadline.requestTimeoutMs / 1000,
+  'a2a_native_admission_deadline_invalid')
+  return { ...deadline, registeredSequence: registered.value.sequence }
+}
+
+/** Owner refusal follows an allowed Hook and charged TS reservation, but must
+ * prove that the physical native body never began. It is not Hook feedback. */
+function refusedNativeEvidence(event, reader, inventory, entries, scope) {
+  const rows = entries.filter(row => row.value?.schemaVersion === 'capybara-runtime-delegation-receipt-v1'
+    && row.value.kind === 'native_rejected' && row.value.data?.code === 'DELEGATION_NATIVE_ADMISSION_REFUSED'
+    && row.value.data?.scope && same(row.value.data.scope, scope))
+  const seen = new Set(), tickets = new Set()
+  for (const row of rows) {
+    check(inventory.nativeAdmissionRequired, 'a2a_native_admission_contract_missing')
+    const deadline = nativeDeadlineContext(event, entries, scope), data = row.value.data, action = data.action, tool = inventory.tools.get(action?.toolId)
+    check(exact(data, ['scope', 'action', 'started', 'nativeReturned', 'resultHash', 'code', 'reservationCharged', 'physicalNativeStarted', 'nativeAdmissionRefusalEvidenceRef', 'beforeEvidence'])
+      && data.started === true && data.nativeReturned === false && data.resultHash === sha('native_outcome_unknown')
+      && data.reservationCharged === true && data.physicalNativeStarted === false && event.runnerSnapshot.failed === true
+      && event.runnerSnapshot.completed === false, 'a2a_native_refusal_reservation_invalid')
+    const bindingKeys = ['toolId', 'canonicalName', 'effect', 'toolKind', 'resourceKey', ...(inventory.version2 ? ['completionEvidenceKind', 'sourcePinId'] : [])]
+    check(tool && exact(action, [...bindingKeys, 'id', 'dispatchId', 'arguments', 'argumentsHash', 'mutationKey'])
+      && bindingKeys.every(key => action[key] === tool[key]) && typeof action.dispatchId === 'string'
+      && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(action.dispatchId) && action.id === action.dispatchId
+      && !seen.has(action.dispatchId) && object(action.arguments) && action.argumentsHash === plainHash(action.arguments)
+      && action.mutationKey === plainHash([scope.environmentGeneration, scope.appId, tool.resourceKey, tool.canonicalName, action.argumentsHash]),
+    'a2a_native_refusal_action_invalid')
+    seen.add(action.dispatchId)
+    const host = reader.json(data.beforeEvidence), checkpoint = host.trustedNativeCheckpoint
+    check(host.schemaVersion === 'capybara-runtime-plugin-invocation-v1' && host.executionId === event.childExecutionId && host.sessionId === event.childSessionId
+      && host.input?.checkpoint === 'before_tool' && host.decision?.action === 'allow' && host.safetyFailure === null
+      && host.input.action?.id === action.id && host.input.action?.name === action.toolId
+      && ['canonicalName', 'effect', 'resourceKey', 'mutationKey'].every(key => host.input.action[key] === action[key])
+      && same(host.input.action.arguments, action.arguments) && host.input.action.authoritativeRead === (action.effect === 'read')
+      && Array.isArray(host.hookReceipts) && host.hookReceipts.length > 0 && host.hookReceipts.every(hook => hook.status === 'passed')
+      && host.hookReceipts.some(hook => hook.matched === true)
+      && exact(checkpoint, ['schemaVersion', 'scopeHash', 'checkpoint', 'actionHash', 'clockEvidenceRef', 'hookOutcome'])
+      && checkpoint.schemaVersion === 'capybara-trusted-native-checkpoint-v1' && checkpoint.scopeHash === event.scopeHash
+      && checkpoint.checkpoint === 'before_tool' && checkpoint.actionHash === a2aWireEvidenceHash(action) && checkpoint.hookOutcome === null,
+    'a2a_native_refusal_hook_invalid')
+    const clock = reader.json(checkpoint.clockEvidenceRef)
+    check(exact(clock, ['schemaVersion', ...NATIVE_COMMON, 'checkpoint', 'clock', 'clockAuthority', 'revisionMeaning', 'nativeReturnEvidenceRef'])
+      && clock.schemaVersion === 'gaia2-private-native-clock-receipt-v1' && clock.sourceManifestHash === a2aWireEvidenceHash(inventory.manifest)
+      && clock.scopeHash === event.scopeHash && clock.dispatchId === action.dispatchId && ID.test(clock.ticketId) && clock.ticketId.length === 32 && !tickets.has(clock.ticketId)
+      && ['toolId', 'canonicalName', 'toolKind', 'effect'].every(key => clock[key] === action[key])
+      && HASH.test(clock.rawArgumentsHash) && clock.rawArgumentsHash.length === 64 && clock.effectiveArgumentsHash === a2aWireEvidenceHash(action.arguments)
+      && clock.checkpoint === 'before_tool' && clock.clockAuthority === 'ARE' && clock.revisionMeaning === 'owner_observation_sequence_not_are_revision'
+      && exact(clock.clock, ['now', 'revision']) && finite(clock.clock.now) && uint(clock.clock.revision) && clock.clock.revision > 0
+      && clock.clock.now >= deadline.issuedAt && clock.clock.now < scope.deadline && clock.nativeReturnEvidenceRef === null
+      && same(host.input.clock, clock.clock), 'a2a_native_refusal_clock_invalid')
+    tickets.add(clock.ticketId)
+    const proofRef = data.nativeAdmissionRefusalEvidenceRef
+    check(exact(proofRef, ['path', 'sha256']) && typeof proofRef.path === 'string'
+      && /^admission-refusal-[a-f0-9]{32}\.json$/.test(portable(proofRef.path).split('/').at(-1))
+      && sourceKey(proofRef.path) === sourceKey(joinIdentity(inventory.manifest.evidenceRoot,
+        `json/${portable(proofRef.path).split('/').at(-1)}`)), 'a2a_native_refusal_reference_invalid')
+    const proof = reader.json(proofRef)
+    check(exact(proof, ['schemaVersion', ...NATIVE_COMMON, 'status', 'errorCode', 'nativeBodyStarted', 'ticketRevoked', 'childTerminated', 'unit', 'clockAuthority', 'observedAt', 'deadline', 'beforeClockEvidenceRef'])
+      && proof.schemaVersion === 'gaia2-private-native-admission-refusal-receipt-v1' && NATIVE_COMMON.every(key => proof[key] === clock[key])
+      && proof.status === 'rejected' && proof.errorCode === 'NATIVE_SCOPE_DEADLINE_EXPIRED' && proof.nativeBodyStarted === false
+      && proof.ticketRevoked === true && proof.childTerminated === true && proof.unit === 'seconds' && proof.clockAuthority === 'ARE'
+      && finite(proof.observedAt) && proof.observedAt >= scope.deadline && proof.observedAt >= clock.clock.now && proof.deadline === scope.deadline
+      && sameSourceRef(proof.beforeClockEvidenceRef, { path: `json/${portable(checkpoint.clockEvidenceRef.path).split('/').at(-1)}`, sha256: checkpoint.clockEvidenceRef.sha256 }),
+    'a2a_native_refusal_proof_invalid')
+    check(same(reader.relative(inventory.manifest.evidenceRoot, proof.beforeClockEvidenceRef), clock), 'a2a_native_refusal_before_clock_join_invalid')
+    const starts = entries.filter(item => item.value?.schemaVersion === 'capybara-runtime-delegation-receipt-v1' && item.value.kind === 'native_started'
+      && item.value.data?.action?.dispatchId === action.dispatchId && same(item.value.data.scope, scope))
+    check(starts.length === 1 && deadline.registeredSequence < starts[0].value.sequence && starts[0].value.sequence < row.value.sequence && same(starts[0].value.data.action, action)
+      && sameSourceRef(starts[0].value.data.beforeEvidence, data.beforeEvidence)
+      && starts[0].value.data.mutationStatus === (['write', 'finish'].includes(action.effect) ? 'pending' : null), 'a2a_native_refusal_registry_join_invalid')
+    const sameAttempt = value => value?.dispatchId === action.dispatchId || value?.scopeHash === event.scopeHash && value?.ticketId === clock.ticketId
+    const attemptClocks = entries.filter(item => item.value?.schemaVersion === clock.schemaVersion && sameAttempt(item.value))
+    const attemptProofs = entries.filter(item => item.value?.schemaVersion === proof.schemaVersion && sameAttempt(item.value))
+    check(attemptClocks.length === 1 && attemptClocks[0].ref.path === reader.pathFor(checkpoint.clockEvidenceRef)
+      && attemptProofs.length === 1 && attemptProofs[0].ref.path === reader.pathFor(proofRef)
+      && !entries.some(item => /^gaia2-private-native-(?:dispatch|return|ce)-v[12]$/.test(item.value?.schemaVersion ?? '') && sameAttempt(item.value))
+      && !entries.some(item => item.value?.schemaVersion === 'capybara-runtime-delegation-receipt-v1'
+        && ['native_return', 'native_completed', 'unknown_after_observed'].includes(item.value.kind) && item.value.data?.action?.dispatchId === action.dispatchId)
+      && !entries.some(item => item.value?.schemaVersion === 'capybara-runtime-plugin-invocation-v1' && item.value.input?.checkpoint === 'after_tool' && item.value.input.action?.id === action.dispatchId)
+      && !event.runnerSnapshot.actions.some(item => item.dispatchId === action.dispatchId)
+      && !(event.runnerSnapshot.blockedActions ?? []).some(item => item.dispatchId === action.dispatchId), 'a2a_native_refusal_execution_claim')
+    reader.consume(row.ref)
+  }
+  return rows.length
+}
+
 function nativeEvidence(event, reader, inventory, entries, scope) {
   const { manifest, tools, version2 } = inventory, manifestHash = a2aWireEvidenceHash(manifest)
   const returns = entries.filter(row => row.value?.schemaVersion === `gaia2-private-native-return-v${version2 ? 2 : 1}` && row.value.scopeHash === event.scopeHash)
@@ -336,6 +436,7 @@ function nativeEvidence(event, reader, inventory, entries, scope) {
   const actions = event.runnerSnapshot.actions
   check(Array.isArray(actions) && new Set(actions.map(action => action?.dispatchId)).size === actions.length, 'a2a_native_action_inventory_invalid')
   blockedNativeEvidence(event, reader, inventory, entries, scope)
+  const refused = refusedNativeEvidence(event, reader, inventory, entries, scope)
   const commonKeys = ['sourceManifestHash', 'scopeHash', 'ticketId', 'dispatchId', 'toolId', 'canonicalName', 'toolKind', 'effect', 'rawArgumentsHash', 'effectiveArgumentsHash']
   for (const row of returns) {
     const returned = row.value, tool = tools.get(returned.toolId)
@@ -356,6 +457,16 @@ function nativeEvidence(event, reader, inventory, entries, scope) {
     const before = matchedClocks.find(item => item.value.checkpoint === 'before_tool')?.value
     const after = matchedClocks.find(item => item.value.checkpoint === 'after_tool')?.value
     check(matchedClocks.filter(item => item.value.checkpoint === 'before_tool').length === 1 && before.nativeReturnEvidenceRef === null, 'a2a_native_before_clock_missing')
+    if (inventory.nativeAdmissionRequired) {
+      const deadline = nativeDeadlineContext(event, entries, scope), admission = dispatched.nativeAdmission
+      check(exact(dispatched, ['schemaVersion', ...commonKeys, 'status', 'ownerClock', 'nativeAdmission'])
+        && exact(admission, ['schemaVersion', 'unit', 'clockAuthority', 'checkedAt', 'deadline', 'status'])
+        && admission.schemaVersion === 'gaia2-native-admission-v1' && admission.unit === 'seconds' && admission.clockAuthority === 'ARE'
+        && admission.status === 'admitted' && admission.deadline === scope.deadline && finite(admission.checkedAt)
+        && admission.checkedAt >= deadline.issuedAt && admission.checkedAt >= before.clock.now && admission.checkedAt < scope.deadline
+        && dispatched.ownerClock === admission.checkedAt, 'a2a_native_admission_invalid')
+      if (after) check(after.clock.now >= admission.checkedAt, 'a2a_native_admission_clock_order_invalid')
+    } else check(dispatched.nativeAdmission === undefined, 'a2a_native_admission_contract_missing')
     if (returned.status === 'succeeded') {
       check(returned.returned === true && returned.errorCode === null && returned.agentObservationHash === a2aWireEvidenceHash(returned.agentObservation)
         && HASH.test(returned.nativeRawResultHash) && after && matchedClocks.length === 2 && after.clock.now >= before.clock.now && after.clock.revision > before.clock.revision
@@ -429,10 +540,10 @@ function nativeEvidence(event, reader, inventory, entries, scope) {
     check(completion.schemaVersion === 'capybara-runtime-delegation-receipt-v1' && completion.kind === 'completed'
       && a2aWireEvidenceHash(completion.data?.scope) === event.scopeHash && completion.data.finalDispatchId === actions.at(-1).dispatchId, 'a2a_native_child_completion_invalid')
   }
-  return returns.length
+  return { returns: returns.length, refused }
 }
 
-function pumpEvidence(events, event) {
+function pumpEvidence(events, event, nativeRefusalCount = 0) {
   const pump = events.map((item, index) => ({ item, index })).filter(row => row.item.type === 'a2a_parent_notification_pumped' && row.item.scopeHash === event.scopeHash)
   check(pump.length > 0, 'a2a_notification_pump_evidence_missing')
   const stages = new Set(['pre_step', 'model_admission', 'sdk_attempt_before', 'sdk_attempt_after', 'cooldown_before', 'cooldown_after', 'model_returned', 'native_before', 'child_close'])
@@ -457,7 +568,7 @@ function pumpEvidence(events, event) {
   const snapshot = event.runnerSnapshot
   check(pump.some(row => row.item.stage === 'child_close'), 'a2a_notification_final_drain_missing')
   if (snapshot.engineCalls > 0) check(pump.some(row => row.item.stage === 'model_admission'), 'a2a_notification_model_admission_missing')
-  if (snapshot.actions.length > 0 || snapshot.blockedActions?.length > 0) check(pump.filter(row => row.item.stage === 'native_before').length >= snapshot.actions.length + (snapshot.blockedActions?.length ?? 0), 'a2a_notification_native_pump_missing')
+  if (snapshot.actions.length > 0 || snapshot.blockedActions?.length > 0 || nativeRefusalCount > 0) check(pump.filter(row => row.item.stage === 'native_before').length >= snapshot.actions.length + (snapshot.blockedActions?.length ?? 0) + nativeRefusalCount, 'a2a_notification_native_pump_missing')
   if (snapshot.completed === true) check(stoppedAt === null || pump.find(row => row.index === stoppedAt).item.stage === 'child_close', 'a2a_notification_stopped_child_completed')
 }
 
@@ -483,6 +594,53 @@ function registryEvidence(entries, event, reader) {
   return rows
 }
 
+function deadlineClockRequired(inventory, reader, environmentLock) {
+  const path = '/scripts/gaia2_official_a2a.py'
+  const source = [...inventory.sources.values()].find(ref => sourceKey(ref.path).endsWith(path))
+  const frozen = environmentLock?.codeInputs?.find(ref => sourceKey(ref.path) === path.slice(1))
+  // A new event marker is not the authority selecting the contract. Read the
+  // sealed, hash-checked source, so deleting all event/receipt markers cannot
+  // silently turn a new production scope into a legacy scope.
+  if (frozen) check(source && source.sha256 === frozen.sha256, 'a2a_deadline_clock_source_missing')
+  if (!source) return null
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(reader.absolute(source))
+  const declaration = text.match(/^A2A_DEADLINE_CLOCK_CONTRACT\s*=\s*["']([^"']+)["']\s*$/m)
+  if (!declaration) return null // Source-frozen pre-clock-contract evidence.
+  check([CLOCK_CONTRACT, NATIVE_CLOCK_CONTRACT].includes(declaration[1]), 'a2a_deadline_clock_contract_invalid')
+  if (declaration[1] === NATIVE_CLOCK_CONTRACT) check(inventory.nativeAdmissionRequired, 'a2a_native_admission_contract_missing')
+  return declaration[1]
+}
+
+function deadlineClockEvidence(rows, event, reader, { required, deadlineRequestTimeoutMs }) {
+  const initialized = rows[0].value.data, contract = initialized.clockContract
+  if (!required && contract === undefined) return
+  check(exact(contract, ['schemaVersion', 'unit']) && contract.schemaVersion === REGISTRY_CLOCK_CONTRACT
+    && ['milliseconds', 'seconds'].includes(contract.unit) && (!required || contract.unit === 'seconds'), 'a2a_deadline_clock_contract_missing')
+  const registration = rows.find(row => row.value.kind === 'registered'
+    && row.value.data?.scope && a2aWireEvidenceHash(row.value.data.scope) === event.scopeHash)
+  check(registration, 'a2a_runtime_registered_scope_missing')
+  const scope = registration.value.data.scope, clock = registration.value.data.deadlineClock
+  const binding = initialized.apps.find(app => app.appId === event.appId)
+  check(exact(clock, ['schemaVersion', 'unit', 'issuedAt', 'requestTimeoutMs', 'deadline'])
+    && clock.schemaVersion === REGISTRY_CLOCK_CONTRACT && clock.unit === contract.unit && finite(clock.issuedAt)
+    && finite(clock.requestTimeoutMs) && clock.requestTimeoutMs > 0 && clock.requestTimeoutMs === binding.requestTimeoutMs
+    && finite(scope.deadline) && scope.deadline > clock.issuedAt && clock.deadline === scope.deadline
+    && scope.deadline === clock.issuedAt + (clock.unit === 'seconds' ? clock.requestTimeoutMs / 1000 : clock.requestTimeoutMs),
+  'a2a_deadline_clock_semantics_invalid')
+  if (!required) return
+  check(Number.isSafeInteger(deadlineRequestTimeoutMs) && deadlineRequestTimeoutMs > 0
+    && deadlineRequestTimeoutMs <= 2147483647 && clock.requestTimeoutMs === deadlineRequestTimeoutMs, 'a2a_deadline_clock_policy_mismatch')
+  const allowedClock = ref => {
+    const host = reader.json(ref)
+    check(finite(host.input?.clock?.now) && host.input.clock.now >= clock.issuedAt
+      && host.input.clock.now < scope.deadline, 'a2a_authorization_after_deadline')
+  }
+  for (const row of rows.filter(row => row.value.data?.scope && a2aWireEvidenceHash(row.value.data.scope) === event.scopeHash)) {
+    if (row.value.kind === 'model_admitted' || row.value.kind === 'native_started') allowedClock(row.value.data.beforeEvidence)
+    if (row.value.kind === 'native_completed') allowedClock(row.value.data.afterEvidence)
+  }
+}
+
 function brokerEvidence(events, event, record, generation) {
   const rows = events.filter(item => item.modelRole === 'child_actor' && item.delegationScopeHash === event.scopeHash && item.requestId === record.requestId)
   for (const item of rows) check(item.schemaVersion === 'gaia2-scoped-model-event-v1' && item.appId === event.appId
@@ -502,19 +660,30 @@ function brokerEvidence(events, event, record, generation) {
 
 /** Verify all production scopes, including failed/cancelled children. No fs,
  * network, model calls, absolute-path reads, or mutations are permitted here. */
-export function verifyOfficialA2ARuntimeEvidence({ events, identity, readEvidence, environmentLock = null }) {
+export function verifyOfficialA2ARuntimeEvidence({ events, identity, readEvidence, environmentLock = null, deadlineRequestTimeoutMs = null }) {
   check(Array.isArray(events), 'a2a_events_invalid')
   const pool = events.find(event => event.type === 'a2a_client_pool_snapshot')
   check(pool && Array.isArray(pool.clients), 'a2a_client_pool_missing')
-  const production = pool.clients.filter(client => client.notificationPumpRequired === true || client.generationTimeRequired === true || client.guard?.schemaVersion === 'gaia2-official-a2a-guard-binding-v2')
-  if (!production.length) return { consumedEvidencePaths: [], childCount: 0, modelRequestCount: 0, nativeReturnCount: 0 }
-  check(production.length === pool.clients.length, 'a2a_production_pool_mixed_contract')
   const children = events.filter(event => event.type === 'a2a_child_runtime_snapshot')
+  const clockContracts = new Map(), childEvidence = new Map()
+  for (const event of children) {
+    const reader = makeReader(event, readEvidence), inventory = manifestTools(event, reader, environmentLock)
+    childEvidence.set(event, { reader, inventory })
+    clockContracts.set(event.scopeHash, deadlineClockRequired(inventory, reader, environmentLock))
+  }
+  const requiredClockContract = [...clockContracts.values()].some(Boolean)
+  const production = pool.clients.filter(client => client.notificationPumpRequired === true || client.generationTimeRequired === true || client.guard?.schemaVersion === 'gaia2-official-a2a-guard-binding-v2')
+  if (!production.length && !requiredClockContract) return { consumedEvidencePaths: [], childCount: 0, modelRequestCount: 0, nativeReturnCount: 0 }
+  check(production.length === pool.clients.length, 'a2a_production_pool_mixed_contract')
+  const sourceContracts = new Set([...clockContracts.values()].filter(Boolean))
+  check(sourceContracts.size <= 1, 'a2a_deadline_clock_contract_invalid')
+  if (requiredClockContract) check(pool.clients.every(client => client.deadlineClockContract === [...sourceContracts][0]
+    && client.deadlineClockUnit === 'seconds'), 'a2a_deadline_clock_contract_missing')
   const expected = production.flatMap(client => (client.childScopeHashes ?? []).map(scopeHash => ({ scopeHash, appId: client.appId })))
   check(children.length === expected.length && new Set(children.map(event => event.scopeHash)).size === children.length
     && children.every(event => expected.some(item => item.scopeHash === event.scopeHash && item.appId === event.appId)), 'a2a_runtime_scope_inventory_mismatch')
   const consumed = new Set(), allRequests = new Set(), allPermits = new Set(), counts = new Map()
-  let nativeReturnCount = 0
+  let nativeReturnCount = 0, nativeAdmissionRefusalCount = 0, nativeAdmissionGuardedChildCount = 0
   for (const event of children) {
     const runner = event.runnerSnapshot
     check(event.executionId === pool.executionId && event.sessionId === pool.sessionId && (!identity?.executionId || event.executionId === identity.executionId)
@@ -527,8 +696,9 @@ export function verifyOfficialA2ARuntimeEvidence({ events, identity, readEvidenc
       && uint(runner.modelCalls) && uint(runner.engineCalls) && uint(runner.sdkAttemptsUsed) && Array.isArray(runner.actions)
       && typeof runner.completed === 'boolean' && typeof runner.failed === 'boolean' && (runner.completed !== runner.failed)
       && (runner.completed ? runner.failureCode === null : typeof runner.failureCode === 'string' && /^[A-Z0-9_]{1,80}$/.test(runner.failureCode)), 'a2a_runtime_child_snapshot_invalid')
-    const reader = makeReader(event, readEvidence), inventory = manifestTools(event, reader, environmentLock), entries = reader.entries()
-    registryEvidence(entries, event, reader)
+    const { reader, inventory } = childEvidence.get(event), entries = reader.entries()
+    const registryRows = registryEvidence(entries, event, reader)
+    deadlineClockEvidence(registryRows, event, reader, { required: clockContracts.get(event.scopeHash), deadlineRequestTimeoutMs })
     const registered = entries.filter(row => row.value?.schemaVersion === 'capybara-runtime-delegation-receipt-v1' && row.value.kind === 'registered' && row.value.data?.scope && a2aWireEvidenceHash(row.value.data.scope) === event.scopeHash)
     check(registered.length === 1, 'a2a_runtime_registered_scope_missing')
     const scope = registered[0].value.data.scope
@@ -565,13 +735,25 @@ export function verifyOfficialA2ARuntimeEvidence({ events, identity, readEvidenc
     }
     check(runner.sdkAttemptsUsed === sdkCount && runner.modelRequests.length <= runner.modelCalls
       && (runner.failed || runner.modelRequests.length === runner.modelCalls && runner.engineCalls === runner.modelCalls), 'a2a_model_runtime_counter_mismatch')
-    nativeReturnCount += nativeEvidence(event, reader, inventory, entries, scope)
+    const native = nativeEvidence(event, reader, inventory, entries, scope)
+    nativeReturnCount += native.returns; nativeAdmissionRefusalCount += native.refused
+    if (inventory.nativeAdmissionRequired) nativeAdmissionGuardedChildCount++
     const successfulNativeReturns = entries.filter(row => /^gaia2-private-native-return-v[12]$/.test(row.value?.schemaVersion ?? '')
       && row.value.scopeHash === event.scopeHash && row.value.status === 'succeeded').length
     check(uint(runner.originalObservationsTaken) && (runner.completed
       ? runner.originalObservationsTaken === runner.actions.length
       : runner.originalObservationsTaken >= runner.actions.length && runner.originalObservationsTaken <= successfulNativeReturns), 'a2a_native_observation_counter_invalid')
-    pumpEvidence(events, event)
+    pumpEvidence(events, event, native.refused)
+    if (clockContracts.get(event.scopeHash)) {
+      const scopeDeadline = scope.deadline
+      const attempts = events.map((item, index) => ({ item, index })).filter(row => row.item.type === 'model_request_attempt'
+        && row.item.modelRole === 'child_actor' && row.item.delegationScopeHash === event.scopeHash)
+      for (const attempt of attempts) {
+        const before = events.slice(0, attempt.index).findLast(item => item.type === 'a2a_parent_notification_pumped'
+          && item.scopeHash === event.scopeHash && item.stage === 'sdk_attempt_before')
+        check(before && finite(before.clockNow) && before.clockNow < scopeDeadline, 'a2a_authorization_after_deadline')
+      }
+    }
     // Every bundled non-source file must be a source-bound receipt; arbitrary
     // attachments cannot become an unconsumed-evidence exception.
     for (const row of entries) {
@@ -598,7 +780,8 @@ export function verifyOfficialA2ARuntimeEvidence({ events, identity, readEvidenc
     const count = counts.get(client.appId) ?? { models: 0, sdk: 0 }
     check(client.modelRequests === count.models && client.sdkAttempts === count.sdk, 'a2a_client_runtime_counter_mismatch')
   }
-  return { consumedEvidencePaths: [...consumed].sort(), childCount: children.length, modelRequestCount: allRequests.size, nativeReturnCount }
+  return { consumedEvidencePaths: [...consumed].sort(), childCount: children.length, modelRequestCount: allRequests.size, nativeReturnCount,
+    nativeAdmissionRefusalCount, nativeAdmissionGuardedChildCount }
 }
 
 export function officialA2ARuntimeEvidenceErrors(events, identity, options = {}) {

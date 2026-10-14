@@ -22,8 +22,9 @@ import time
 from typing import Any, Callable, Mapping
 
 import gaia2_a2a_wire as wire
-from gaia2_model_retry import ModelRetryPolicy, classify_model_error, retry_delay_hint, _iso, _safe_usage
-from gaia2_model_http_guard import guarded_sdk_attempt
+from gaia2_model_retry import ModelRetryPolicy, classify_model_error, retry_delay_hint, _iso, _safe_usage, _classify_attempt_failure
+from gaia2_model_http_guard import guarded_sdk_attempt, _AttemptFailureReceipt
+from gaia2_model_diagnostics import safe_model_diagnostics, safe_request_summary
 from gaia2_deadline_notifications import DeadlineNotificationError, ScopedOSDeadline
 from are.simulation.agents.llm.llm_engine import LLMEngine
 from are.simulation.agents.llm.types import MessageRole
@@ -224,7 +225,11 @@ class ScopedRetryModelEngine(LLMEngine):
         self.__guard, self.__emit, self.__clock, self.__sleep = before_attempt, emit, clock, sleep
         self.__monotonic = monotonic_clock
         self.__callbacks = {"sdk": sdk_completion, "factory": sdk_kwargs_factory, "clock": clock,
-            "sleep": sleep, "monotonic": monotonic_clock, "http_transport": self.__http_transport}
+            "sleep": sleep, "monotonic": monotonic_clock, "http_transport": self.__http_transport,
+            "failure_classifier": _classify_attempt_failure, "failure_diagnostic": safe_model_diagnostics,
+            "request_summary": safe_request_summary, "receipt_factory": _AttemptFailureReceipt,
+            "receipt_init": _AttemptFailureReceipt.__init__, "receipt_consume": _AttemptFailureReceipt.consume,
+            "receipt_seal": _AttemptFailureReceipt._seal}
         if emit is not None:
             self.__callbacks["emit"] = emit
         self.__identities = {name: _identity(value) for name, value in self.__callbacks.items()}
@@ -361,7 +366,11 @@ class ScopedRetryModelEngine(LLMEngine):
                 _identity(type(self).begin_request), _identity(type(self).__call__), self.__source_identity_hash,
                 wire.value_hash(self.__http_guard_identity))
             actual_callbacks = {"sdk": self.__sdk, "factory": self.__factory, "clock": self.__clock,
-                "sleep": self.__sleep, "monotonic": self.__monotonic, "http_transport": self.__http_transport}
+                "sleep": self.__sleep, "monotonic": self.__monotonic, "http_transport": self.__http_transport,
+                "failure_classifier": _classify_attempt_failure, "failure_diagnostic": safe_model_diagnostics,
+                "request_summary": safe_request_summary, "receipt_factory": _AttemptFailureReceipt,
+                "receipt_init": _AttemptFailureReceipt.__init__, "receipt_consume": _AttemptFailureReceipt.consume,
+                "receipt_seal": _AttemptFailureReceipt._seal}
             if self.__emit is not None:
                 actual_callbacks["emit"] = self.__emit
             if (binding != self.__binding or set(actual_callbacks) != set(self.__callbacks)
@@ -503,6 +512,11 @@ class ScopedRetryModelEngine(LLMEngine):
     def __event(self, kind: str, request: dict, **fields) -> None:
         if self.__ledger_failed:
             _fail("SCOPED_MODEL_LEDGER_FAILED")
+        # The official child v1 seam accepts finite operational/proof fields,
+        # not SDK diagnostics. Keep those for trusted classification/private
+        # terminal metadata; never send them through the child event emitter.
+        if self.__role == "child_actor":
+            fields = {key: value for key, value in fields.items() if key != "diagnostic"}
         event = {"schemaVersion": EVENT_SCHEMA, "modelRole": self.__role,
             "modelScopeHash": self.__scope, "configHash": self.__config, **request, **fields}
         if self.__emit is not None:
@@ -571,6 +585,11 @@ class ScopedRetryModelEngine(LLMEngine):
                 remaining_deadline = self.__deadline_check(deadline, "sdk_attempt_before")
                 sdk_kwargs = self.__provider_kwargs(sdk_kwargs, remaining_deadline)
                 prepared_kwargs = {"messages": prepared_messages, **sdk_kwargs}
+                # Prepare caller-owned evidence BEFORE spending the Node ACK.
+                # Unbound/offline child engines retain their legacy behavior.
+                failure_receipt = (_AttemptFailureReceipt(self.__role, request["requestId"], attempt,
+                    additional_identity=http_identity) if http_identity is not None else None)
+                request_summary = safe_request_summary(prepared_kwargs) if failure_receipt is not None else None
                 def before_http_dispatch():
                     # This callback is trusted broker authority, not provider
                     # kwargs. A deadline can expire during ACK/SDK preparation;
@@ -600,16 +619,28 @@ class ScopedRetryModelEngine(LLMEngine):
                 try:
                     result = self.__http_transport(self.__sdk, self.__role, request["requestId"], attempt,
                         kwargs=prepared_kwargs, additional_identity=http_identity,
-                        before_dispatch=before_http_dispatch)
+                        before_dispatch=before_http_dispatch, _failure_receipt=failure_receipt)
                 except Exception as error:
                     attempt_elapsed = self.__timing_accumulate(attempt_elapsed,
                         self.__timing_delta(attempt_start))
                     self.__observe_safe_point("sdk_attempt_after")
                     self.__deadline_check(deadline, "sdk_attempt_after")
+                    self.__check()
+                    diagnostic = None
                     try:
-                        classification = classify_model_error(error)
+                        trusted_http = None
+                        if failure_receipt is not None:
+                            diagnostic = safe_model_diagnostics(error, request_summary)
+                            trusted_http = failure_receipt.consume(error, self.__role, request["requestId"], attempt,
+                                additional_identity=http_identity)
+                            classification = _classify_attempt_failure(error, diagnostic, trusted_http)
+                        else:
+                            classification = classify_model_error(error)
                         now = self.__clock()
-                        hint, hint_source = retry_delay_hint(error, now)
+                        if trusted_http is not None and trusted_http["responseStatus"] == 408 and not classification["retryable"]:
+                            hint, hint_source = None, None
+                        else:
+                            hint, hint_source = retry_delay_hint(error, now)
                     except BaseException:
                         classification = {"category": "runtime_error", "retryable": False, "httpStatus": None}
                         now, hint, hint_source = 0.0, None, None
@@ -653,7 +684,8 @@ class ScopedRetryModelEngine(LLMEngine):
                 next_retry_at = _iso(now + delay) if classification["retryable"] else None
                 exhausted = attempt >= self.__policy.max_attempts or waited + delay > self.__policy.max_retry_wait_seconds
                 metadata = {**operational, **classification, "nextRetryAt": next_retry_at,
-                    "retryExhausted": bool(exhausted and classification["retryable"])}
+                    "retryExhausted": bool(exhausted and classification["retryable"]),
+                    **({"diagnostic": diagnostic} if diagnostic is not None else {})}
                 self.__event("model_request_failed", request, **metadata)
                 if not classification["retryable"] or exhausted:
                     self.__last_status = "failed"

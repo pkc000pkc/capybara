@@ -52,6 +52,7 @@ function corrected408Fixture(records = attemptRecords(base, { responseStatus: 40
     diagnostic: { schemaVersion: 'gaia2-model-diagnostic-v1', sdkReportedStatus: 400,
       exceptionClass: 'BadRequestError', errorCode: null, codeSource: null,
       errorType: 'invalid_request_error', typeSource: 'sdk_body', dispatchObserved: null } })
+  if (attempt.modelRole === 'child_actor') delete modelEvents[1].diagnostic
   return { records, modelEvents }
 }
 
@@ -100,7 +101,48 @@ test('trusted HTTP status cannot override guard failure, cancellation, or child 
     assert.throws(() => verify(changed, corrected408Fixture(changed).modelEvents), /trusted_status_lease_mismatch/)
   }
   const childRecords = attemptRecords(child, { responseStatus: 408, status: 'failed' })
-  assert.throws(() => verify(childRecords, corrected408Fixture(childRecords, child).modelEvents), /trusted_status_classification_invalid/)
+  assert.equal(verify(childRecords, corrected408Fixture(childRecords, child).modelEvents).status, 'passed')
+})
+
+test('child trusted 408 failure and retry schedule bind every permit and scope field', () => {
+  const fixture = corrected408Fixture(attemptRecords(child, { responseStatus: 408, status: 'failed' }), child)
+  const next = { ...child, requestAttempt: 2 }
+  const schedule = { ...fixture.modelEvents[1], type: 'model_retry_scheduled' }
+  const allRecords = [...fixture.records, ...attemptRecords(next)]
+  const allEvents = [...fixture.modelEvents, schedule, ...events(next)]
+  assert.equal(verify(allRecords, allEvents).attempts, 2)
+  for (const field of Object.keys(child).filter(key => !['modelRole', 'requestId', 'requestAttempt'].includes(key))) {
+    for (const index of [1, 2]) {
+      const changed = structuredClone(allEvents)
+      changed[index][field] = field.endsWith('Hash') ? '9'.repeat(64) : field === 'permitId' ? '9'.repeat(32) : 'foreign'
+      assert.throws(() => verify(allRecords, changed), /sdk_outcome_binding_mismatch|trusted_retry_binding_mismatch/)
+    }
+  }
+  const changed = structuredClone(allEvents)
+  changed[1].schemaVersion = 'untrusted-version'
+  assert.throws(() => verify(allRecords, changed), /trusted_child_event_schema/)
+  const publicDiagnostic = structuredClone(allEvents)
+  publicDiagnostic[1].diagnostic = { sdkReportedStatus: 400 }
+  assert.throws(() => verify(allRecords, publicDiagnostic), /trusted_status_classification_invalid/)
+  for (const responseStatus of [400, 401, 403, 422, 200]) {
+    const records = attemptRecords(child, { responseStatus, status: 'failed' })
+    assert.throws(() => verify(records, corrected408Fixture(records, child).modelEvents), /trusted_status_lease_mismatch/)
+  }
+})
+
+test('historical uncorrected child SDK400 over HTTP408 remains valid evidence', () => {
+  const modelEvents = events(child, 'model_request_failed')
+  Object.assign(modelEvents[1], { category: 'configuration_error', retryable: false, httpStatus: 400 })
+  assert.equal(verify(attemptRecords(child, { responseStatus: 408, status: 'failed' }), modelEvents).status, 'passed')
+})
+
+test('child SDK success over HTTP408 or a failed guard closure cannot become a valid recovery', () => {
+  assert.throws(() => verify(attemptRecords(child, { responseStatus: 408 }), events(child)), /successful_dispatch_invalid/)
+  for (const failureCode of ['HTTP_GUARD_SCOPE_INVALID', 'HTTP_GUARD_CLIENT_CLOSE_FAILED', 'SDK_CALL_CANCELLED']) {
+    const records = attemptRecords(child, { responseStatus: 408, status: 'failed' })
+    records.at(-1).failureCode = failureCode
+    assert.throws(() => verify(records, corrected408Fixture(records, child).modelEvents), /trusted_status_lease_mismatch/)
+  }
 })
 
 test('permanent SDK diagnostics cannot be disguised as trusted timeout metadata', () => {

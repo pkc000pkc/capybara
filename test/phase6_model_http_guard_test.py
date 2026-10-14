@@ -42,6 +42,7 @@ import litellm
 import httpx2
 import openai
 import gaia2_model_http_guard as guard
+from gaia2_model_diagnostics import safe_model_diagnostics, safe_request_summary
 import gaia2_scoped_model_broker as broker_module
 from gaia2_deadline_notifications import ScopedOSDeadline
 from gaia2_model_retry import ModelRetryPolicy, ModelRequestFailure, wrap_completion, classify_model_error, install_model_retries
@@ -198,23 +199,26 @@ class Tests(unittest.TestCase):
         engine = ScopedRetryModelEngine(role="child_actor", model_scope_hash="b" * 64,
             sdk_completion=options.pop("sdk_completion", litellm.completion),
             sdk_kwargs_factory=lambda: copy.deepcopy(config),
-            policy=ModelRetryPolicy(max_attempts=2, request_timeout_seconds=5),
-            max_logical_requests=1, max_sdk_attempts=2, emit=emit_to(events, scope_identity),
+            policy=options.pop("policy", ModelRetryPolicy(max_attempts=2, request_timeout_seconds=5)),
+            max_logical_requests=1, max_sdk_attempts=options.pop("max_sdk_attempts", 2), emit=emit_to(events, scope_identity),
             before_attempt=before, http_guard_identity=scope_identity, **options)
         return engine, messages
 
-    def verify_http(self, events):
+    def verify_http(self, events, *, include_budget=False):
         entry = Path(os.environ["GAIA2_OFFICIAL_ENTRY_PATH"]).read_text()
         receipt = json.loads(entry)
         value = {"journal": (self.out / "model-http-dispatch.jsonl").read_text(), "events": events,
             "identity": {name: receipt[name] for name in (
                 "runId", "manifestHash", "executionId", "sessionId", "scenarioId", "runNumber", "phase", "config")},
-            "entry": entry, "pid": os.getpid()}
+            "entry": entry, "pid": os.getpid(), "includeBudget": include_budget}
         script = """import {readFileSync} from 'node:fs';
 import {verifyModelHttpDispatchEvidence} from './src/phase6_http_evidence.mjs';
+import {aggregatePhase6Budget} from './src/phase6_budget.mjs';
 const v=JSON.parse(readFileSync(0,'utf8'));
 const result=verifyModelHttpDispatchEvidence({journalBytes:Buffer.from(v.journal),events:v.events,
 identity:v.identity,officialEntryBytes:Buffer.from(v.entry),pythonProcessId:v.pid});
+if(v.includeBudget) result.budget=aggregatePhase6Budget({executions:[{runId:v.identity.runId,
+executionId:v.identity.executionId,sessionId:v.identity.sessionId,phase:'agent2agent',config:'mini',events:v.events}]});
 console.log(JSON.stringify(result));
 """
         result = subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT,
@@ -454,11 +458,408 @@ console.log(JSON.stringify(result));
         self.assertEqual(waits, [2])
         self.assertEqual(caller_tool_effects, ["controlled tool effect"])
         self.assertEqual(EXTERNAL_ATTEMPTS, [])
-        self.assertEqual(self.verify_http(events)["attempts"], 2)
+        proof = self.verify_http(events, include_budget=True)
+        self.assertEqual(proof["attempts"], 2)
+        self.assertEqual(proof["budget"]["totals"]["sdkAttemptsWithUnknownUsage"], 1)
+        self.assertIsNone(proof["budget"]["totals"]["totalTokens"])
         serialized = json.dumps(events)
         for forbidden in ("controlled private prompt", "controlled-non-secret", "http://", "Authorization", "api_key"):
             self.assertNotIn(forbidden, serialized)
         self.assertNotIn("usage", failed)
+
+    def test_child_real_litellm_408_retry_same_body_two_acks_one_logical_zero_repeated_tools(self):
+        events, grants, waits, caller_effects, private_diagnostics = [], [], [], [], []
+        def completion(**kwargs):
+            try:
+                return litellm.completion(**kwargs)
+            except Exception as error:
+                private_diagnostics.append(safe_model_diagnostics(error, safe_request_summary(kwargs)))
+                raise
+        with server("408") as (state, endpoint):
+            engine, messages = self.scoped_engine(endpoint, events, lambda payload: grants.append(payload),
+                sleep=waits.append, sdk_completion=completion)
+            engine.begin_request(permit_id="d" * 32, request_id="1" * 32,
+                actual_input_hash=model_input_hash(messages))
+            def caller_turn():
+                caller_effects.append("controlled tool effect")
+                return engine.chat_completion(messages)
+            self.assertEqual(caller_turn()[0], "controlled-ok")
+            self.assertEqual(state["received"], 2)
+            self.assertEqual(len(set(state["hashes"])), 1)
+            self.assertEqual([payload["attempt"] for payload in grants], [1, 2])
+            self.assertEqual(len({payload["permitId"] for payload in grants}), 1)
+            self.assertEqual(engine.snapshot()["logicalRequestsUsed"], 1)
+            self.assertEqual(engine.snapshot()["sdkAttemptsUsed"], 2)
+        self.assertEqual(waits, [2])
+        self.assertEqual(caller_effects, ["controlled tool effect"])
+        self.assertEqual(EXTERNAL_ATTEMPTS, [])
+        failed = next(row for row in events if row["type"] == "model_request_failed")
+        self.assertEqual(failed["httpStatus"], 408)
+        self.assertEqual(private_diagnostics[0]["sdkReportedStatus"], 400)
+        self.assertEqual(private_diagnostics[0]["exceptionClass"], "BadRequestError")
+        self.assertFalse(any("diagnostic" in row for row in events))
+        self.assertEqual(failed["category"], "request_timeout")
+        self.assertTrue(failed["retryable"])
+        self.assertEqual(failed["classificationSource"], "trusted_http_guard")
+        self.assertNotIn("usage", failed)
+        self.assertNotIn("usageAvailable", failed)
+        closes = [row for row in self.rows() if row["type"] == "sdk_attempt_closed"]
+        self.assertEqual(failed["httpGuardClosedRecordSha256"], closes[0]["recordSha256"])
+        for field in guard._CHILD_FIELDS:
+            self.assertEqual(closes[0][field], closes[1][field])
+            self.assertEqual(failed[field], closes[0][field])
+        proof = self.verify_http(events, include_budget=True)
+        self.assertEqual(proof["attempts"], 2)
+        self.assertEqual(proof["budget"]["byRole"]["child_actor"]["sdkAttemptsWithUnknownUsage"], 1)
+        self.assertEqual(proof["budget"]["byRole"]["child_actor"]["retriesScheduled"], 1)
+        self.assertIsNone(proof["budget"]["totals"]["totalTokens"])
+        for forbidden in ("controlled private prompt", "controlled-non-secret", "http://", "api_key"):
+            self.assertNotIn(forbidden, json.dumps(events))
+
+    def test_child_408_default_ceiling_timeout_and_failed_usage_remain_unchanged(self):
+        events, grants, waits, timeouts = [], [], [], []
+        def completion(**kwargs):
+            self.assertNotIn("_failure_receipt", kwargs)
+            timeouts.append(kwargs["timeout"])
+            return litellm.completion(**kwargs)
+        with server("408-always") as (state, endpoint):
+            engine, messages = self.scoped_engine(endpoint, events, lambda payload: grants.append(payload),
+                sleep=waits.append, policy=ModelRetryPolicy(), max_sdk_attempts=6, sdk_completion=completion)
+            engine.begin_request(permit_id="d" * 32, request_id="1" * 32, actual_input_hash=model_input_hash(messages))
+            with self.assertRaises(ScopedModelBrokerError) as caught:
+                engine.chat_completion(messages)
+            self.assertEqual(caught.exception.code, "SCOPED_MODEL_REQUEST_TIMEOUT")
+            self.assertTrue(caught.exception.metadata["retryExhausted"])
+            self.assertEqual(caught.exception.metadata["diagnostic"]["sdkReportedStatus"], 400)
+            self.assertEqual(state["received"], 6)
+            self.assertEqual(len(set(state["hashes"])), 1)
+            self.assertEqual([payload["attempt"] for payload in grants], [1, 2, 3, 4, 5, 6])
+            self.assertEqual(engine.snapshot()["sdkAttemptsUsed"], 6)
+            self.assertIsNone(engine.last_usage)
+        self.assertEqual(timeouts, [60] * 6)
+        self.assertEqual(waits, [2, 4, 8, 16, 30, 2])
+        self.assertEqual(sum(row["type"] == "model_retry_scheduled" for row in events), 5)
+        proof = self.verify_http(events, include_budget=True)
+        self.assertEqual(proof["attempts"], 6)
+        self.assertEqual(proof["budget"]["byRole"]["child_actor"]["sdkAttemptsWithUnknownUsage"], 6)
+        self.assertEqual(proof["budget"]["totals"]["successfulCompletions"], 0)
+        self.assertFalse(any("diagnostic" in row for row in events))
+
+    def test_real_corrected_child_events_cross_production_official_v1_emitter(self):
+        from gaia2_official_a2a import OfficialA2AClient
+        from gaia2_scoped_model_broker import scoped_model_config_hash
+        from gaia2_a2a_wire import value_hash
+        events, grants, waits = [], [], []
+        with server("408") as (state, endpoint):
+            config = sdk_kwargs(endpoint)
+            messages = config.pop("messages")
+            policy = ModelRetryPolicy(max_attempts=2, request_timeout_seconds=5)
+            identity = trusted_child_identity()
+            child_scope = {key: identity[key] for key in ("parentExecutionId", "parentSessionId", "childExecutionId", "childSessionId")}
+            child_scope["appId"] = "Contacts"
+            scope_hash = value_hash(child_scope)
+            model_scope = {"modelRole": "child_actor", "delegationScopeHash": scope_hash,
+                "configHash": scoped_model_config_hash(config, policy)}
+            model_hash = value_hash(model_scope)
+            client = object.__new__(OfficialA2AClient)
+            client._OfficialA2AClient__scope = child_scope
+            client._OfficialA2AClient__model_event_emitter = emit_to(events)
+            production_emit = client._model_emitter(model_scope=model_scope, model_scope_hash=model_hash)
+            http_identity = {key: identity[key] for key in ("parentExecutionId", "parentSessionId", "childExecutionId", "childSessionId")}
+            http_identity["delegationScopeHash"] = scope_hash
+            engine = ScopedRetryModelEngine(role="child_actor", model_scope_hash=model_hash,
+                sdk_completion=litellm.completion, sdk_kwargs_factory=lambda: copy.deepcopy(config),
+                policy=policy, max_logical_requests=1, max_sdk_attempts=2,
+                emit=production_emit, before_attempt=lambda payload: grants.append(payload),
+                sleep=waits.append, http_guard_identity=http_identity)
+            engine.begin_request(permit_id="d" * 32, request_id="1" * 32, actual_input_hash=model_input_hash(messages))
+            self.assertEqual(engine.chat_completion(messages)[0], "controlled-ok")
+            self.assertEqual(state["received"], 2)
+            self.assertEqual(len(set(state["hashes"])), 1)
+        self.assertEqual([grant["attempt"] for grant in grants], [1, 2])
+        self.assertEqual(waits, [2])
+        self.assertFalse(any("diagnostic" in event for event in events))
+        failed = next(event for event in events if event["type"] == "model_request_failed")
+        self.assertEqual(failed["classificationSource"], "trusted_http_guard")
+        self.assertEqual(failed["httpStatusSource"], "trusted_http_guard")
+        self.assertEqual(failed["httpStatus"], 408)
+        proof = self.verify_http(events, include_budget=True)
+        self.assertEqual(proof["attempts"], 2)
+        self.assertEqual(proof["budget"]["totals"]["failedSdkAttempts"], 1)
+        self.assertEqual(proof["budget"]["totals"]["sdkAttemptsWithUnknownUsage"], 1)
+        self.assertEqual(EXTERNAL_ATTEMPTS, [])
+
+    def test_child_receipt_all_nine_fields_thread_and_error_identity_are_single_use(self):
+        fields = [*sorted(guard._CHILD_FIELDS), "role", "request", "attempt", "bool", "error", "thread", "none"]
+        with server("408-always") as (state, endpoint):
+            for index, field in enumerate(fields, 1):
+                identity = trusted_child_identity()
+                request_id = f"{index:032x}"
+                receipt = guard._AttemptFailureReceipt("child_actor", request_id, 1, additional_identity=identity)
+                try:
+                    guard.guarded_sdk_attempt(litellm.completion, "child_actor", request_id, 1,
+                        kwargs=sdk_kwargs(endpoint), additional_identity=identity, _failure_receipt=receipt)
+                except Exception as error:
+                    changed = copy.deepcopy(identity)
+                    if field in guard._CHILD_FIELDS:
+                        changed[field] = "9" * (64 if field.endswith("Hash") else 32) if field.endswith("Hash") or field == "permitId" else "foreign"
+                    args = (RuntimeError() if field == "error" else error,
+                        "actor" if field == "role" else "child_actor",
+                        "f" * 32 if field == "request" else request_id,
+                        2 if field == "attempt" else True if field == "bool" else 1)
+                    if field == "thread":
+                        with ThreadPoolExecutor(max_workers=1) as pool:
+                            proof = pool.submit(lambda: receipt.consume(*args, additional_identity=changed)).result()
+                    else:
+                        proof = receipt.consume(*args, additional_identity=changed)
+                    self.assertEqual(proof is not None, field == "none", field)
+                    self.assertIsNone(receipt.consume(error, "child_actor", request_id, 1, additional_identity=identity))
+                else:
+                    self.fail("controlled server must fail")
+            self.assertEqual(state["received"], len(fields))
+        self.rows()
+
+    def test_child_real_permanent4xx_http200_and_unknown_sdk_metadata_never_override(self):
+        class BadRequestError(RuntimeError):
+            status_code = 400
+        cases = [(status, None) for status in ("400", "401", "403", "422")]
+        cases.extend([("normal", {}), ("408-always", {"code": "invalid_api_key"}),
+            ("408-always", {"code": "unknown-code"}), ("408-always", {"type": "unknown-type"}),
+            ("408-always", {"type": []}), ("408-always", "unknown-structure")])
+        for index, (mode, metadata) in enumerate(cases, 1):
+            events, grants, waits = [], [], []
+            request_id = f"{index:032x}"
+            def completion(**kwargs):
+                if metadata is None:
+                    return litellm.completion(**kwargs)
+                try:
+                    litellm.completion(**kwargs)
+                except Exception:
+                    pass
+                error = BadRequestError("controlled private error")
+                error.body = {"error": metadata} if type(metadata) is dict else metadata
+                raise error
+            with self.subTest(mode=mode, metadata=metadata), server(mode) as (state, endpoint):
+                engine, messages = self.scoped_engine(endpoint, events, lambda payload: grants.append(payload),
+                    sleep=waits.append, sdk_completion=completion)
+                engine.begin_request(permit_id="d" * 32, request_id=request_id, actual_input_hash=model_input_hash(messages))
+                with self.assertRaises(ScopedModelBrokerError) as caught:
+                    engine.chat_completion(messages)
+                self.assertFalse(caught.exception.retryable)
+                self.assertEqual(state["received"], 1)
+                self.assertEqual(len(grants), 1)
+            self.assertEqual(waits, [])
+            failed = next(row for row in events if row["type"] == "model_request_failed")
+            self.assertNotIn("classificationSource", failed)
+        self.rows()
+
+    def test_child_stop_and_os600_after408_take_precedence_over_correction(self):
+        for index, stopped in enumerate((False, True), 1):
+            events, grants, waits, clock = [], [], [], {"now": 0.0}
+            request_id = f"{index:032x}"
+            def monotonic():
+                return clock["now"]
+            def completion(**kwargs):
+                try:
+                    return litellm.completion(**kwargs)
+                finally:
+                    if not stopped:
+                        clock["now"] = 601.0
+            def safe_point(stage):
+                if stopped and stage == "sdk_attempt_after":
+                    raise RuntimeError("controlled STOP")
+            with self.subTest(stopped=stopped), server("408-always") as (state, endpoint):
+                engine, messages = self.scoped_engine(endpoint, events, lambda payload: grants.append(payload),
+                    sdk_completion=completion, sleep=waits.append, monotonic_clock=monotonic)
+                deadline = ScopedOSDeadline(scope_id=request_id, duration_seconds=600, monotonic_clock=monotonic)
+                engine.begin_request(permit_id="d" * 32, request_id=request_id,
+                    actual_input_hash=model_input_hash(messages), deadline=deadline, safe_point=safe_point)
+                with self.assertRaises(ScopedModelBrokerError) as caught:
+                    engine.chat_completion(messages)
+                self.assertEqual(caught.exception.code, "SCOPED_MODEL_SAFE_POINT_DENIED" if stopped else "SCOPED_MODEL_DEADLINE_EXPIRED")
+                self.assertEqual(state["received"], 1)
+                self.assertEqual(len(grants), 1)
+            self.assertEqual(waits, [])
+            self.assertFalse(any(row["type"] in ("model_retry_scheduled", "model_request_failed") for row in events))
+        self.rows()
+
+    def test_child_cooldown_deadline_sdk_budget_and_revoked_ack_prevent_second_dispatch(self):
+        for index, mode in enumerate(("deadline", "budget", "ack"), 1):
+            events, granted, requested, waits, clock = [], [], [], [], {"now": 0.0}
+            request_id = f"{index:032x}"
+            def monotonic():
+                return clock["now"]
+            def before(payload):
+                requested.append(payload["attempt"])
+                if mode == "ack" and payload["attempt"] == 2:
+                    raise RuntimeError("controlled revoked ACK")
+                granted.append(payload["attempt"])
+            def sleep(seconds):
+                waits.append(seconds)
+                if mode == "deadline":
+                    clock["now"] += 601.0
+            with self.subTest(mode=mode), server("408-always") as (state, endpoint):
+                engine, messages = self.scoped_engine(endpoint, events, before, sleep=sleep,
+                    monotonic_clock=monotonic, max_sdk_attempts=1 if mode == "budget" else 2)
+                deadline = ScopedOSDeadline(scope_id=request_id, duration_seconds=600, monotonic_clock=monotonic)
+                engine.begin_request(permit_id="d" * 32, request_id=request_id,
+                    actual_input_hash=model_input_hash(messages), deadline=deadline)
+                with self.assertRaises(ScopedModelBrokerError) as caught:
+                    engine.chat_completion(messages)
+                self.assertEqual(caught.exception.code, {"deadline": "SCOPED_MODEL_DEADLINE_EXPIRED",
+                    "budget": "SCOPED_MODEL_SDK_BUDGET_EXHAUSTED", "ack": "SCOPED_MODEL_ATTEMPT_DENIED"}[mode])
+                self.assertEqual(state["received"], 1)
+                self.assertEqual(granted, [1])
+                self.assertEqual(requested, [1, 2] if mode == "ack" else [1])
+                self.assertEqual(engine.snapshot()["sdkAttemptsUsed"], 1)
+                self.assertIsNone(engine.last_usage)
+            self.assertEqual(waits, [2])
+            self.assertEqual(sum(row["type"] == "model_retry_scheduled" for row in events), 1)
+        self.rows()
+
+    def test_child_guard_cleanup_redispatch_and_sdk_cancellation_never_correct(self):
+        original_write = guard.os.write
+        def journal_failure(fd, raw):
+            if json.loads(raw)["type"] == "sdk_attempt_closed":
+                raise OSError("controlled journal failure")
+            return original_write(fd, raw)
+        def swallowed_redispatch(**kwargs):
+            try:
+                litellm.completion(**kwargs)
+            except Exception as original_error:
+                try:
+                    kwargs["client"].chat.completions.create(model=kwargs["model"], messages=kwargs["messages"])
+                except Exception:
+                    pass
+                raise original_error
+        def cancelled(**kwargs):
+            try:
+                litellm.completion(**kwargs)
+            except Exception:
+                raise KeyboardInterrupt() from None
+        cases = (("client", patch.object(openai.OpenAI, "close", side_effect=RuntimeError("controlled close failure")), litellm.completion),
+            ("redispatch", patch.object(litellm, "num_retries", 0), swallowed_redispatch),
+            ("cancel", patch.object(litellm, "num_retries", 0), cancelled),
+            ("journal", patch.object(guard.os, "write", journal_failure), litellm.completion))
+        for index, (label, patched, completion) in enumerate(cases, 1):
+            self.close_journal()
+            path = self.out / "model-http-dispatch.jsonl"
+            if path.exists():
+                path.unlink()
+            events, grants, waits = [], [], []
+            with self.subTest(label=label), patched, server("408-always") as (state, endpoint):
+                engine, messages = self.scoped_engine(endpoint, events, lambda payload: grants.append(payload),
+                    sleep=waits.append, sdk_completion=completion)
+                engine.begin_request(permit_id="d" * 32, request_id=f"{index:032x}", actual_input_hash=model_input_hash(messages))
+                with self.assertRaises(ScopedModelBrokerError) as caught:
+                    engine.chat_completion(messages)
+                self.assertFalse(caught.exception.retryable)
+                self.assertEqual(state["received"], 1)
+                self.assertEqual(len(grants), 1)
+            self.assertEqual(waits, [])
+            self.assertFalse(any(row.get("classificationSource") == "trusted_http_guard" for row in events))
+            self.assertFalse(any(row["type"] == "model_retry_scheduled" for row in events))
+
+    def test_child_bad_sdk_metadata_getters_and_absent_guard_fail_closed(self):
+        class BadRequestError(RuntimeError):
+            status_code = 400
+            responseStatus = 408
+            trusted_http_status = 408
+            classificationSource = "trusted_http_guard"
+            body = {"error": {"type": "invalid_request_error"}}
+        class UnreadableBody(BadRequestError):
+            @property
+            def body(self):
+                raise ValueError("controlled private error")
+        class UnreadableCode(BadRequestError):
+            @property
+            def code(self):
+                raise ValueError("controlled private error")
+        class UnreadableType(BadRequestError):
+            @property
+            def type(self):
+                raise ValueError("controlled private error")
+        for index, error_class in enumerate((UnreadableBody, UnreadableCode, UnreadableType), 1):
+            events, grants, waits = [], [], []
+            def completion(**kwargs):
+                try:
+                    litellm.completion(**kwargs)
+                except Exception:
+                    raise error_class("controlled private error") from None
+            with self.subTest(kind=error_class.__name__), server("408-always") as (state, endpoint):
+                engine, messages = self.scoped_engine(endpoint, events, lambda payload: grants.append(payload),
+                    sleep=waits.append, sdk_completion=completion)
+                engine.begin_request(permit_id="d" * 32, request_id=f"{index:032x}", actual_input_hash=model_input_hash(messages))
+                with self.assertRaises(ScopedModelBrokerError) as caught:
+                    engine.chat_completion(messages)
+                self.assertFalse(caught.exception.retryable)
+                self.assertEqual(state["received"], 1)
+            self.assertEqual(waits, [])
+            self.assertEqual(len(grants), 1)
+        self.close_journal()
+        def fake(**kwargs):
+            raise BadRequestError("controlled private error")
+        events, grants, waits = [], [], []
+        with patch.dict(os.environ, {"GAIA2_MODEL_HTTP_GUARD_REQUIRED": "0"}):
+            engine, messages = self.scoped_engine("http://127.0.0.1:1/v1", events,
+                lambda payload: grants.append(payload), sleep=waits.append, sdk_completion=fake)
+            engine.begin_request(permit_id="d" * 32, request_id="f" * 32, actual_input_hash=model_input_hash(messages))
+            with self.assertRaises(ScopedModelBrokerError) as caught:
+                engine.chat_completion(messages)
+            self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(waits, [])
+        self.assertFalse(any(row.get("classificationSource") == "trusted_http_guard" for row in events))
+
+    def test_child_invalid_receipt_identity_is_prepared_before_spending_ack(self):
+        for field in ("childSessionId", "parentSessionId", "delegationScopeHash"):
+            events, grants = [], []
+            identity = trusted_child_identity()
+            scoped_identity = {key: identity[key] for key in ("parentExecutionId", "parentSessionId",
+                "childExecutionId", "childSessionId", "delegationScopeHash")}
+            del scoped_identity[field]
+            with self.subTest(field=field), server() as (state, endpoint):
+                config = sdk_kwargs(endpoint)
+                messages = config.pop("messages")
+                engine = ScopedRetryModelEngine(role="child_actor", model_scope_hash="b" * 64,
+                    sdk_completion=litellm.completion, sdk_kwargs_factory=lambda: copy.deepcopy(config),
+                    policy=ModelRetryPolicy(), max_logical_requests=1, max_sdk_attempts=6,
+                    emit=emit_to(events), before_attempt=lambda payload: grants.append(payload),
+                    http_guard_identity=scoped_identity)
+                engine.begin_request(permit_id="d" * 32, request_id="1" * 32, actual_input_hash=model_input_hash(messages))
+                with self.assertRaises(ScopedModelBrokerError):
+                    engine.chat_completion(messages)
+                self.assertEqual(state["received"], 0)
+                self.assertEqual(engine.snapshot()["sdkAttemptsUsed"], 0)
+            self.assertEqual(grants, [])
+            self.assertFalse(any(row["type"] == "model_request_attempt" for row in events))
+        self.assertFalse((self.out / "model-http-dispatch.jsonl").exists())
+
+    def test_child_source_changed_after_http408_denies_correction(self):
+        events, grants, waits = [], [], []
+        original = broker_module._classify_attempt_failure
+        def replacement(*args, **kwargs):
+            raise AssertionError("changed classifier must not execute")
+        def completion(**kwargs):
+            try:
+                return litellm.completion(**kwargs)
+            finally:
+                broker_module._classify_attempt_failure = replacement
+        try:
+            with server("408-always") as (state, endpoint):
+                engine, messages = self.scoped_engine(endpoint, events, lambda payload: grants.append(payload),
+                    sdk_completion=completion, sleep=waits.append)
+                engine.begin_request(permit_id="d" * 32, request_id="1" * 32, actual_input_hash=model_input_hash(messages))
+                with self.assertRaises(ScopedModelBrokerError) as caught:
+                    engine.chat_completion(messages)
+                self.assertEqual(caught.exception.code, "SCOPED_MODEL_SOURCE_CHANGED")
+                self.assertEqual(state["received"], 1)
+        finally:
+            broker_module._classify_attempt_failure = original
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(waits, [])
+        self.assertFalse(any(row["type"] in ("model_request_failed", "model_retry_scheduled") for row in events))
+        self.assertEqual(self.verify_http(events)["inferredRejectedAttempts"], 1)
 
     def test_http408_retry_ceiling_remains_six(self):
         events, waits = [], []

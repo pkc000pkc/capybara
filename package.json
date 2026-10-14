@@ -36,7 +36,7 @@
     "install-official": "powershell -ExecutionPolicy Bypass -File scripts/install_official_requirements.ps1",
     "smoke": "node scripts/smoke_dataset.mjs",
     "verify": "npm test && npm run smoke && npm run gate1 && npm run preflight && npm run pass5-smoke",
-    "test": "node --test"
+    "test": "node --test \"test/**/*.{js,mjs,cjs}\""
   },
   "dependencies": {
     "hyparquet": "^1.31.2",

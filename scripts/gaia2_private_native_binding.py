@@ -2,9 +2,10 @@
 
 This slice retains ARE's actual Tool -> AppToolAdapter -> AppTool -> registered
 function -> formatter call chain. It does not build an AppAgent, authorize a
-delegation, supervise a process, or synchronize clocks. The TS deadline belongs
-to the trusted TS owner; here it is bound but deliberately not compared with
-ARE seconds. The owner clock is checked for finite, monotonic observations.
+delegation, supervise a process, or synchronize clocks. Legacy millisecond
+deadlines stay opaque. The official trusted ARE-seconds opt-in compares the
+bound deadline at native admission, using the actual Environment TimeManager.
+The owner clock is checked for finite, monotonic observations.
 
 Only frozen methods of this actual App are covered as internal native calls.
 Other Apps' callbacks are not observable here: cross-App internal effects need
@@ -305,9 +306,14 @@ class NativeAppBinding:
                  parent_execution_id: str, parent_session_id: str,
                  evidence_root: str | Path, clock: Callable[[], float],
                  trusted_source_files: tuple[str | Path, ...] = (),
-                 clock_environment: Environment | None = None):
+                 clock_environment: Environment | None = None,
+                 deadline_clock_unit: str = "milliseconds"):
         if not isinstance(app, App) or not callable(clock):
             _fail("NATIVE_INITIALIZATION_INVALID")
+        if type(deadline_clock_unit) is not str or deadline_clock_unit not in ("milliseconds", "seconds"):
+            _fail("NATIVE_DEADLINE_CLOCK_UNIT_INVALID")
+        if deadline_clock_unit == "seconds" and clock_environment is None:
+            _fail("NATIVE_DEADLINE_CLOCK_AUTHORITY_REQUIRED")
         identities = (environment_generation, parent_execution_id, parent_session_id, app.name)
         if any(type(item) is not str or not item for item in identities):
             _fail("NATIVE_IDENTITY_INVALID")
@@ -317,6 +323,9 @@ class NativeAppBinding:
         self.__execution = parent_execution_id
         self.__session = parent_session_id
         self.__clock = clock
+        # Constructor authority only. Legacy millisecond scopes stay opaque;
+        # only the official ARE-seconds opt-in enforces owner admission expiry.
+        self.__deadline_clock_unit = deadline_clock_unit
         self.__last_clock = None
         self.__clock_failed = False
         # Legacy clock is operational only. ARE authority is opt-in and comes
@@ -462,6 +471,10 @@ class NativeAppBinding:
                 "evidenceRoot": str(root), "parentCanonicalName": "AppAgent__expert_agent",
                 "taskArgumentKey": "task", "sourceRefs": sorted(self.__sources.values(), key=lambda ref: ref["path"].encode("utf-8")),
                 "tools": tools, "toolInventoryHash": wire.value_hash(tools)}
+            if self.__deadline_clock_unit == "seconds":
+                self.__manifest["nativeAdmissionDeadline"] = {
+                    "schemaVersion": "gaia2-native-admission-deadline-v1",
+                    "unit": "seconds", "clockAuthority": "ARE"}
             self.__manifest_hash = wire.value_hash(self.__manifest)
         except BaseException:
             self.__closed = True
@@ -642,6 +655,7 @@ class NativeAppBinding:
                 id(_function(manager.real_time_passed).__globals__.get("time")),
                 id(getattr(_function(manager.real_time_passed).__globals__.get("time"), "time", None)))
         return (type(self.__app), self.__app.name, id(self.__app.time_manager),
+                type(self.__deadline_clock_unit), self.__deadline_clock_unit,
                 tuple(id(tool) for tool in self.__app.get_tools()), tuple(entries), internal,
                 self.__function_snapshot(AppTool.__call__), self.__function_snapshot(App.add_event),
                 self.__function_snapshot(self.__app.add_event),
@@ -665,6 +679,12 @@ class NativeAppBinding:
             _fail("NATIVE_BINDING_CHANGED")
         try:
             same = self.__current_snapshot() == self.__snapshot
+            same = same and wire.value_hash(self.__manifest) == self.__manifest_hash
+            expected_deadline = ({"schemaVersion": "gaia2-native-admission-deadline-v1",
+                "unit": "seconds", "clockAuthority": "ARE"}
+                if self.__deadline_clock_unit == "seconds" else None)
+            same = same and (self.__manifest.get("nativeAdmissionDeadline") == expected_deadline
+                if expected_deadline is not None else "nativeAdmissionDeadline" not in self.__manifest)
             same = same and self.__app.add_event_callbacks.get(self.__callback_key) is self.__callback
             same = same and all(self.__app.add_event_callbacks.get(key) is callback
                                 for key, callback in self.__environment_callbacks)
@@ -1062,6 +1082,13 @@ class NativeAppBinding:
                     _source_return_state(self.__app)
                 if child["count"] >= child["scope"]["maxNativeActions"]:
                     _fail("NATIVE_BUDGET_EXHAUSTED")
+                binding = {"sourceManifestHash": self.__manifest_hash, "scopeHash": child["hash"],
+                    "ticketId": payload["ticketId"], "dispatchId": payload["dispatchId"],
+                    "toolId": response["toolId"], "canonicalName": response["canonicalName"],
+                    "toolKind": response["toolKind"], "effect": response["effect"],
+                    "rawArgumentsHash": response["rawArgumentsHash"],
+                    "effectiveArgumentsHash": response["effectiveArgumentsHash"]}
+                native_admission = None
                 clock_dispatch = self.__clock_dispatches.get(payload["dispatchId"])
                 if self.__clock_environment is not None:
                     if (clock_dispatch is None or clock_dispatch["binding"]["ticketId"] != payload["ticketId"]
@@ -1069,19 +1096,44 @@ class NativeAppBinding:
                             or clock_dispatch["nativeReturnEvidenceRef"] is not None):
                         _fail("NATIVE_CLOCK_BEFORE_REQUIRED")
                     self.__clock_evidence(clock_dispatch["beforeEvidenceRef"])
-                    self.__are_now()
+                    admitted_at = self.__are_now()
+                    if self.__deadline_clock_unit == "seconds":
+                        # This fresh owner ARE sample is the admission
+                        # linearization point, not a cached Hook/Actor time.
+                        # No native body, ticket consumption or budget charge
+                        # has happened here. OS preemption after admission is
+                        # not a promise that an in-flight call cannot expire.
+                        deadline = child["scope"]["deadline"]
+                        if admitted_at >= deadline:
+                            ticket["discarded"] = True
+                            clock_dispatch["discarded"] = True
+                            child["status"] = "failed"
+                            self.__dispatches.add(payload["dispatchId"])
+                            try:
+                                refusal_ref = self.__receipt("admission-refusal", {
+                                    "schemaVersion": "gaia2-private-native-admission-refusal-receipt-v1",
+                                    **binding, "status": "rejected", "errorCode": "NATIVE_SCOPE_DEADLINE_EXPIRED",
+                                    "nativeBodyStarted": False, "ticketRevoked": True, "childTerminated": True,
+                                    "unit": "seconds", "clockAuthority": "ARE", "observedAt": admitted_at,
+                                    "deadline": deadline, "beforeClockEvidenceRef": _clone(clock_dispatch["beforeEvidenceRef"])})
+                            except BaseException:
+                                # Revocation precedes writing: lost proof is a
+                                # sticky failure, never a reusable reservation.
+                                self.__binding_failed = True
+                                _fail("NATIVE_ADMISSION_EVIDENCE_FAILED")
+                            return _clone({"schemaVersion": "gaia2-private-native-admission-refusal-v1",
+                                **binding, "status": "rejected", "errorCode": "NATIVE_SCOPE_DEADLINE_EXPIRED",
+                                "refusalEvidenceRef": refusal_ref})
+                        native_admission = {"schemaVersion": "gaia2-native-admission-v1",
+                            "unit": "seconds", "clockAuthority": "ARE", "checkedAt": admitted_at,
+                            "deadline": deadline, "status": "admitted"}
                 ticket["consumed"] = True
                 self.__dispatches.add(payload["dispatchId"])
                 child["count"] += 1
-                binding = {"sourceManifestHash": self.__manifest_hash, "scopeHash": child["hash"],
-                    "ticketId": payload["ticketId"], "dispatchId": payload["dispatchId"],
-                    "toolId": response["toolId"], "canonicalName": response["canonicalName"],
-                    "toolKind": response["toolKind"], "effect": response["effect"],
-                    "rawArgumentsHash": response["rawArgumentsHash"],
-                    "effectiveArgumentsHash": response["effectiveArgumentsHash"]}
                 try:
                     dispatch_ref = self.__receipt("dispatch", {"schemaVersion": "gaia2-private-native-dispatch-v1",
-                        **binding, "status": "pending", "ownerClock": self.__last_clock})
+                        **binding, "status": "pending", "ownerClock": native_admission["checkedAt"] if native_admission else self.__last_clock,
+                        **({"nativeAdmission": native_admission} if native_admission else {})})
                 except BaseException:
                     child["status"] = "unknown" if response["effect"] in ("write", "finish") else "failed"
                     if child["status"] == "unknown":

@@ -57,6 +57,11 @@ const appIdsFor = (value: unknown): string[] => {
   return [...value].sort()
 }
 const assertA2AOpen = () => { if (closing || a2a.ownerClosing || a2a.ownerClosed || a2a.poisoned) throw new Error('A2A_OWNER_CLOSED') }
+const acceptAREClock = (now: number) => {
+  assertA2AOpen()
+  if (!Number.isFinite(now) || now < 0 || now < a2a.areNow) throw new Error('A2A_CLOCK')
+  a2a.areNow = now
+}
 const poisonA2A = () => {
   if (closing || a2a.ownerClosed || a2a.poisoned) return
   a2a.poisoned = true
@@ -81,6 +86,7 @@ async function commitA2A(appIds: string[]): Promise<void> {
   try {
     const adapter = RuntimeDelegationMultiAppHostAdapter.install({ host, bindings: appIds.map(id => a2a.entries.get(id).binding),
       environmentGeneration: `official-${spec.options.executionId}`, now: () => a2a.areNow,
+      deadlineClockUnit: 'seconds', onNativeClock: acceptAREClock,
       requestTimeoutMs: spec.options.a2a.requestTimeoutMs, maxNativeActions: spec.options.a2a.maxNativeActions,
       useNativeClock: true, createChildHost: async (scope: any) => new RuntimePluginHost({ ...spec.options,
         executionId: scope.childExecutionId, sessionId: scope.childSessionId, workspaceDir: childRoot(scope) }) })
@@ -90,7 +96,7 @@ async function commitA2A(appIds: string[]): Promise<void> {
   finally { a2a.committing = false }
 }
 const handlersFor = (record: any) => new Map<string, (payload: any) => any>([
-  ['a2a_sync_clock', payload => { assertA2AOpen(); exact(payload, ['now']); if (!record.binding || typeof payload.now !== 'number' || !Number.isFinite(payload.now) || payload.now < 0 || payload.now < a2a.areNow) throw new Error('A2A_CLOCK'); a2a.areNow = payload.now; return { now: a2a.areNow } }],
+  ['a2a_sync_clock', payload => { assertA2AOpen(); exact(payload, ['now']); if (!record.binding || typeof payload.now !== 'number') throw new Error('A2A_CLOCK'); acceptAREClock(payload.now); return { now: a2a.areNow } }],
   ['a2a_connect_ready', async payload => {
     assertA2AOpen()
     const legacy = payload === null
@@ -185,7 +191,7 @@ async function configureA2A(socket: Socket): Promise<void> {
       || manifest.environmentGeneration !== `official-${spec.options.executionId}` || typeof manifest.evidenceRoot !== 'string') throw new Error('A2A_MANIFEST')
     record.appId = manifest.appId; a2a.entries.set(manifest.appId, record)
     const frozenSources = manifest.sourceRefs.map((ref: any) => ({ path: ref.path, sha256: ref.sha256, bytes: ref.bytes }))
-    record.binding = await RuntimeDelegationNativePipeBinding.connect({ peer, expected: { environmentGeneration: manifest.environmentGeneration, parentExecutionId: spec.options.executionId, parentSessionId: spec.options.sessionId, appId: manifest.appId, appType: manifest.appType, evidenceRoot: manifest.evidenceRoot, frozenSources, requiredSources: frozenSources.map(ref => ref.path) }, onPoison: poisonA2A })
+    record.binding = await RuntimeDelegationNativePipeBinding.connect({ peer, expected: { environmentGeneration: manifest.environmentGeneration, parentExecutionId: spec.options.executionId, parentSessionId: spec.options.sessionId, appId: manifest.appId, appType: manifest.appType, evidenceRoot: manifest.evidenceRoot, frozenSources, requiredSources: frozenSources.map(ref => ref.path), requireNativeAdmissionDeadline: true }, onPoison: poisonA2A })
     assertA2AOpen(); record.resolveReady()
   } catch { record.rejectReady(new Error('A2A_HANDSHAKE_FAILED')); poisonA2A() }
 }

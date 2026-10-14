@@ -405,7 +405,9 @@ export function auditSubmissionPackage({ packageRoot, officialCheck = null } = {
         // synthetic fixtures and controlled contract tests do not claim A2A.
         if (manifest.mode === 'official_submission' && sidecar.evidenceKind === 'native_runtime' && task.phase === 'agent2agent') {
           const a2aCopies = new Map((record.runtimeEvidence ?? []).map(ref => [ref.sourcePath, ref]))
-          const a2aErrors = officialA2ATraceErrors(events, task, { environmentLock: capturedEnvironment, readEvidence: sourcePath => {
+          const a2aErrors = officialA2ATraceErrors(events, task, { environmentLock: capturedEnvironment,
+            deadlineRequestTimeoutMs: Math.max(1, Math.min(2147483647, Math.trunc((runtime.scenarioTimeoutSeconds ?? 480000) * 1000))),
+            readEvidence: sourcePath => {
             const ref = a2aCopies.get(sourcePath)
             if (!ref || files.get(ref.path) !== ref.sha256) throw new Error('a2a_evidence_unbound')
             const path = evidence(ref, 'a2a_runtime_evidence')

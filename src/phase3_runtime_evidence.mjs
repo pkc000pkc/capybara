@@ -232,6 +232,7 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
     // this reader. Absolute native/source identities never become FS reads.
     verifyOfficialA2ARuntimeEvidence({ events,
       identity: { executionId: task.executionId, sessionId: session.sessionId },
+      deadlineRequestTimeoutMs: Math.max(1, Math.min(2147483647, Math.trunc((manifest.requestedRuntime?.scenarioTimeoutSeconds ?? 480000) * 1000))),
       readEvidence: path => bytes(path) })
   }
   const httpFields = ['modelHttpDispatchRequired', 'modelHttpDispatchPath', 'modelHttpDispatchSha256', 'modelHttpDispatchProcessId', 'modelHttpDispatchProcessPath']

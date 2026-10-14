@@ -50,6 +50,66 @@ function stream(role, id = 1, { scoped = role === 'child_actor', tokenUsage = us
 }
 function aggregate(events, changes = {}) { return aggregatePhase6Budget({ executions: [execution(events, changes)] }) }
 
+function trusted408Stream(role, id = 1) {
+  const value = stream(role, id, { retry: true })
+  for (const event of value.filter(event => ['model_request_failed', 'model_retry_scheduled'].includes(event.type))) {
+    Object.assign(event, { category: 'request_timeout', httpStatus: 408,
+      classificationSource: 'trusted_http_guard', httpStatusSource: 'trusted_http_guard',
+      httpGuardClosedRecordSha256: '9'.repeat(64), diagnostic: { schemaVersion: 'gaia2-model-diagnostic-v1',
+        sdkReportedStatus: 400, exceptionClass: 'BadRequestError', errorCode: null, codeSource: null,
+        errorType: 'invalid_request_error', typeSource: 'sdk_body', dispatchObserved: null } })
+    if (role === 'child_actor') delete event.diagnostic
+  }
+  return value
+}
+
+test('actor judge correction and child trusted408 markers are metered without losing failed usage', () => {
+  const report = aggregate(['actor', 'judge', 'correction', 'child_actor'].flatMap((role, index) => trusted408Stream(role, index + 1)))
+  assert.equal(report.totals.logicalRequests, 4)
+  assert.equal(report.totals.sdkAttempts, 8)
+  assert.equal(report.totals.failedSdkAttempts, 4)
+  assert.equal(report.totals.retriesScheduled, 4)
+  assert.equal(report.totals.sdkAttemptsWithUnknownUsage, 4)
+  assert.equal(report.totals.totalTokens, null)
+  assert.deepEqual(report.totals.reportedTokenSubtotals, { inputTokens: 8, outputTokens: 12, totalTokens: 20 })
+  for (const role of ['actor', 'judge', 'correction', 'child_actor']) assert.equal(report.byRole[role].sdkAttempts, 2)
+  assert.equal(report.authorityVerified, false)
+})
+
+test('trusted408 provenance is complete exact metadata rather than a budget authority claim', () => {
+  for (const role of ['actor', 'judge', 'correction', 'child_actor']) {
+    const original = trusted408Stream(role)
+    const failedIndex = original.findIndex(event => event.type === 'model_request_failed')
+    const scheduledIndex = original.findIndex(event => event.type === 'model_retry_scheduled')
+    for (const field of ['classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256']) {
+      const changed = structuredClone(original)
+      delete changed[failedIndex][field]
+      assert.throws(() => aggregate(changed), /invalid_trusted_status_metadata/)
+      const scheduleChanged = structuredClone(original)
+      scheduleChanged[scheduledIndex][field] = field.endsWith('Sha256') ? '8'.repeat(64) : 'untrusted'
+      assert.throws(() => aggregate(scheduleChanged), /invalid_trusted_status_metadata|invalid_retry_sequence/)
+    }
+    const removed = structuredClone(original)
+    for (const field of ['classificationSource', 'httpStatusSource', 'httpGuardClosedRecordSha256']) delete removed[failedIndex][field]
+    assert.throws(() => aggregate(removed), /invalid_trusted_status_metadata|invalid_retry_sequence/)
+    const wrongStatus = structuredClone(original)
+    wrongStatus[failedIndex].httpStatus = 400
+    assert.throws(() => aggregate(wrongStatus), /invalid_trusted_status_metadata/)
+  }
+})
+
+test('all child permit scope and session identity fields remain bound through retries and logical finish', () => {
+  const original = trusted408Stream('child_actor')
+  for (const field of ['permitId', 'actualInputHash', 'modelScopeHash', 'configHash', 'parentExecutionId',
+    'parentSessionId', 'childExecutionId', 'childSessionId', 'delegationScopeHash']) {
+    for (const index of [original.findIndex(event => event.type === 'model_retry_scheduled'), original.length - 1]) {
+      const changed = structuredClone(original)
+      changed[index][field] = field.endsWith('Hash') ? '8'.repeat(64) : field === 'permitId' ? hexId(8) : 'foreign'
+      assert.throws(() => aggregate(changed), /request_identity_changed|invalid_child_envelope|unbound_request_event|model_scope_changed/)
+    }
+  }
+})
+
 test('legacy actor and versioned child stay separate; response/ACK copies never double count', () => {
   const events = [...stream('actor'), ...stream('child_actor', 2),
     { type: 'model_response', executionId: 'execution-one', sessionId: 'session-one', usage },

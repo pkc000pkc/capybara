@@ -500,7 +500,9 @@ class Tests(unittest.TestCase):
         client._OfficialA2AClient__tool_ids = {"Contacts__get_contact": "native-1"}
         with patch("gaia2_official_a2a.build_scoped_app_agent", side_effect=adapter_fixture.CapturedRunner):
             captured = client.child_runner()
-        client._OfficialA2AClient__peer = adapter_fixture.FakePeer([None, result])
+        # FakePeer now acknowledges a2a_sync_clock without consuming replies;
+        # only the actual a2a_dispatch response belongs in this queue.
+        client._OfficialA2AClient__peer = adapter_fixture.FakePeer([result])
         return captured.kwargs["dispatch"]
 
     def test_13_official_adapter_forwards_only_distinct_blocked_ack(self):

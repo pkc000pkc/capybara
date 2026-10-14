@@ -18,6 +18,7 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
 import gaia2_a2a_wire as wire
 from gaia2_model_retry import ModelRetryPolicy, wrap_completion
+import gaia2_scoped_model_broker as broker_module
 from gaia2_deadline_notifications import ScopedOSDeadline
 from gaia2_scoped_model_broker import (ScopedRetryModelEngine, ScopedModelBrokerError,
     model_input_hash, normalize_model_messages, scoped_model_config_hash)
@@ -394,6 +395,41 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(ScopedModelBrokerError, "SCOPED_MODEL_DEADLINE_SCOPE_MISMATCH"):
             f[0].begin_request(permit_id=f"{self.serial:032x}", request_id=f"{self.serial + 1000:032x}",
                 actual_input_hash=model_input_hash(MESSAGES), before_attempt=f[5], deadline=deadline)
+
+    def test_16_trusted_receipt_classifier_and_diagnostic_alias_changes_deny_before_ack(self):
+        def replaced(*args, **kwargs):
+            raise AssertionError("untrusted helper must never execute")
+        targets = [(broker_module, "_classify_attempt_failure"), (broker_module, "safe_model_diagnostics"),
+            (broker_module, "safe_request_summary"), (broker_module, "_AttemptFailureReceipt"),
+            (broker_module._AttemptFailureReceipt, "__init__"),
+            (broker_module._AttemptFailureReceipt, "consume"), (broker_module._AttemptFailureReceipt, "_seal")]
+        for target, attribute in targets:
+            f = self.engine([response()])
+            self.begin(f)
+            with self.subTest(attribute=attribute), patch.object(target, attribute, replaced):
+                with self.assertRaisesRegex(ScopedModelBrokerError, "SCOPED_MODEL_SOURCE_CHANGED"):
+                    f[0](MESSAGES)
+            self.assertEqual(f[1].calls, [])
+            self.assertEqual(f[5].calls, [])
+            self.assertEqual(f[0].snapshot()["sdkAttemptsUsed"], 0)
+
+    def test_17_unguarded_child_fake408_attributes_do_not_override_sdk400(self):
+        class BadRequestError(RuntimeError):
+            status_code = 400
+            body = {"error": {"type": "invalid_request_error"}}
+            trusted_http_status = 408
+            responseStatus = 408
+            classificationSource = "trusted_http_guard"
+            httpGuardClosedRecordSha256 = "a" * 64
+        f = self.engine([BadRequestError(SECRET)])
+        self.begin(f)
+        with self.assertRaisesRegex(ScopedModelBrokerError, "SCOPED_MODEL_CONFIGURATION_ERROR") as caught:
+            f[0](MESSAGES)
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(f[1].calls), 1)
+        self.assertEqual(f[3].waits, [])
+        self.assertNotIn("classificationSource", caught.exception.metadata)
+        self.safe(f)
 
 
 if __name__ == "__main__":

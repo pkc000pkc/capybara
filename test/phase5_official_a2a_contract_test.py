@@ -59,6 +59,8 @@ class FakePeer:
 
     def call(self, method, payload):
         self.calls.append((method, payload))
+        if method == "a2a_sync_clock":
+            return {"ok": True}
         reply = self.replies.pop(0)
         if isinstance(reply, BaseException):
             raise reply
@@ -178,6 +180,8 @@ class OfficialA2AContractTests(unittest.TestCase):
         value._OfficialA2AClient__scope = scope()
         value._OfficialA2AClient__handle_token = "handle"
         value._OfficialA2AClient__peer = peer
+        value._OfficialA2AClient__env = SimpleNamespace(
+            time_manager=SimpleNamespace(time=lambda: 1000.0))
         value._OfficialA2AClient__model_requests = 1
         value._OfficialA2AClient__sdk_attempts = 0
         value._OfficialA2AClient__child_model_requests_base = 0
@@ -362,6 +366,44 @@ class OfficialA2AContractTests(unittest.TestCase):
                 emit("model_request_attempt", **{**fields, **changed})
         self.assertEqual(len(recorder.events), 1)
 
+    def test_emitter_only_accepts_complete_finite_http408_provenance_without_diagnostics(self):
+        recorder = SafeEmitter()
+        client = self.lifetime_client(recorder)
+        self.begin(client)
+        model_scope, scope_hash, _, _ = client._model_binding()
+        emit = client._model_emitter(model_scope=model_scope, model_scope_hash=scope_hash)
+        fields = {"schemaVersion": "gaia2-scoped-model-event-v1", "modelRole": "child_actor",
+            "modelScopeHash": scope_hash, "configHash": model_scope["configHash"],
+            "permitId": "a" * 32, "requestId": "b" * 32, "actualInputHash": "c" * 64,
+            "requestAttempt": 1, "maxRequestAttempts": 6, "cumulativeWaitSeconds": 0,
+            "category": "request_timeout", "retryable": True, "httpStatus": 408,
+            "nextRetryAt": "2026-10-14T00:00:02Z", "retryExhausted": False,
+            "classificationSource": "trusted_http_guard", "httpStatusSource": "trusted_http_guard",
+            "httpGuardClosedRecordSha256": "d" * 64}
+        emit("model_request_failed", **fields)
+        emit("model_retry_scheduled", **{**fields, "waitSeconds": 2,
+            "delaySource": "exponential_backoff", "cumulativeWaitSecondsAfterRetry": 2})
+        self.assertEqual(len(recorder.events), 2)
+        self.assert_safe_child_events(client, recorder)
+        for key in ("classificationSource", "httpStatusSource", "httpGuardClosedRecordSha256"):
+            changed = dict(fields)
+            del changed[key]
+            with self.subTest(missing=key), self.assertRaisesRegex(OfficialA2AError, "A2A_MODEL_EVENT_INVALID"):
+                emit("model_request_failed", **changed)
+        for change in ({"classificationSource": "sdk"}, {"httpStatusSource": None},
+            {"httpGuardClosedRecordSha256": "unsafe"}, {"httpGuardClosedRecordSha256": 1},
+            {"httpStatus": 400}, {"httpStatus": True}, {"retryable": 1}, {"retryExhausted": 0},
+            {"category": "configuration_error"}, {"requestAttempt": True}, {"requestAttempt": 0},
+            {"maxRequestAttempts": True}, {"maxRequestAttempts": 0},
+            {"diagnostic": {"sdkReportedStatus": 400}}, {"body": SECRET}, {"api_key": SECRET}):
+            with self.subTest(change=change), self.assertRaisesRegex(OfficialA2AError, "A2A_MODEL_EVENT_INVALID"):
+                emit("model_request_failed", **{**fields, **change})
+        with self.assertRaisesRegex(OfficialA2AError, "A2A_MODEL_EVENT_INVALID"):
+            emit("model_request_succeeded", **fields)
+        with self.assertRaisesRegex(OfficialA2AError, "A2A_MODEL_EVENT_INVALID"):
+            emit("model_retry_scheduled", **{**fields, "retryExhausted": True})
+        self.assertEqual(len(recorder.events), 2)
+
     def test_emitter_constructor_validation_and_connect_forwarding(self):
         with self.assertRaisesRegex(OfficialA2AError, "A2A_MODEL_EVENT_EMITTER_INVALID"):
             OfficialA2AClient(env=None, app=SimpleNamespace(name="Contacts"),
@@ -498,7 +540,8 @@ class OfficialA2AContractTests(unittest.TestCase):
         finished = client._model_finish(finish_payload, model_scope_hash="d" * 64)
         self.assertEqual(finished["status"], "completed")
         self.assertEqual([item[0] for item in client._OfficialA2AClient__peer.calls],
-                         ["a2a_assert_model", "a2a_complete_model"])
+                         ["a2a_sync_clock", "a2a_assert_model",
+                          "a2a_sync_clock", "a2a_complete_model"])
         rejected = self.client(FakePeer([{"ok": False}]))
         with self.assertRaisesRegex(OfficialA2AError, "A2A_MODEL_ATTEMPT_REJECTED"):
             rejected._model_attempt(payload, model_scope_hash="d" * 64)
