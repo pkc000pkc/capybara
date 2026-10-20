@@ -37,7 +37,7 @@ html {
 }
 
 body {
-  min-width: 320px;
+  min-width: 0;
   min-height: 100%;
   margin: 0;
   background: var(--bg);
@@ -101,6 +101,7 @@ svg {
   display: grid;
   height: 100%;
   grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 20px;
   align-items: center;
 }
 
@@ -166,6 +167,12 @@ svg {
   color: var(--muted);
   font-size: 13px;
   font-weight: 600;
+}
+
+.site-nav a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
 }
 
 .site-nav a:hover,
@@ -892,6 +899,18 @@ h1 {
 }
 
 @media (max-width: 600px) {
+  .header-inner {
+    column-gap: 12px;
+  }
+
+  .site-nav {
+    gap: 12px;
+  }
+
+  .site-nav a {
+    font-size: 12px;
+  }
+
   .shell {
     width: min(100% - 32px, 1180px);
   }

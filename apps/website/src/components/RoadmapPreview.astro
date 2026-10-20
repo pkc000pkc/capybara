@@ -1,0 +1,64 @@
+---
+const base = import.meta.env.BASE_URL;
+---
+
+<section class="roadmap-preview" aria-labelledby="roadmap-preview-title">
+  <div class="shell roadmap-preview-inner">
+    <div>
+      <p class="section-index">The next chapter</p>
+      <h2 id="roadmap-preview-title">From agent tooling to a lasting AI coworker.</h2>
+      <p class="roadmap-preview-description">
+        Keep useful context. Turn verified experience into reusable capabilities.
+        Build toward work that carries forward across sessions.
+      </p>
+    </div>
+    <a class="text-link" href={`${base}roadmap/`}>
+      See the roadmap <span aria-hidden="true">→</span>
+    </a>
+  </div>
+</section>
+
+<style>
+  .roadmap-preview {
+    padding-block: 56px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface-2);
+  }
+
+  .roadmap-preview-inner {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 48px;
+  }
+
+  .roadmap-preview h2 {
+    max-width: 650px;
+    margin-bottom: 14px;
+    font-size: 30px;
+    font-weight: 650;
+    line-height: 1.2;
+  }
+
+  .roadmap-preview-description {
+    max-width: 640px;
+    margin-bottom: 0;
+    color: var(--muted);
+    font-size: 15px;
+  }
+
+  .roadmap-preview .text-link {
+    min-height: 44px;
+  }
+
+  @media (max-width: 600px) {
+    .roadmap-preview-inner {
+      grid-template-columns: 1fr;
+      gap: 20px;
+    }
+
+    .roadmap-preview h2 {
+      font-size: 27px;
+    }
+  }
+</style>

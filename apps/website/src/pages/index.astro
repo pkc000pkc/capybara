@@ -1,6 +1,7 @@
 ---
 import CapybaraMark from "../components/CapybaraMark.astro";
 import ContextAssembly from "../components/ContextAssembly.astro";
+import RoadmapPreview from "../components/RoadmapPreview.astro";
 import "../styles/global.css";
 
 const base = import.meta.env.BASE_URL;
@@ -63,6 +64,7 @@ const structuredData = {
         <nav class="site-nav" aria-label="Primary navigation">
           <a class="nav-current" href={base} aria-current="page">Home</a>
           <a href={`${base}blog/`}>Blog</a>
+          <a href={`${base}roadmap/`}>Roadmap</a>
         </nav>
       </div>
     </header>
@@ -217,6 +219,8 @@ const structuredData = {
           </ol>
         </div>
       </section>
+
+      <RoadmapPreview />
 
       <section class="open-source-section" aria-labelledby="open-source-title">
         <div class="shell open-source-grid">
