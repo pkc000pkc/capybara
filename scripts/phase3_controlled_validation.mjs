@@ -139,32 +139,40 @@ function inspectCaseEvidence({ root, workspace, output, fixture, capabilities, r
     assert.ok(receipt.variables.gaia2_replan_state.invalidated_steps.length > 0)
     assert.notEqual(actors[0].contextHash, update.contextHash)
   } else if (fixture.case === 'unknown') {
-    for (const id of ['unknown-retry', 'unknown-after-read']) {
-      const gate = beforeTool(id)
-      assert.equal(gate.decision.action, 'read_back')
-      assert.ok(gate.hookReceipts.some(receipt => receipt.hookId === 'gaia2-write-guard' && receipt.decision?.action === 'read_back'))
-      assert.equal(afterTool(id), undefined)
-    }
+    const retryGate = beforeTool('unknown-retry')
+    assert.equal(retryGate.decision.action, 'read_back')
+    assert.ok(retryGate.hookReceipts.some(receipt => receipt.hookId === 'gaia2-write-guard' && receipt.decision?.action === 'read_back'))
+    assert.equal(afterTool('unknown-retry'), undefined)
+    // A different mutation key is an independent operation once read-back
+    // evidence exists; only the exact unresolved write remains protected.
+    const replacementGate = beforeTool('unknown-after-read')
+    assert.equal(replacementGate.decision.action, 'allow')
+    assert.ok(replacementGate.hookReceipts.some(receipt => receipt.hookId === 'gaia2-write-guard' && receipt.decision?.action === 'allow'))
+    assert.ok(afterTool('unknown-after-read'))
     const read = afterTool('unknown-readback')
     const entry = read.variables.gaia2_write_state.unknown.find(item => item.resourceKey === 'ControlledLedger')
     assert.ok(entry?.readBackObserved)
     assert.equal(entry.readBackActionId, 'unknown-readback')
     assert.equal(entry.readBackHash, read.input.outcome.resultHash)
     assert.equal(entry.resultHash, afterTool('unknown-first').input.outcome.resultHash)
-    assert.equal(fixture.callbackCounts.write, 1)
+    assert.equal(fixture.callbackCounts.write, 2)
   } else if (fixture.case === 'unverified_evidence') {
     const failed = afterTool('unverified-read-failed')
     assert.equal(failed.input.action.canonicalName, 'ControlledLedger__failed_read')
     assert.equal(failed.input.outcome.status, 'failed_before_execution')
     assert.deepEqual(failed.variables.gaia2_observation_state.unverified_ids, ['obs-unverified-read-failed'])
-    for (const id of ['unverified-write', 'unverified-write-after-different-read']) {
-      const gate = beforeTool(id)
-      assert.equal(gate.decision.action, 'read_back')
-      assert.ok(gate.hookReceipts.some(receipt => receipt.hookId === 'gaia2-conflict-gate' && receipt.decision?.action === 'read_back'))
-      assert.ok(gate.hookReceipts.some(receipt => receipt.hookId === 'gaia2-write-guard' && receipt.decision?.action === 'allow'))
-      assert.deepEqual(gate.variables.gaia2_observation_state.unverified_ids, ['obs-unverified-read-failed'])
-      assert.equal(afterTool(id), undefined)
-    }
+    const firstWrite = beforeTool('unverified-write')
+    assert.equal(firstWrite.decision.action, 'allow')
+    assert.ok(firstWrite.hookReceipts.some(receipt => receipt.hookId === 'gaia2-conflict-gate' && receipt.decision?.action === 'allow'))
+    assert.ok(firstWrite.hookReceipts.some(receipt => receipt.hookId === 'gaia2-write-guard' && receipt.decision?.action === 'allow'))
+    assert.deepEqual(firstWrite.variables.gaia2_observation_state.unverified_ids, ['obs-unverified-read-failed'])
+    assert.ok(afterTool('unverified-write'))
+    const replayWrite = beforeTool('unverified-write-after-different-read')
+    assert.equal(replayWrite.decision.action, 'block')
+    assert.ok(replayWrite.hookReceipts.some(receipt => receipt.hookId === 'gaia2-conflict-gate' && receipt.decision?.action === 'allow'))
+    assert.ok(replayWrite.hookReceipts.some(receipt => receipt.hookId === 'gaia2-write-guard' && receipt.decision?.action === 'block'))
+    assert.deepEqual(replayWrite.variables.gaia2_observation_state.unverified_ids, ['obs-unverified-read-failed'])
+    assert.equal(afterTool('unverified-write-after-different-read'), undefined)
     const different = afterTool('unverified-different-read')
     assert.equal(beforeTool('unverified-different-read').decision.action, 'allow')
     assert.equal(different.input.outcome.status, 'succeeded')
@@ -185,7 +193,7 @@ function inspectCaseEvidence({ root, workspace, output, fixture, capabilities, r
     const observation = fresh.variables.gaia2_observation_state
     assert.deepEqual(observation.unverified_ids, [])
     assert.ok(observation.observations.some(item => item.actionId === 'unverified-read-failed' && item.status === 'verified_by_fresh_read' && item.verifiedBy === 'unverified-fresh-read'))
-    assert.deepEqual(fixture.callbackCounts, { write: 0, read: 1, failed_read: 2 })
+    assert.deepEqual(fixture.callbackCounts, { write: 1, read: 1, failed_read: 2 })
     assert.equal(fixture.fakeActorRequests, 6)
   } else if (fixture.case === 'wait') {
     assert.equal(beforeTool('official-wait').input.action.canonicalName, 'SystemApp__wait_for_notification')
@@ -285,7 +293,7 @@ export async function runPhase3ControlledValidation({ root = defaultRoot, signal
   const result = { schemaVersion: 'gaia2-phase3-controlled-validation-v1', status: 'passed', runId, syntheticFixtureOnly: true,
     realModelCalls: 0, benchmarkExecuted: false, externalNetworkUsed: false, uploaded: false, officialSubmissionReady: false,
     validationScope: 'real ARE tools and bridge + authenticated loopback HTTP + actual backend RuntimePluginHost + frozen tracked TS hooks; synthetic Actor only',
-    limitations: ['No real model or original benchmark task was executed.', 'Unverified evidence blocking is tested; semantic stale/conflicting/noise classification is not claimed.', 'One isolated negative plugin profile deliberately fails an after_tool hook.'],
+    limitations: ['No real model or original benchmark task was executed.', 'Evidence diagnostics are advisory; exact unknown-write replay protection is tested, while business sufficiency remains Actor-owned.', 'One isolated negative plugin profile deliberately fails an after_tool hook.'],
     sourceBindings: bindings, cases: reports, reportPath: normalized(join(runDirectory, 'controlled-validation.json')) }
   save(result.reportPath, result)
   return result

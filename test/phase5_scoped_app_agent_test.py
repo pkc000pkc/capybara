@@ -278,7 +278,7 @@ class Tests(unittest.TestCase):
         self.addCleanup(lambda: [runner.close() for runner in self.runners])
 
     def fixture(self, app=None, responses=None, budget=10, function_dispatch=False, log_callback=None,
-                notification_reader=None, notification_reader_factory=None):
+                notification_reader=None, notification_reader_factory=None, diagnostic_callback=None):
         contact = Contact("Local", "User", contact_id="contact-1", is_user=True)
         app = app or Contacts(contacts={contact.contact_id: contact})
         env = Environment(EnvironmentConfig(start_time=1000, duration=None, verbose=False))
@@ -307,7 +307,8 @@ class Tests(unittest.TestCase):
             return dispatcher(request)
         runner = build_scoped_app_agent(app=app, owner=owner, env=env, scope=scope, llm_engine=engine,
             dispatch=trusted_closure if function_dispatch else dispatcher,
-            notification_reader=notification_reader, log_callback=log_callback)
+            notification_reader=notification_reader, log_callback=log_callback,
+            diagnostic_callback=diagnostic_callback)
         self.runners.append(runner)
         return runner, owner, app, env, scope, engine, dispatcher
 
@@ -1315,6 +1316,36 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(authority.finishes), 1)
         self.assertEqual(dispatch.calls, [])
         self.assertTrue(runner.snapshot()["failed"])
+
+    def test_59_one_format_failure_can_recover_without_native_replay(self):
+        runner, _, _, _, _, engine, dispatch = self.fixture(responses=[
+            "Thought: missing action", action("final_answer", {"answer": "recovered"})])
+        self.assertEqual(runner.run(), "recovered")
+        snapshot = runner.snapshot()
+        self.assertTrue(snapshot["completed"])
+        self.assertEqual(snapshot["formatFailureCount"], 1)
+        self.assertEqual(snapshot["consecutiveFormatFailures"], 0)
+        self.assertEqual(len(dispatch.calls), 1)
+
+    def test_60_three_format_failures_escalate_without_native_dispatch(self):
+        diagnostics = []
+        runner, _, _, _, _, engine, dispatch = self.fixture(responses=[
+            "Thought: missing action one", "Thought: missing action two", "Thought: missing action three"],
+            budget=10, diagnostic_callback=diagnostics.append)
+        with self.assertRaisesRegex(ScopedAppAgentFatal, "SCOPED_AGENT_FORMAT_FAILURE_THRESHOLD"):
+            runner.run()
+        snapshot = runner.snapshot()
+        self.assertFalse(snapshot["completed"])
+        self.assertTrue(snapshot["failed"])
+        self.assertEqual(snapshot["failureCode"], "SCOPED_AGENT_FORMAT_FAILURE_THRESHOLD")
+        self.assertEqual(snapshot["formatFailureCount"], 3)
+        self.assertEqual(snapshot["consecutiveFormatFailures"], 3)
+        self.assertEqual(snapshot["lastFormatFailureCode"], "missing_action")
+        self.assertEqual(len(dispatch.calls), 0)
+        self.assertEqual(len(diagnostics), 3)
+        self.assertEqual(diagnostics[-1]["schemaVersion"], "gaia2-a2a-child-diagnostic-v1")
+        self.assertEqual(diagnostics[-1]["consecutiveFormatFailures"], 3)
+        self.assertNotIn("missing action three", json.dumps(diagnostics))
 
 
 if __name__ == "__main__":

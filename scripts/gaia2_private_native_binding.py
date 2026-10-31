@@ -277,9 +277,25 @@ def _validate_native_blocked_before(*, scope: dict, action: dict, gate_decision:
             or type(clock["clock"]["revision"]) is not int or not 1 <= clock["clock"]["revision"] <= wire.MAX_SAFE_INTEGER):
         _fail("NATIVE_DISCARD_CLOCK_INVALID")
     before = _sealed_native_evidence(before_hook_ref)
-    projected = {"id": action["id"], "name": action["toolId"], "canonicalName": action["canonicalName"],
-        "arguments": action["arguments"], "effect": action["effect"], "mutationKey": action["mutationKey"],
-        "resourceKey": action["resourceKey"], "authoritativeRead": action["effect"] == "read"}
+    # The Host may attach trusted, derived Action metadata (for example
+    # argumentHash/argumentFieldHashes) after the native binding has prepared
+    # its ticket.  Reconstructing the projection from the Python ticket would
+    # silently drop those fields and make an otherwise valid negative proof
+    # fail closed.  Use the sealed Host Action as the canonical projection,
+    # while still checking the fields that bind it to this private ticket.
+    input_value = before.get("input")
+    input_action = input_value.get("action") if type(input_value) is dict else None
+    if (type(input_action) is not dict
+            or input_action.get("id") != action["id"]
+            or input_action.get("name") != action["toolId"]
+            or input_action.get("canonicalName") != action["canonicalName"]
+            or input_action.get("arguments") != action["arguments"]
+            or input_action.get("effect") != action["effect"]
+            or input_action.get("mutationKey") != action["mutationKey"]
+            or input_action.get("resourceKey") != action["resourceKey"]
+            or input_action.get("authoritativeRead") is not (action["effect"] == "read")):
+        _fail("NATIVE_DISCARD_HOOK_INVALID")
+    projected = dict(input_action)
     trusted = {"schemaVersion": "capybara-trusted-native-checkpoint-v1", "scopeHash": wire.value_hash(scope),
         "actionHash": wire.value_hash(action), "checkpoint": "before_tool", "clockEvidenceRef": before_clock_ref,
         "hookOutcome": None}

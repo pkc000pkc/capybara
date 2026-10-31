@@ -14,7 +14,18 @@ const jsonHash = value => hash(JSON.stringify(value)) // Host hash preserves ins
 const HASH = /^[a-f0-9]{64}$/
 const portable = value => value.replaceAll('\\', '/')
 const sealed = new Set(['oracle', 'oracleEvents', 'oracle_events', 'judge', 'judgeRationale', 'expectedAnswer', 'expected_answer', 'referenceAnswer', 'reference_answer', 'futureEvents', 'future_events', 'validationResult', 'training'])
+// These are Host-owned lifecycle controls. They have before/after Hook
+// receipts but intentionally do not emit native tool-call events; native gate
+// accounting must therefore exclude them while still validating their own
+// control receipts.
+const CONTROL_ACTIONS = new Set(['CapybaraEvidence__read', 'CapybaraRetrieval__step', 'CapybaraTemporal__watch', 'CapybaraTaskContract__commit', 'CapybaraTaskContract__review'])
 function check(condition, code) { if (!condition) throw new Error(`Phase 3 runtime evidence: ${code}`) }
+export function toolEvidenceIdentity(value) {
+  check(object(value) && typeof value.callId === 'string' && value.callId.length > 0, 'invalid_tool_identity')
+  const attempt = value.attempt === undefined ? 1 : value.attempt
+  check(Number.isSafeInteger(attempt) && attempt >= 1, 'invalid_tool_attempt')
+  return `${value.callId}\u0000${attempt}`
+}
 function pathSyntax(value) { return typeof value === 'string' && value.length > 0 && !isAbsolute(value) && !win32.isAbsolute(value) && !/[\\\0:]/.test(value) && !value.split('/').some(part => !part || part === '.' || part === '..') }
 function localFile(root, path) {
   check(pathSyntax(path), 'unsafe_path')
@@ -40,6 +51,115 @@ function pythonJson(value) {
 export const pythonEventHash = value => hash(pythonJson(value))
 export const runtimeEvidenceRequired = (manifest, result) => manifest?.executionBinding === 'phase3_live_plugin_host_required' || result?.runtimeEvidenceRequired === true
 
+/** Validate the bridge-owned reconciliation telemetry without treating it as
+ * business truth.  A malformed or oracle-bearing control event invalidates
+ * the runtime evidence; absence is allowed because the Actor may legitimately
+ * finish without submitting a declaration. */
+export function validateTaskReconciliationEvents(events, identity) {
+  const rows = (Array.isArray(events) ? events : []).filter(event => event?.type === 'task_reconciliation_completed')
+  const callIds = new Set()
+  for (const event of rows) {
+    check(object(event) && event.executionId === identity.executionId && event.sessionId === identity.sessionId
+      && typeof event.callId === 'string' && event.callId.length > 0
+      && !callIds.has(toolEvidenceIdentity({ callId: event.callId, attempt: event.attempt }))
+      && Number.isSafeInteger(event.turn) && event.turn >= 0
+      && ['succeeded', 'failed_before_execution'].includes(event.status)
+      && (event.mode === null || event.mode === 'advisory' || event.mode === 'enforce')
+      && event.oracleConsulted === false, 'task_reconciliation_event_invalid')
+    callIds.add(toolEvidenceIdentity({ callId: event.callId, attempt: event.attempt }))
+    if (event.status === 'succeeded') check(event.mode === 'advisory' || event.mode === 'enforce', 'task_reconciliation_event_mode_missing')
+    if (event.status === 'failed_before_execution') check(typeof event.reason === 'string' && event.reason.length > 0, 'task_reconciliation_event_reason_missing')
+  }
+  return rows.length
+}
+
+/** Bind successful Actor reconciliation telemetry to the actual Hook chain.
+ * The event log is operational metadata, not a source of authority: a
+ * successful receipt must have an admitted before_tool action and a matching
+ * after_tool outcome.  Malformed declarations may fail before the Hook is
+ * invoked, so their bounded failure event is checked for shape only above. */
+export function validateTaskReconciliationBindings(events, bound) {
+  const rows = (Array.isArray(events) ? events : []).map((event, index) => ({ event, index }))
+    .filter(item => item.event?.type === 'task_reconciliation_completed')
+  const beforeReceipts = (Array.isArray(bound) ? bound : []).filter(item => item?.receipt?.input?.checkpoint === 'before_tool'
+    && item.receipt.input.action?.canonicalName === 'CapybaraTaskContract__review')
+  const eventFor = identity => rows.filter(item => toolEvidenceIdentity({ callId: item.event.callId, attempt: item.event.attempt }) === identity)
+  for (const row of rows) {
+    const event = row.event
+    if (event.status !== 'succeeded') continue
+    const eventIdentity = toolEvidenceIdentity({ callId: event.callId, attempt: event.attempt })
+    const before = beforeReceipts.filter(item => item.index < row.index
+      && toolEvidenceIdentity({ callId: item.receipt.input.action?.id, attempt: item.receipt.input.action?.attempt }) === eventIdentity)
+    check(before.length === 1, 'task_reconciliation_before_tool_unbound')
+    const action = before[0].receipt.input.action
+    check(action.name === 'capybara_task_reconcile' && action.effect === 'read'
+      && action.resourceKey === 'CapybaraTaskContract'
+      && object(action.arguments) && Object.keys(action.arguments).length === 1 && action.arguments.op === 'reconcile'
+      && before[0].receipt.decision.action === 'allow', 'task_reconciliation_before_tool_invalid')
+    const after = (Array.isArray(bound) ? bound : []).filter(item => item.index > before[0].index && item.index < row.index
+      && item.receipt?.input?.checkpoint === 'after_tool'
+      && toolEvidenceIdentity({ callId: item.receipt.input.action?.id, attempt: item.receipt.input.action?.attempt }) === eventIdentity)
+    check(after.length === 1, 'task_reconciliation_after_tool_unbound')
+    const outcome = after[0].receipt.input.outcome
+    const request = outcome?.result?.taskReconciliation
+    check(after[0].receipt.decision.action === 'allow' && outcome?.status === 'succeeded'
+      && outcome.executed === true && outcome.complete === true
+      && object(request) && request.mode === event.mode, 'task_reconciliation_after_tool_invalid')
+  }
+  // Every admitted control invocation must have exactly one telemetry row;
+  // this catches omitted or extra successful control calls without requiring
+  // malformed pre-gate declarations to fabricate a Hook receipt.
+  for (const item of beforeReceipts) {
+    const callId = item.receipt.input.action?.id
+    const rowsForCall = eventFor(toolEvidenceIdentity({ callId, attempt: item.receipt.input.action?.attempt }))
+    check(rowsForCall.length === 1, 'task_reconciliation_event_call_binding')
+    if (rowsForCall[0].event.status === 'succeeded') check(rowsForCall[0].index > item.index, 'task_reconciliation_event_order')
+  }
+  return rows.length
+}
+
+/** Validate the final actor-facing registry, not only the native app subset.
+ * Controls are represented in actorTools so model_request/tool events can be
+ * checked against the exact surface the provider received. */
+export function validateOfficialToolInventory(events, { requireTaskReconciliation = false } = {}) {
+  const inventories = (Array.isArray(events) ? events : []).filter(event => event?.type === 'official_tool_inventory')
+  if (!inventories.length) check(!requireTaskReconciliation, 'official_tool_inventory_missing')
+  else check(inventories.length === 1, 'official_tool_inventory_duplicate')
+  if (!inventories.length) return null
+  const inventory = inventories[0]
+  const native = inventory.tools, actor = inventory.actorTools
+  check(object(inventory) && Array.isArray(native) && Array.isArray(actor)
+    && Number.isSafeInteger(inventory.toolCount) && inventory.toolCount === native.length
+    && Number.isSafeInteger(inventory.actorToolCount) && inventory.actorToolCount === actor.length
+    && HASH.test(inventory.schemaSha256 ?? '') && HASH.test(inventory.actorSchemaSha256 ?? '')
+    && Number.isSafeInteger(inventory.toolDefinitionsUtf8Bytes) && inventory.toolDefinitionsUtf8Bytes > 0, 'official_tool_inventory_invalid')
+  const unique = rows => {
+    check(rows.every(row => object(row) && typeof row.canonicalName === 'string' && row.canonicalName
+      && typeof row.publicName === 'string' && row.publicName), 'official_tool_inventory_identity_invalid')
+    check(new Set(rows.map(row => row.canonicalName)).size === rows.length
+      && new Set(rows.map(row => row.publicName)).size === rows.length, 'official_tool_inventory_duplicate_tool')
+  }
+  unique(native); unique(actor)
+  if (requireTaskReconciliation) check(inventory.taskReconciliationEnabled === true
+    && object(inventory.taskReconciliationTool)
+    && inventory.taskReconciliationTool.canonicalName === 'CapybaraTaskContract__review'
+    && inventory.taskReconciliationTool.publicName === 'capybara_task_reconcile'
+    && actor.some(row => row.canonicalName === 'CapybaraTaskContract__review' && row.publicName === 'capybara_task_reconcile'), 'task_reconciliation_inventory_missing')
+  const actorKeys = new Set(actor.map(row => `${row.canonicalName}\u0000${row.publicName}`))
+  const nativeKeys = new Set(native.map(row => `${row.canonicalName}\u0000${row.publicName}`))
+  const controlKeys = new Set(actor.filter(row => row.control === true).map(row => `${row.canonicalName}\u0000${row.publicName}`))
+  for (const event of (Array.isArray(events) ? events : [])) {
+    if (event.type === 'official_run_started') check(event.actorToolCount === inventory.actorToolCount && event.actorSchemaSha256 === inventory.actorSchemaSha256, 'official_tool_inventory_start_binding')
+    if (event.type === 'model_request') check(event.toolCount === inventory.actorToolCount
+      && event.actorToolCount === inventory.actorToolCount && event.actorSchemaSha256 === inventory.actorSchemaSha256, 'official_tool_inventory_model_binding')
+    if (['tool_call_started', 'tool_call_blocked'].includes(event.type)) {
+      const key = `${event.canonicalName}\u0000${event.function}`
+      check(actorKeys.has(key) && (nativeKeys.has(key) || controlKeys.has(key)), 'official_tool_inventory_tool_binding')
+    }
+  }
+  return inventory
+}
+
 /** Verify source-bound live receipts using only a caller-supplied evidence reader.
  * Bundle callers map original relative identities to package copies; no old root is opened.
  */
@@ -49,7 +169,9 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
   for (const key of ['executionId', 'scenarioId', 'runNumber', 'phase', 'config']) check(attestation[key] === task[key], 'task_identity')
   check(attestation.sessionId === session.sessionId && attestation.capabilitiesSha256 === manifest.lockRefs?.capabilities?.sha256, 'session_or_capabilities_identity')
   check(Array.isArray(events) && events.length && events.every(event => object(event) && event.executionId === task.executionId && event.sessionId === session.sessionId), 'foreign_runtime_event')
+  validateTaskReconciliationEvents(events, { executionId: task.executionId, sessionId: session.sessionId })
   check(attestation.eventsHash === digest(events) && attestation.evidenceHash === digest(refs), 'evidence_inventory_hash')
+  validateOfficialToolInventory(events, { requireTaskReconciliation: manifest.syntheticFixtureOnly !== true })
   const files = new Map(), used = new Set()
   for (const ref of refs) {
     check(object(ref) && pathSyntax(ref.path) && HASH.test(ref.sha256 ?? '') && !files.has(ref.path), 'invalid_or_duplicate_reference')
@@ -199,6 +321,7 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
     check(event.checkpoint === checkpoint && event.contextHash === receipt.contextHash && event.variablesHash === receipt.variablesHash && event.hookRevision === receipt.revision && event.decision === receipt.decision.action && event.hookReceiptCount === receipt.hookReceipts.length && event.hookReceiptsHash === pythonEventHash(receipt.hookReceipts) && event.reasonHash === pythonEventHash(receipt.decision.reason), 'python_hook_binding')
     bound.push({ receipt, index }); priorHash = receipt.variablesHash; previousValues = receipt.variables; revision = receipt.revision
   }
+  validateTaskReconciliationBindings(events, bound)
   const injected = events.map((event, index) => ({ event, index })).filter(item => item.event.type === 'dynamic_context_injected'), models = events.map((event, index) => ({ event, index })).filter(item => item.event.type === 'model_request')
   check(injected.length > 0 && injected.length === models.length, 'missing_actor_context')
   const modelBindings = new Set()
@@ -211,21 +334,26 @@ export function validateRuntimeEvidence({ manifest, task, session, events, runti
     else check(!Object.hasOwn(item.event, 'consumedStrategyHash') && !Object.hasOwn(item.event, 'correctionContextHash'), 'initial_actor_has_correction')
     modelBindings.add(before.index)
   }
+  const attemptOf = value => value === undefined ? 1 : (check(Number.isSafeInteger(value) && value >= 1, 'invalid_tool_attempt'), value)
+  const toolIdentity = value => toolEvidenceIdentity(value)
+  const sameToolIdentity = (event, action) => action?.id === event.callId
+    && attemptOf(action?.attempt) === attemptOf(event.attempt)
   const toolEvents = events.map((event, index) => ({ event, index })).filter(item => ['tool_call_started', 'tool_call_blocked'].includes(item.event.type)), usedCalls = new Set()
   for (const { event, index } of toolEvents) {
-    check(typeof event.callId === 'string' && !usedCalls.has(event.callId), 'duplicate_tool_identity'); usedCalls.add(event.callId)
+    check(typeof event.callId === 'string' && !usedCalls.has(toolIdentity(event)), 'duplicate_tool_identity'); usedCalls.add(toolIdentity(event))
     const before = bound.findLast(entry => entry.index < index), action = before?.receipt.input.action
-    check(before?.receipt.input.checkpoint === 'before_tool' && action?.id === event.callId && action.name === event.function && action.canonicalName === event.canonicalName && before.receipt.input.loop?.iteration === event.turn && models.findLast(item => item.index < before.index)?.event.turn === event.turn, 'missing_matching_before_tool')
+    check(before?.receipt.input.checkpoint === 'before_tool' && sameToolIdentity(event, action) && action.name === event.function && action.canonicalName === event.canonicalName && before.receipt.input.loop?.iteration === event.turn && models.findLast(item => item.index < before.index)?.event.turn === event.turn, 'missing_matching_before_tool')
     for (const id of ['gaia2-write-guard', 'gaia2-conflict-gate']) check(before.receipt.hookReceipts.some(hook => hook.hookId === id && hook.matched && hook.decision), 'missing_safety_decision')
     if (event.type === 'tool_call_started') {
       check(before.receipt.decision.action === 'allow' && event.effect === action.effect, 'unauthorized_tool_started')
-      const complete = events.map((value, at) => ({ value, at })).find(item => item.at > index && item.value.type === 'tool_call_completed' && item.value.callId === event.callId)
+      const complete = events.map((value, at) => ({ value, at })).find(item => item.at > index && item.value.type === 'tool_call_completed' && sameToolIdentity(item.value, action))
       check(complete && complete.value.function === action.name && complete.value.canonicalName === action.canonicalName && complete.value.turn === event.turn && HASH.test(complete.value.resultHash ?? ''), 'missing_tool_completion')
       const after = bound.find(entry => entry.index > complete.at)
-      check(after?.receipt.input.checkpoint === 'after_tool' && after.receipt.decision.action === 'allow' && after.receipt.input.action?.id === event.callId && after.receipt.input.action.name === action.name && after.receipt.input.action.canonicalName === action.canonicalName && after.receipt.input.outcome?.executed === true && after.receipt.input.outcome.status === complete.value.status && after.receipt.input.outcome.resultHash === complete.value.resultHash, 'missing_matching_after_tool')
+      check(after?.receipt.input.checkpoint === 'after_tool' && after.receipt.decision.action === 'allow' && sameToolIdentity(event, after.receipt.input.action) && after.receipt.input.action.name === action.name && after.receipt.input.action.canonicalName === action.canonicalName && after.receipt.input.outcome?.executed === true && after.receipt.input.outcome.complete === true && after.receipt.input.outcome.status === complete.value.status && after.receipt.input.outcome.resultHash === complete.value.resultHash, 'missing_matching_after_tool')
     }
   }
-  check(toolEvents.length > 0 && bound.filter(item => item.receipt.input.checkpoint === 'before_tool').length === toolEvents.length, 'missing_tool_gate_evidence')
+  const nativeGateBefore = bound.filter(item => item.receipt.input.checkpoint === 'before_tool' && !CONTROL_ACTIONS.has(item.receipt.input.action?.canonicalName))
+  check(toolEvents.length > 0 && nativeGateBefore.length === toolEvents.length, 'missing_tool_gate_evidence')
   check(bound.at(-1).receipt.input.checkpoint === 'attempt_end' && bound.at(-1).receipt.input.loop?.terminal === true && events.some(event => event.type === 'attempt_execution_ended'), 'missing_attempt_end')
   if (events.some(event => event.type === 'a2a_child_runtime_snapshot')) {
     // The independent child verifier consumes only sealed copies through

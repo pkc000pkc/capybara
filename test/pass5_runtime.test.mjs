@@ -67,7 +67,28 @@ test('pass@5 keeps infrastructure failures separate from business failures', asy
     scenarioId: 's-3', capability: 'time', eventPlan: [],
     runAttempt: async ({ attemptIndex }) => ({ passed: attemptIndex === 1, infrastructureError: attemptIndex === 2 }),
   })
-  assert.equal(report.passAt5, 1)
+  assert.equal(report.passAt5, null)
+  assert.equal(report.observedPassAt5, 1)
+  assert.equal(report.status, 'incomplete')
+  assert.equal(report.validAttemptCount, 4)
+  assert.equal(report.technicalAttemptCount, 1)
   assert.equal(report.infrastructureErrorRate, 0.2)
   assert.equal(report.unresolvedRate, 0.6)
+})
+
+test('pass@5 never counts a passed technical or judge-protocol attempt', () => {
+  const orchestrator = new Pass5Orchestrator({ rootSeed: 3 })
+  const report = orchestrator.aggregate({ scenarioId: 's-4', capability: 'search', outcomes: [
+    { attemptIndex: 1, passed: true, correctionCount: 0 },
+    { attemptIndex: 2, passed: true, infrastructureError: true, correctionCount: 0 },
+    { attemptIndex: 3, passed: true, judgeProtocolAffected: true, correctionCount: 0 },
+    { attemptIndex: 4, passed: false, correctionCount: 0 },
+    { attemptIndex: 5, passed: false, correctionCount: 0 },
+  ] })
+  assert.equal(report.passAt5, null)
+  assert.equal(report.observedPassAt5, 1)
+  assert.equal(report.validAttemptCount, 3)
+  assert.equal(report.technicalAttemptCount, 1)
+  assert.equal(report.judgeProtocolAttemptCount, 1)
+  assert.equal(report.status, 'incomplete')
 })

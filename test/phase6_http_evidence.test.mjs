@@ -27,10 +27,10 @@ function attemptRecords(attempt = base, { responseStatus = 200, status = 'succee
     { type: 'sdk_attempt_closed', ...attempt, sdkCallStatus: status, transportStatus: status, admittedDispatches: 1, deniedDispatches: denied ? 1 : 0, responseCount: 1, clientClosed: true, leaseClosed: true, failureCode: denied ? 'HTTP_GUARD_REDISPATCH_DENIED' : status === 'succeeded' ? null : 'SDK_CALL_FAILED' },
   ]
 }
-function journal(records) {
+function journal(records, commonFields = common) {
   let previous = null
   return Buffer.from([initialized, ...records].map((fields, index) => {
-    const value = { schemaVersion: 'gaia2-model-http-dispatch-v1', ...fields, sequence: index + 1, previousRecordSha256: previous, ...common }
+    const value = { schemaVersion: 'gaia2-model-http-dispatch-v1', ...fields, sequence: index + 1, previousRecordSha256: previous, ...commonFields }
     value.recordSha256 = hash(JSON.stringify(value)); previous = value.recordSha256
     return JSON.stringify(value)
   }).join('\n') + '\n')
@@ -265,6 +265,22 @@ test('entry task fields cannot be silently removed or rebound', () => {
     assert.throws(() => verify(undefined, undefined, { officialEntryBytes: Buffer.from(JSON.stringify(missing)) }), /entry_fields/)
     assert.throws(() => verify(undefined, undefined, { identity: { ...identity, [field]: field === 'launcherProcessId' ? 11 : 'rebound' } }), /entry_task_identity/)
   }
+})
+test('official zero-based initial attempt is accepted without relaxing entry SHA, task identity or negative-index guards', () => {
+  const zeroEntry = { ...JSON.parse(entryBytes), attemptIndex: 0 }
+  const zeroBytes = Buffer.from(JSON.stringify(zeroEntry) + '\n')
+  const zeroJournal = journal(attemptRecords(), { ...common, entrySha256: hash(zeroBytes) })
+  const inputs = { journalBytes: zeroJournal, events: events(), identity: { ...identity, attemptIndex: 0 },
+    officialEntryBytes: zeroBytes, pythonProcessId: 10 }
+  const proof = verifyModelHttpDispatchEvidence(inputs)
+  assert.equal(proof.status, 'passed'); assert.equal(proof.attempts, 1)
+  assert.equal(proof.entrySha256, hash(zeroBytes)); assert.equal(proof.admittedDispatches, 1)
+  assert.throws(() => verifyModelHttpDispatchEvidence({ ...inputs, journalBytes: journal(attemptRecords()) }), /journal_entry_or_process/)
+  assert.throws(() => verifyModelHttpDispatchEvidence({ ...inputs, identity: { ...identity, attemptIndex: 1 } }), /entry_task_identity/)
+  const negativeBytes = Buffer.from(JSON.stringify({ ...zeroEntry, attemptIndex: -1 }) + '\n')
+  assert.throws(() => verifyModelHttpDispatchEvidence({ ...inputs, officialEntryBytes: negativeBytes,
+    journalBytes: journal(attemptRecords(), { ...common, entrySha256: hash(negativeBytes) }),
+    identity: { ...identity, attemptIndex: -1 } }), /entry_task_fields/)
 })
 test('independent trusted attempts may interleave without changing per-attempt dispatch identity', () => {
   const judge = { ...base, modelRole: 'judge', requestId: '7'.repeat(32) }

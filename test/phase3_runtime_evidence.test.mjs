@@ -5,7 +5,7 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { digest, fileDigest, readJson } from '../src/phase0_run.mjs'
-import { collectRuntimeEvidence, pythonEventHash, validateRuntimeEvidence } from '../src/phase3_runtime_evidence.mjs'
+import { collectRuntimeEvidence, pythonEventHash, toolEvidenceIdentity, validateRuntimeEvidence, validateTaskReconciliationBindings, validateTaskReconciliationEvents } from '../src/phase3_runtime_evidence.mjs'
 import { auditSubmissionPackage } from '../src/phase2_audit.mjs'
 import { exportSubmissionPackage } from '../src/phase2_export.mjs'
 import { runtimeFixture } from './support/runtime_evidence_fixture.mjs'
@@ -72,6 +72,82 @@ test('runtime missing Actor injection, foreign events, bypassed tool gates and w
   }
 })
 
+test('formal runtime evidence requires the task-reconciliation enablement receipt', () => {
+  for (const mutate of [
+    inventory => { inventory.taskReconciliationEnabled = false },
+    inventory => { inventory.taskReconciliationTool.canonicalName = 'foreign.tool' },
+    inventory => { delete inventory.taskReconciliationTool },
+  ]) {
+    const value = runtimeFixture()
+    try {
+      const inventory = value.events.find(event => event.type === 'official_tool_inventory')
+      assert.ok(inventory)
+      mutate(inventory)
+      value.collected.runtimeAttestation.eventsHash = digest(value.events)
+      assert.throws(() => verify(value), /task_reconciliation_inventory_missing/)
+    } finally { cleanup(value.root) }
+  }
+})
+
+test('formal runtime evidence binds the final actor tool registry to model requests and calls', () => {
+  for (const mutate of [
+    events => { const inventory = events.find(event => event.type === 'official_tool_inventory'); inventory.tools = []; inventory.toolCount = 0 },
+    events => { events.find(event => event.type === 'official_tool_inventory').actorToolCount = 99 },
+    events => { events.find(event => event.type === 'official_tool_inventory').actorSchemaSha256 = '0'.repeat(64) },
+    events => { events.find(event => event.type === 'model_request').actorSchemaSha256 = '0'.repeat(64) },
+    events => { events.find(event => event.type === 'tool_call_started').canonicalName = 'foreign.tool' },
+  ]) {
+    const value = runtimeFixture()
+    try {
+      mutate(value.events)
+      value.collected.runtimeAttestation.eventsHash = digest(value.events)
+      assert.throws(() => verify(value), /official_tool_inventory/)
+    } finally { cleanup(value.root) }
+  }
+})
+
+test('tool evidence identity distinguishes retry attempts while preserving legacy attempt one', () => {
+  assert.equal(toolEvidenceIdentity({ callId: 'same-call' }), toolEvidenceIdentity({ callId: 'same-call', attempt: 1 }))
+  assert.notEqual(toolEvidenceIdentity({ callId: 'same-call', attempt: 1 }), toolEvidenceIdentity({ callId: 'same-call', attempt: 2 }))
+  assert.throws(() => toolEvidenceIdentity({ callId: 'same-call', attempt: 0 }), /invalid_tool_attempt/)
+})
+
+test('task-reconciliation telemetry is identity-bound, oracle-free and status-complete', () => {
+  const identity = { executionId: 'execution-1', sessionId: 'session-1' }
+  const good = { type: 'task_reconciliation_completed', ...identity, callId: 'call-1', turn: 0, status: 'succeeded', mode: 'enforce', reason: null, oracleConsulted: false }
+  assert.equal(validateTaskReconciliationEvents([good], identity), 1)
+  assert.equal(validateTaskReconciliationEvents([good, { ...good, attempt: 2, turn: 1 }], identity), 2)
+  assert.throws(() => validateTaskReconciliationEvents([good, { ...good, attempt: 2 }, { ...good, attempt: 2 }], identity), /task_reconciliation_event_invalid/)
+  for (const mutate of [
+    event => { event.oracleConsulted = true },
+    event => { event.executionId = 'foreign' },
+    event => { event.status = 'succeeded'; event.mode = null },
+    event => { event.status = 'failed_before_execution'; event.reason = null },
+  ]) {
+    const value = structuredClone(good); mutate(value)
+    assert.throws(() => validateTaskReconciliationEvents([value], identity), /task_reconciliation_event/)
+  }
+})
+
+test('successful task-reconciliation telemetry binds to its real before/after Hook receipts', () => {
+  const action = { id: 'reconcile-call', name: 'capybara_task_reconcile', canonicalName: 'CapybaraTaskContract__review', effect: 'read', resourceKey: 'CapybaraTaskContract', arguments: { op: 'reconcile' } }
+  const reconciliationEvent = { type: 'task_reconciliation_completed', executionId: 'execution-1', sessionId: 'session-1', callId: action.id, turn: 0, status: 'succeeded', mode: 'enforce', reason: null, oracleConsulted: false }
+  const events = [{ type: 'model_request' }, { type: 'live_hook_completed' }, { type: 'live_hook_completed' }, { type: 'tool_call_started' }, { type: 'tool_call_completed' }, reconciliationEvent]
+  const bound = [
+    { index: 2, receipt: { input: { checkpoint: 'before_tool', action }, decision: { action: 'allow' } } },
+    { index: 4, receipt: { input: { checkpoint: 'after_tool', action, outcome: { status: 'succeeded', executed: true, complete: true, result: { taskReconciliation: { mode: 'enforce' } } } }, decision: { action: 'allow' } } },
+  ]
+  assert.equal(validateTaskReconciliationBindings(events, bound), 1)
+  for (const mutate of [
+    event => { event.callId = 'foreign-call' },
+    event => { event.mode = 'advisory' },
+    (_event, changedBound) => { changedBound[0].receipt.input.action.arguments = { op: 'other' } },
+  ]) {
+    const changed = structuredClone(events); const changedBound = structuredClone(bound); mutate(changed.at(-1), changedBound)
+    assert.throws(() => validateTaskReconciliationBindings(changed, changedBound), /task_reconciliation_(before_tool|after_tool|event_call_binding)/)
+  }
+})
+
 test('runtime cannot weaken a passed safety hook decision even after rebinding Python events and SHA', () => {
   const value = runtimeFixture()
   try {
@@ -84,8 +160,8 @@ test('runtime cannot weaken a passed safety hook decision even after rebinding P
   } finally { cleanup(value.root) }
 })
 
-test('runtime after-tool result hash, canonical identity and permission cannot disagree with execution', () => {
-  for (const mutate of [receipt => { receipt.input.outcome.resultHash = '0'.repeat(64) }, receipt => { receipt.input.action.canonicalName = 'foreign.tool' }, receipt => { receipt.decision.action = 'block' }]) {
+test('runtime after-tool result hash, completeness, canonical identity and permission cannot disagree with execution', () => {
+  for (const mutate of [receipt => { receipt.input.outcome.resultHash = '0'.repeat(64) }, receipt => { delete receipt.input.outcome.complete }, receipt => { receipt.input.action.canonicalName = 'foreign.tool' }, receipt => { receipt.decision.action = 'block' }]) {
     const value = runtimeFixture()
     try {
       mutateReceipt(value, 2, receipt => {

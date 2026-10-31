@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "gaia2-retrieval",
+  "name": "GAIA2 Retrieval Working Set",
+  "description": "Opt-in Contacts retrieval review and evidence-bound context projection; no hidden model or environment access.",
+  "version": "0.1.0",
+  "resources": { "variables": "variables.json", "harnesses": ["harnesses/manifest.json"], "hooks": ["hooks"] }
+}

@@ -70,6 +70,10 @@ export class Pass5Orchestrator {
       if (verification && Object.hasOwn(verification, 'referenceAnswer')) throw new Error('sealed evaluator violation: verifier result leaked referenceAnswer')
       const finalPassed = verification.status === 'evaluated' ? verification.passed === true : execution.passed === true
       const runtime = execution.runtime ?? {}
+      const failureClass = verification.failureClass ?? execution.failureClass
+      const reliability = verification.reliability ?? execution.reliability
+      const modelEvaluable = verification.modelEvaluable ?? execution.modelEvaluable
+      const scoreReliability = verification.scoreReliability ?? execution.scoreReliability
       outcomes.push({
         attemptIndex,
         seed,
@@ -78,6 +82,10 @@ export class Pass5Orchestrator {
         finalStateHash: runtime.stateHash ?? null,
         passed: finalPassed,
         infrastructureError: execution.infrastructureError === true,
+        ...(failureClass === undefined ? {} : { failureClass }),
+        ...(reliability === undefined ? {} : { reliability }),
+        ...(modelEvaluable === undefined ? {} : { modelEvaluable }),
+        ...(scoreReliability === undefined ? {} : { scoreReliability }),
         failureReason: execution.failureReason ?? null,
         correctionCount: corrections.length,
         corrections,
@@ -92,29 +100,44 @@ export class Pass5Orchestrator {
 
   aggregate({ scenarioId, capability, outcomes }) {
     if (!Array.isArray(outcomes) || outcomes.length !== 5) throw new Error('pass@5 aggregation requires five outcomes')
-    const valid = outcomes.filter((outcome) => !outcome.infrastructureError)
-    const passed = outcomes.filter((outcome) => outcome.passed)
+    // Keep the legacy orchestrator answer-blind, but use the same reliability
+    // partition as capability_evaluator: technical and judge-protocol
+    // attempts are invalid, not model failures.  A passed flag alone is never
+    // sufficient evidence for pass@5.
+    const technical = outcomes.filter((outcome) => isTechnicalOutcome(outcome))
+    const judgeProtocol = outcomes.filter((outcome) => isJudgeProtocolOutcome(outcome))
+    const valid = outcomes.filter((outcome) => isReliableOutcome(outcome))
+    const passed = valid.filter((outcome) => outcome.passed === true)
+    const indeterminate = outcomes.length - valid.length - technical.length - judgeProtocol.length
+    const complete = valid.length === 5
     const correctionCount = outcomes.reduce((sum, outcome) => sum + outcome.correctionCount, 0)
     const noiseInjectedCount = outcomes.reduce((sum, outcome) => sum + Number(outcome.noise?.injected ?? 0), 0)
-    const noiseRecoveredCount = outcomes.reduce((sum, outcome) => sum + (outcome.correctionCount > 0 && outcome.passed ? 1 : 0), 0)
+    const noiseRecoveredCount = valid.reduce((sum, outcome) => sum + (outcome.correctionCount > 0 && outcome.passed === true ? 1 : 0), 0)
     const noiseBlockedCount = outcomes.reduce((sum, outcome) => sum + Number(outcome.noise?.conflicting ?? 0) + Number(outcome.noise?.truncated ?? 0), 0)
     return {
       schemaVersion: 'gaia2-pass5-v1',
       scenarioId,
       capability,
       attempts: outcomes,
-      taskPassAt5: passed.length > 0,
-      passAt5: passed.length > 0 ? 1 : 0,
-      attemptPassRate: passed.length / outcomes.length,
-      taskPassAll5: passed.length === outcomes.length,
-      unresolvedRate: outcomes.filter((outcome) => !outcome.passed && !outcome.infrastructureError).length / outcomes.length,
-      infrastructureErrorRate: outcomes.filter((outcome) => outcome.infrastructureError).length / outcomes.length,
+      taskPassAt5: complete && passed.length > 0,
+      passAt5: complete ? (passed.length > 0 ? 1 : 0) : null,
+      observedPassAt5: passed.length > 0 ? 1 : 0,
+      passAt5Bounds: { lower: complete && passed.length > 0 ? 1 : 0, upper: passed.length > 0 ? 1 : (complete ? 0 : 1) },
+      attemptPassRate: valid.length > 0 ? passed.length / valid.length : null,
+      taskPassAll5: complete && passed.length === 5,
+      unresolvedRate: valid.length > 0 ? (valid.length - passed.length) / outcomes.length : 0,
+      infrastructureErrorRate: technical.length / outcomes.length,
+      technicalAttemptCount: technical.length,
+      judgeProtocolAttemptCount: judgeProtocol.length,
+      indeterminateAttemptCount: indeterminate,
+      complete,
+      status: complete ? (passed.length > 0 ? 'passed' : 'failed') : 'incomplete',
       correctionSuccessRate: correctionCount ? noiseRecoveredCount / correctionCount : 0,
       noiseInjectedCount,
       noiseRecoveredCount,
       noiseBlockedCount,
       validAttemptCount: valid.length,
-      aggregation: 'task_pass_at_5=any(attempt_pass_i); correction does not add attempts',
+      aggregation: 'task_pass_at_5=any(reliable_model_evaluable_attempt_pass_i); technical_and_judge_protocol_attempts_are_invalid',
     }
   }
 
@@ -137,6 +160,29 @@ export class Pass5Orchestrator {
       infrastructureError: execution.infrastructureError === true,
     }
   }
+}
+
+function isTechnicalOutcome(outcome) {
+  return outcome?.infrastructureError === true
+    || outcome?.technicalError !== undefined && outcome.technicalError !== null
+    || outcome?.failureClass === 'technical'
+    || outcome?.reliability === 'technical'
+    || outcome?.scoreReliability === 'technical'
+}
+
+function isJudgeProtocolOutcome(outcome) {
+  return !isTechnicalOutcome(outcome)
+    && (outcome?.judgeProtocolAffected === true
+      || outcome?.failureClass === 'judge_protocol'
+      || outcome?.reliability === 'judge_protocol'
+      || ['protocol_affected', 'unknown'].includes(outcome?.scoreReliability))
+}
+
+function isReliableOutcome(outcome) {
+  return !isTechnicalOutcome(outcome) && !isJudgeProtocolOutcome(outcome)
+    && outcome?.reliability !== 'indeterminate'
+    && outcome?.failureClass !== 'indeterminate'
+    && outcome?.modelEvaluable !== false
 }
 
 function hash(value) {

@@ -23,8 +23,15 @@ function text(value) {
 }
 
 /**
- * Append-only observation ledger for information noise.
- * It never decides task truth; it only records provenance and uncertainty.
+ * Append-only observation ledger for the legacy/pass@5 runtime.
+ *
+ * This compatibility ledger intentionally permits an observation whose
+ * caller omitted `complete`; it classifies explicit truncation/preview/empty
+ * data as incomplete. The official GAIA2 Host/Hook path has a stricter
+ * contract: native success counts and evidence require `complete === true`.
+ * Keep those protocols separate rather than silently changing this legacy
+ * API's meaning. This class never decides task truth; it only records
+ * provenance and uncertainty.
  */
 export class ObservationLedger {
   #records = []

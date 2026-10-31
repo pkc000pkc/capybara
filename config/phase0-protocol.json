@@ -25,8 +25,8 @@
     "executionBinding": "phase3_live_plugin_host_required"
   },
   "models": {
-    "actor": {"model": "gpt-6-luna", "provider": "local", "protocol": "chat-completions"},
-    "judge": {"model": "gpt-6-luna", "provider": "local", "protocol": "chat-completions"},
+    "actor": {"model": "gpt-6.1-terra", "provider": "local", "protocol": "chat-completions"},
+    "judge": {"model": "gpt-6.1-terra", "provider": "local", "protocol": "chat-completions"},
     "configurationSource": "gaia2-model-config.json",
     "endpointReference": "base_url",
     "credentialReference": "apiKeySource",

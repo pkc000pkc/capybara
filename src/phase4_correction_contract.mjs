@@ -117,7 +117,8 @@ export function deriveCorrectionEvidence(input) {
     if (action.effect === 'read' && ['failed', 'failed_before_execution'].includes(outcome.status)) observations.get('read_failed').push(call)
     if (action.effect !== 'write' || !['succeeded', 'unknown'].includes(outcome.status) || typeof action.resourceKey !== 'string' || !action.resourceKey) continue
     // Compare resources privately, never forward their identifiers or contents.
-    const readback = after.slice(index + 1).some(next => next.input.action.effect === 'read' && next.input.action.authoritativeRead === true && next.input.action.resourceKey === action.resourceKey && next.input.outcome.status === 'succeeded')
+    const readback = after.slice(index + 1).some(next => next.input.action.effect === 'read' && next.input.action.authoritativeRead === true && next.input.action.resourceKey === action.resourceKey
+      && next.input.outcome.status === 'succeeded' && next.input.outcome.executed === true && next.input.outcome.complete === true)
     if (!readback) observations.get(outcome.status === 'unknown' ? 'unknown_write_requires_readback' : 'write_unverified').push(call)
   }
   const defects = [...observations].filter(([, records]) => records.length).map(([defectCode, records]) => ({ defectCode, procedureIds: [...methods[defectCode].procedureIds], verificationIds: [...methods[defectCode].verificationIds], count: records.length, evidenceHash: digest({ sourceHash: verification.sourceHash, defectCode, records }) }))

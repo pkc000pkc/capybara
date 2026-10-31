@@ -27,6 +27,118 @@ const indexes = observations => ({
 const summaries = state => ({ conflicts: state.conflict_ids, quarantined: [...state.unverified_ids, ...state.stale_ids, ...state.conflict_ids] })
 const sameQuery = (item, action) => text(action.mutationKey) && item.queryHash === action.mutationKey
   && item.canonicalName === action.canonicalName && item.resourceKey === action.resourceKey
+// Local runtime controls have their own lifecycle receipts and intentionally
+// do not create native-observation classifications. Keep the noise ledger
+// unchanged for these controls instead of requiring a classifier artifact.
+const CONTROL_ACTIONS = new Set(['CapybaraEvidence__read', 'CapybaraRetrieval__step', 'CapybaraTemporal__watch', 'CapybaraTaskContract__commit', 'CapybaraTaskContract__review'])
+
+// The production noise hook is state-v2.  Its before_model/before_tool
+// checkpoints are observation/safety checkpoints owned by other hooks; the
+// noise hook itself records a classification only after a native result.  The
+// verifier must therefore authenticate the v2 state transition and the
+// artifacts that actually belong to the checkpoint, rather than requiring
+// every checkpoint to emit the legacy v1 noise titles.
+const v2Statuses = new Set([...statuses, 'verified_absent_after_delete', 'confirmed_mutation'])
+const v2Terminal = item => ['verified_by_fresh_read', 'superseded_by_fresh_read', 'verified_absent_after_delete', 'confirmed_mutation'].includes(item?.status)
+const v2Index = observations => ({
+  provenance: observations.map(item => item.provenance),
+  stale_ids: observations.filter(item => item.status === 'stale').map(item => item.observationId),
+  unverified_ids: observations.filter(item => ['incomplete', 'failed'].includes(item.status)).map(item => item.observationId),
+  conflict_ids: observations.filter(item => item.status === 'conflicting').map(item => item.observationId),
+  visibility_ids: observations.filter(item => !v2Terminal(item) && item.viewComplete === false && item.presentation !== 'retrieval_filtered').map(item => item.observationId),
+})
+const v2Summary = observation => ({ conflicts: observation.conflict_ids, quarantined: [...observation.unverified_ids, ...observation.stale_ids, ...observation.conflict_ids] })
+
+function v2TransitionErrors({ previousValues, input, variables, artifacts, decision } = {}) {
+  const previous = values(previousValues), current = values(variables), errors = [], fail = code => { if (!errors.includes(code)) errors.push(code) }
+  const previousObservation = previous?.gaia2_observation_state, observation = current?.gaia2_observation_state
+  const noise = current?.gaia2_noise_state, previousNoise = previous?.gaia2_noise_state
+  const progress = current?.gaia2_progress_state, previousProgress = previous?.gaia2_progress_state
+  if (!object(previous) || !object(current) || !object(input) || !object(observation) || observation.schemaVersion !== 'gaia2-observation-state-v2'
+      || !object(previousObservation) || previousObservation.schemaVersion !== 'gaia2-observation-state-v2'
+      || !Array.isArray(observation.observations) || !Array.isArray(previousObservation.observations)
+      || !object(noise) || noise.semanticVersion !== 2 || !Array.isArray(noise.decisions)
+      || !object(progress) || !object(previousProgress) || !Array.isArray(artifacts)) return ['noise_state_invalid']
+  const rows = observation.observations, priorRows = previousObservation.observations, byId = new Map()
+  for (const item of rows) {
+    if (!object(item) || !text(item.observationId) || !text(item.actionId) || item.observationId !== `obs-${item.actionId}`
+      || !v2Statuses.has(item.status) || !text(item.canonicalName) || !text(item.resourceKey)
+      || (item.queryHash !== null && !text(item.queryHash)) || (item.resultHash !== null && !text(item.resultHash))
+      || !text(item.outcomeStatus) || typeof item.complete !== 'boolean' || typeof item.viewComplete !== 'boolean'
+      || typeof item.authoritativeRead !== 'boolean' || !finite(item.observedAt) || !object(item.provenance)
+      || item.provenance.actionId !== item.actionId || item.provenance.source !== item.canonicalName
+      || item.provenance.observedAt !== item.observedAt || byId.has(item.observationId)) { fail('noise_observation_identity_invalid'); continue }
+    if (item.observedAt > Number(input.clock?.now)) fail('noise_clock_invalid')
+    if (item.presentation !== undefined && !text(item.presentation)) fail('noise_presentation_invalid')
+    if (item.freshness !== undefined && !text(item.freshness)) fail('noise_freshness_invalid')
+    byId.set(item.observationId, item)
+  }
+  const derived = v2Index(rows)
+  for (const key of ['provenance', 'stale_ids', 'unverified_ids', 'conflict_ids', 'visibility_ids']) if (!same(observation[key], derived[key])) fail('noise_observation_index_mismatch')
+  for (const key of ['conflicts', 'quarantined']) if (!same(noise[key], v2Summary(derived)[key])) fail('noise_observation_index_mismatch')
+  for (const prior of priorRows) {
+    const next = byId.get(prior.observationId)
+    if (!next || !['actionId', 'resourceKey', 'canonicalName', 'queryHash', 'resultHash', 'outcomeStatus', 'complete', 'authoritativeRead'].every(key => same(next[key], prior[key]))) fail('noise_observation_identity_invalid')
+  }
+  const unknown = list(previous.gaia2_write_state?.unknown)
+  for (const prior of unknown) {
+    const next = list(current.gaia2_write_state?.unknown).find(item => item.actionId === prior.actionId)
+    const keys = Object.keys(prior).filter(key => !['readBackObserved', 'readBackActionId', 'readBackHash'].includes(key))
+    if (!next || keys.some(key => !same(next[key], prior[key]))) fail('noise_unknown_write_erased')
+  }
+  for (const item of noise.decisions) {
+    if (!object(item) || !text(item.actionId) || !text(item.observationId) || item.observationId !== `obs-${item.actionId}`) fail('noise_decision_identity_invalid')
+  }
+  const checkpoint = input.checkpoint
+  if (!['after_tool', 'before_model', 'before_tool', 'attempt_end'].includes(checkpoint)) return [...errors, 'noise_checkpoint_invalid']
+  if (checkpoint === 'attempt_end') {
+    if (!same(observation, previousObservation) || !same(noise, previousNoise) || !same(progress, previousProgress)) fail('noise_transition_mismatch')
+    return errors
+  }
+  if (!finite(input.clock?.now)) return [...errors, 'noise_clock_invalid']
+  if (checkpoint === 'after_tool') {
+    const action = input.action, outcome = input.outcome
+    if (!object(action) || !text(action.id) || !text(action.canonicalName) || !object(outcome) || !text(outcome.status)) return [...errors, 'noise_outcome_binding_mismatch']
+    if (CONTROL_ACTIONS.has(action.canonicalName)) {
+      if (!same(current.gaia2_observation_state, previous.gaia2_observation_state)
+        || !same(current.gaia2_noise_state, previous.gaia2_noise_state)
+        || !same(current.gaia2_progress_state, previous.gaia2_progress_state)) fail('noise_control_transition_mismatch')
+      return errors
+    }
+    const source = list(input.messages).filter(message => message?.role === 'tool' && object(message.observation) && message.observation.actionId === action.id).map(message => message.observation)
+    if (source.length > 1 && source.some(view => !same(view, source[0]))) fail('noise_view_conflict')
+    const view = source[0], observedAt = view ? view.observedAt : input.clock.now
+    if (!finite(observedAt) || observedAt > input.clock.now) fail('noise_clock_invalid')
+    if (view && (view.resourceKey !== action.resourceKey || view.canonicalName !== action.canonicalName || view.queryHash !== (text(action.mutationKey) ? action.mutationKey : null)
+      || view.resultHash !== (outcome.resultHash ?? null) || view.complete !== (outcome.complete === true) || typeof view.viewComplete !== 'boolean')) fail('noise_outcome_binding_mismatch')
+    const row = [...rows].reverse().find(item => item.actionId === action.id)
+    if (!row || row.resourceKey !== action.resourceKey || row.canonicalName !== action.canonicalName || row.queryHash !== (text(action.mutationKey) ? action.mutationKey : null)
+      || row.resultHash !== (outcome.resultHash ?? null) || row.outcomeStatus !== outcome.status || row.complete !== (outcome.complete === true)
+      || row.viewComplete !== (view ? view.viewComplete : outcome.viewComplete !== false) || row.observedAt !== observedAt) fail('noise_outcome_binding_mismatch')
+    const classification = artifacts.filter(item => item?.title === 'GAIA2 observable evidence classification')
+    if (classification.length !== 1 || !same(classification[0].value, row)) fail('noise_artifact_mismatch')
+    const progressArtifact = artifacts.filter(item => item?.title === 'GAIA2 finite progress decision')
+    if (progressArtifact.length !== 1 || progressArtifact[0].value?.actionId !== action.id
+      || progressArtifact[0].value?.consecutiveNoProgress !== progress.consecutive_no_progress
+      || progressArtifact[0].value?.recommendation !== progress.recommendation) fail('noise_artifact_mismatch')
+  } else {
+    // Other runtime hooks may refresh visibility/freshness or reconcile an
+    // event at these checkpoints.  The v2 verifier has already checked that
+    // prior observation identities/outcomes cannot be erased and that all
+    // derived indexes are exact; do not require the noise hook to own those
+    // cross-hook state updates.
+    if (checkpoint === 'before_tool') {
+      const action = input.action
+      if (!object(action) || !text(action.id) || !text(action.canonicalName)) return [...errors, 'noise_action_invalid']
+      // v2 noise state is advisory.  Write safety, unknown-write recovery and
+      // A2A/finish barriers are independently owned by their dedicated hooks
+      // and receipts; this verifier must not re-impose the retired v1 policy
+      // and reject a valid cross-hook decision merely because an observation
+      // is stale or incomplete.
+    }
+  }
+  return errors
+}
 
 function afterTool(previous, input, fail) {
   const { action, outcome, clock } = input, existing = previous.gaia2_observation_state.observations
@@ -39,11 +151,11 @@ function afterTool(previous, input, fail) {
   const sourceView = sourceViews[0]
   if (sourceViews.some(view => !same(view, sourceView))) fail('noise_view_conflict')
   if (sourceView && (sourceView.resourceKey !== action.resourceKey || sourceView.canonicalName !== action.canonicalName
-    || sourceView.queryHash !== queryHash || sourceView.resultHash !== outcome.resultHash || sourceView.complete !== (outcome.complete !== false)
+    || sourceView.queryHash !== queryHash || sourceView.resultHash !== outcome.resultHash || sourceView.complete !== (outcome.complete === true)
     || typeof sourceView.viewComplete !== 'boolean' || !finite(sourceView.observedAt) || sourceView.observedAt > clock.now)) fail('noise_outcome_binding_mismatch')
   const observedAt = sourceView ? sourceView.observedAt : clock.now
   const viewComplete = sourceView ? sourceView.viewComplete : outcome.viewComplete !== false
-  const full = outcome.status === 'succeeded' && outcome.complete !== false && viewComplete
+  const full = outcome.status === 'succeeded' && outcome.complete === true && viewComplete
   const fresh = action.effect === 'read' && action.authoritativeRead === true && full && queryHash !== null
   const duplicateOf = full && group.find(item => item.outcomeStatus === 'succeeded' && item.complete === true && item.resultHash === outcome.resultHash)
   const duplicateAction = existing.some(item => item.actionId === action.id)
@@ -63,7 +175,7 @@ function afterTool(previous, input, fail) {
   const record = { observationId: `obs-${action.id}`, actionId: action.id, resourceKey: action.resourceKey,
     canonicalName: action.canonicalName, queryHash, resultHash: outcome.resultHash || null,
     fingerprint: outcome.resultHash || action.id, status, outcomeStatus: outcome.status,
-    complete: outcome.complete !== false, viewComplete,
+    complete: outcome.complete === true, viewComplete,
     observedAt, authoritativeRead: action.authoritativeRead === true && action.effect === 'read',
     provenance: { actionId: action.id, source: action.canonicalName, observedAt },
     ...(sourceView && !viewComplete ? { viewIncompleteReason: sourceView.viewIncompleteReason } : {}),
@@ -159,6 +271,7 @@ export function informationNoiseTransitionErrors({ previousValues, input, variab
   if (version === undefined || version === 1) return previous?.gaia2_noise_state?.semanticVersion === 2 ? ['noise_contract_version_invalid'] : []
   const errors = [], fail = code => { if (!errors.includes(code)) errors.push(code) }
   if (version !== 2) return ['noise_contract_version_invalid']
+  if (current?.gaia2_observation_state?.schemaVersion === 'gaia2-observation-state-v2') return v2TransitionErrors({ previousValues, input, variables, artifacts, decision })
   try {
     if (!object(previous) || !object(current) || !object(input) || !object(previous.gaia2_observation_state)
       || !Array.isArray(previous.gaia2_observation_state.observations) || !object(current.gaia2_observation_state)
@@ -200,6 +313,12 @@ export function informationNoiseTransitionErrors({ previousValues, input, variab
     if (checkpoint !== 'before_model' && (!object(input.action) || !text(input.action.id) || !text(input.action.canonicalName))) return [...errors, 'noise_action_invalid']
     if (checkpoint === 'after_tool' && (!object(input.outcome) || !text(input.outcome.status))) return [...errors, 'noise_outcome_binding_mismatch']
     let expected
+    if (checkpoint === 'after_tool' && CONTROL_ACTIONS.has(input.action?.canonicalName)) {
+      if (!same(current.gaia2_observation_state, previous.gaia2_observation_state)
+        || !same(current.gaia2_noise_state, previous.gaia2_noise_state)
+        || !same(current.gaia2_progress_state, previous.gaia2_progress_state)) fail('noise_control_transition_mismatch')
+      return errors
+    }
     if (checkpoint === 'after_tool') expected = afterTool(previous, input, fail)
     else {
       const refreshed = refresh(previous, input, fail)

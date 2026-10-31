@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "package": "gaia2-retrieval",
+  "harnesses": [{ "name": "gaia2-retrieval-contract", "description": "Explicit reviewed pagination without deleting authoritative evidence.", "type": "persistent", "entry": "retrieval-contract.j2", "priority": 215, "activation": {}, "inputs": ["builtin.variables.gaia2_retrieval_scope", "builtin.variables.gaia2_retrieval_context"], "requiredTools": [] }]
+}

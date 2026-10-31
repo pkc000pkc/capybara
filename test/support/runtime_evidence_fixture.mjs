@@ -38,6 +38,12 @@ export function runtimeFixture({ root = mkdtempSync(join(tmpdir(), 'capybara-run
   const action = { id: 'call-1', name: 'tool_read', canonicalName: 'app.read', effect: 'read', arguments: {}, authoritativeRead: true }
   const events = [], invocations = []
   const emit = (type, fields = {}) => events.push({ type, executionId: task.executionId, sessionId, ...fields })
+  const actorSchemaSha256 = hash('controlled actor schema')
+  emit('official_tool_inventory', { toolCount: 1, toolDefinitionsUtf8Bytes: 1, schemaSha256: actorSchemaSha256,
+    actorToolCount: 2, actorSchemaSha256, actorTools: [{ canonicalName: action.canonicalName, publicName: action.name },
+      { canonicalName: 'CapybaraTaskContract__review', publicName: 'capybara_task_reconcile' }], taskReconciliationEnabled: true,
+    taskReconciliationTool: { canonicalName: 'CapybaraTaskContract__review', publicName: 'capybara_task_reconcile' },
+    tools: [{ canonicalName: action?.canonicalName ?? 'app.read', publicName: action?.name ?? 'tool_read' }] })
   function invoke(checkpoint, fields = {}) {
     const hookReceipts = initialization.runtimeHooks.filter(hook => hook.checkpoint === checkpoint).map(hook => ({ hookId: hook.id, pluginId: 'runtime', checkpoint, sourceSha256: hook.sourceSha256, matched: true, status: 'passed', durationMs: 1, attempts: 1, patchCount: 0, ...(checkpoint === 'before_tool' ? { decision: { action: 'allow', reason: 'Safe' } } : {}) }))
     const receipt = { schemaVersion: 'capybara-runtime-plugin-invocation-v1', executionId: task.executionId, sessionId, scenarioId: task.scenarioId, sequence: invocations.length + 2, input: { checkpoint, loop: { iteration: 0, ...(checkpoint === 'attempt_end' ? { terminal: true } : {}) }, ...fields }, beforeVariablesHash: rawHash(values), decision: { action: 'allow', reason: 'Safe' }, context: 'Visible context', contextHash: hash('Visible context'), hookReceipts, variablesHash: rawHash(values), revision: 1, variables: structuredClone(values), artifacts: [] }
@@ -46,11 +52,11 @@ export function runtimeFixture({ root = mkdtempSync(join(tmpdir(), 'capybara-run
   }
   invoke('before_model')
   emit('dynamic_context_injected', { turn: 0, contextHash: hash('Visible context'), injectedContextHash: hash('Visible context'), actorInputHash: hash('controlled actor input'), hookRevision: 1 })
-  emit('model_request', { turn: 0 })
+  emit('model_request', { turn: 0, toolCount: 2, actorToolCount: 2, actorSchemaSha256 })
   invoke('before_tool', { action })
   emit('tool_call_started', { turn: 0, callId: action.id, function: action.name, canonicalName: action.canonicalName, effect: action.effect })
   emit('tool_call_completed', { turn: 0, callId: action.id, function: action.name, canonicalName: action.canonicalName, status: 'succeeded', resultHash: hash('controlled tool result') })
-  invoke('after_tool', { action, outcome: { status: 'succeeded', executed: true, resultHash: hash('controlled tool result') } })
+  invoke('after_tool', { action, outcome: { status: 'succeeded', executed: true, complete: true, resultHash: hash('controlled tool result') } })
   emit('attempt_execution_ended')
   invoke('attempt_end')
   emit('official_validation_completed', { hasException: false, validationSuccess: true })

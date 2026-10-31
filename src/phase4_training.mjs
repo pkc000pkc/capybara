@@ -91,7 +91,7 @@ export async function runTrainingProbe({ root, parent, trainingManifest, trainin
   const inputPath = join(outputDir, 'sanitized-training-input.json'); writeJson(inputPath, input, { immutable: true })
   const specPath = join(outputDir, 'host-spec.json'), resultPath = join(outputDir, 'host-result.json')
   const options = { projectDir: root, workspaceDir: outputDir, plugins: capabilities.plugins.map(({ id, snapshotRoot, files }) => ({ id, snapshotRoot, files })),
-    executionId, sessionId, scenarioId: parent.task.scenarioId, contract: CORRECTION_CONTRACT, providerCleanupTimeoutMs: 30000 }
+    executionId, sessionId, scenarioId: parent.task.scenarioId, contract: CORRECTION_CONTRACT, providerCleanupTimeoutMs: 30000, hookTimeoutMs: 900000 }
   writeJson(specPath, { backendRoot: protocol.runtime.backendRoot, projectDir: root, workspaceDir: outputDir,
     models: trainingManifest.models, settings, resultPath, options, invocation: { checkpoint: 'after_evaluation', training: input } }, { immutable: true })
   const filtered = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/(?:API_KEY|ACCESS_TOKEN|AUTHORIZATION|HF_TOKEN|HUGGINGFACE_TOKEN|GAIA2_HOOK_TOKEN)/i.test(key)))

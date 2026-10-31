@@ -10,7 +10,7 @@ const python = process.env.GAIA2_PYTHON || 'C:/Users/pkc00/.cache/codex-runtimes
 
 test('model-only retries, cooldown hints, safe terminal failures and actual ARE alias integration (Python fakes)', () => {
   const result = spawnSync(python, ['-c', String.raw`
-import sys, json, unittest, types
+import sys, json, unittest, types, re
 sys.path.insert(0, 'scripts')
 from gaia2_model_retry import ModelRetryPolicy, ModelRequestFailure, wrap_completion, retry_delay_hint, classify_model_error, install_model_retries
 
@@ -76,6 +76,12 @@ class Tests(unittest.TestCase):
         self.assertEqual(caught.exception.category, 'rate_limit')
         self.assertIsNone(caught.exception.metadata['nextRetryAt'])
         self.assertEqual(waits, [])
+
+    def test_large_provider_payload_gets_bounded_request_timeout(self):
+        call, waits, events, calls = self.setup_wrapper(['ok'])
+        tools = [{'type': 'function', 'function': {'name': 'tool', 'description': 'x' * 50000, 'parameters': {}}}]
+        self.assertEqual(call(messages=[{'role': 'user', 'content': 'x' * 90000}], tools=tools), 'ok')
+        self.assertEqual(calls[0]['timeout'], 180.0)
 
     def test_fatal_config_errors_never_retry(self):
         for error in [HttpFailure(400), HttpFailure(401), HttpFailure(403), HttpFailure(404), HttpFailure(422), HttpFailure(429, body={'error':{'code':'insufficient_quota'}}), ValueError('SECRET_KEY bad provider')]:
@@ -149,7 +155,7 @@ class Tests(unittest.TestCase):
 unittest.main(verbosity=2)
 `], { cwd: root, encoding: 'utf8', timeout: 30_000 })
   assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message)
-  assert.match(result.stderr, /Ran 9 tests/)
+  assert.match(result.stderr, /Ran 10 tests/)
 })
 
 test('execution classifier does not treat infra exceptions or score alone as business failure', () => {
@@ -200,7 +206,7 @@ else:
 
 test('model success metering admits only integer token counters and never infers absent usage', () => {
   const result = spawnSync(python, ['-c', String.raw`
-import sys
+import sys, re
 from types import SimpleNamespace
 sys.path.insert(0, 'scripts')
 from gaia2_model_retry import wrap_completion, ModelRetryPolicy
@@ -214,9 +220,79 @@ for value, expected in [
     call=wrap_completion(lambda **kwargs:value,'actor',lambda kind,**kw:events.append({'type':kind,**kw}),policy=ModelRetryPolicy(max_attempts=1))
     assert call() is value
     event=events[-1]
+    assert re.fullmatch(r'[0-9a-f]{64}', event['outputHash'])
     assert event['usageAvailable'] == bool(expected)
     assert event.get('usage') == expected
     assert 'SECRET' not in str(event)
+`], { cwd: root, encoding: 'utf8', timeout: 30_000 })
+  assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message)
+})
+
+test('judge provenance observer records only hashes and detects an evidenced marker transform', () => {
+  const result = spawnSync(python, ['-c', String.raw`
+import sys, types, json
+from types import SimpleNamespace
+sys.path.insert(0, 'scripts')
+
+events = []
+response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='[[True]]'))])
+def completion(**kwargs): return response
+
+litellm = types.ModuleType('litellm'); litellm.completion = completion
+sys.modules['litellm'] = litellm
+
+class LLMFunction:
+    def __init__(self, engine): self.engine = engine
+    def __call__(self, args):
+        value = self.engine()
+        return value.choices[0].message.content.replace('False', 'false').replace('True', 'true')
+class LLMChecker:
+    def __init__(self, engine):
+        self.judge = LLMFunction(engine); self.success_str = '[[True]]'; self.failure_str = '[[False]]'
+    def __call__(self, args): return self.success_str in self.judge(args)
+
+llm_utils = types.ModuleType('are.simulation.validation.utils.llm_utils'); llm_utils.LLMFunction = LLMFunction; llm_utils.LLMChecker = LLMChecker
+engine = types.ModuleType('are.simulation.agents.llm.litellm.litellm_engine'); engine.completion = completion
+for name, module in {
+    'are': types.ModuleType('are'), 'are.simulation': types.ModuleType('are.simulation'),
+    'are.simulation.validation': types.ModuleType('are.simulation.validation'),
+    'are.simulation.validation.utils': types.ModuleType('are.simulation.validation.utils'),
+    'are.simulation.agents': types.ModuleType('are.simulation.agents'),
+    'are.simulation.agents.llm': types.ModuleType('are.simulation.agents.llm'),
+    'are.simulation.agents.llm.litellm': types.ModuleType('are.simulation.agents.llm.litellm'),
+}.items(): sys.modules[name] = module
+sys.modules['are.simulation.validation.utils.llm_utils'] = llm_utils
+sys.modules['are.simulation.agents.llm.litellm.litellm_engine'] = engine
+
+from gaia2_model_retry import install_model_retries
+install_model_retries(lambda kind, **payload: events.append({'type': kind, **payload}))
+assert LLMChecker(engine.completion)({}) is True
+observed = [event for event in events if event['type'] == 'judge_response_observed']
+assert len(observed) == 1
+event = observed[0]
+assert event['markerConflict'] is True and event['parseStatus'] == 'unparsed'
+assert len(event['rawResponseHash']) == len(event['checkerResponseHash']) == 64
+assert '[[True]]' not in json.dumps(event) and '[[true]]' not in json.dumps(event)
+normalized = [event for event in events if event['type'] == 'judge_protocol_normalized']
+assert len(normalized) == 1 and normalized[0]['caseFoldBooleanMarkers'] is True
+assert normalized[0]['rawResponseHash'] == event['checkerResponseHash']
+`], { cwd: root, encoding: 'utf8', timeout: 30_000 })
+  assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message)
+})
+
+test('Boolean protocol normalization accepts mixed case but refuses ambiguous or non-Boolean markers', () => {
+  const result = spawnSync(python, ['-c', String.raw`
+import sys
+sys.path.insert(0, 'scripts')
+from gaia2_model_retry import _normalize_boolean_markers
+
+success, failure = '[[True]]', '[[False]]'
+assert _normalize_boolean_markers('[[true]]', success, failure) == (success, True)
+assert _normalize_boolean_markers('prefix [[tRuE]] suffix', success, failure) == ('prefix [[True]] suffix', True)
+assert _normalize_boolean_markers('[[false]]', success, failure) == (failure, True)
+assert _normalize_boolean_markers('prefix [[FaLsE]] suffix', success, failure) == ('prefix [[False]] suffix', True)
+assert _normalize_boolean_markers('[[True]] and [[False]]', success, failure) == ('[[True]] and [[False]]', False)
+assert _normalize_boolean_markers('[[success]]', '[[Success]]', '[[Failure]]') == ('[[success]]', False)
 `], { cwd: root, encoding: 'utf8', timeout: 30_000 })
   assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message)
 })

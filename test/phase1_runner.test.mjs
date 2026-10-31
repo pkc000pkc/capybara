@@ -472,9 +472,13 @@ test('phase1 native reader requires same-session judgment and distinguishes tech
     const tracePath = join(output, 'trace.json'); atomicJson(tracePath, trace)
     const row = { task_id: 's', trace_id: tracePath, score: 0, metadata: { scenario_id: 's', run_number: 3, status: 'failed', has_exception: false } }
     writeFileSync(join(output, 'output.jsonl'), JSON.stringify(row)+'\n')
+    mkdirSync(join(output, 'lite'))
+    writeFileSync(join(output, 'lite', 's_run_1.json'), JSON.stringify({ scenario_id: 's', validation_decision: 'Invalid', validation_rationale: 'None' }))
     const events = [{ type: 'official_validation_completed', executionId: 'exec', sessionId: 'session', validationSuccess: false, hasException: false }]
     const read = extra => readNativeResult({ root, outputDir: 'output', task, session, events, ...extra })
     assert.equal(read().report.evaluationComplete, true); assert.equal(read().report.businessPassed, false)
+    assert.equal(read().report.officialEvidence.validationDecision, 'Invalid')
+    assert.match(read().report.officialEvidence.fileSha256, /^[a-f0-9]{64}$/)
     assert.equal(read({ events: [] }).report.evaluationComplete, false)
     assert.throws(() => read({ events: [{ ...events[0], sessionId: 'foreign' }] }), /another session/)
     row.metadata.has_exception = true; row.metadata.exception_type = 'ModelRequestFailure'; writeFileSync(join(output, 'output.jsonl'), JSON.stringify(row)+'\n')

@@ -67,6 +67,7 @@ test('actual frozen plugin 1.2 TS Host/Python/LiteLLM/local HTTP chain independe
   assert.equal(proof.hostResult.cleanupCompleted, true)
   assert.equal(proof.hostResult.manualInspectionRequired, false)
   assert.equal(proof.spec.options.providerCleanupTimeoutMs, 30000)
+  assert.equal(proof.spec.options.hookTimeoutMs, 900000)
   assert.equal(proof.spec.settings.modelRequestTimeoutSeconds, 3)
   assert.equal(fixture.manifest.tasks.length, 25)
   assert.equal(fixture.trainingManifest.tasks.length, 25)

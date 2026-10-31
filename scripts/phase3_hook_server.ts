@@ -4,6 +4,11 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { createRetrievalReceipt } from '../src/retrieval_receipt.mjs'
+import { createTemporalReceipt } from '../src/temporal_receipt.mjs'
+import { createConflictReceipt } from '../src/conflict_receipt.mjs'
+import { createSemanticReceipt, validateMutationInvocation } from '../src/semantic_receipt.mjs'
+import { createToolRoundService } from '../src/tool_round_service.mjs'
 
 // The public Hook endpoint remains parent-session HTTP. Official A2A uses a
 // separate loopback byte pipe whose channel/binding hashes are per-session;
@@ -11,11 +16,13 @@ import { pathToFileURL } from 'node:url'
 const args = process.argv.slice(2)
 if (args.length !== 2 || args[0] !== '--spec') throw new Error('hook host spec required')
 const spec = JSON.parse(readFileSync(resolve(args[1]), 'utf8'))
+if (Object.hasOwn(spec, 'taskContract')) throw new Error('task contract capability is retired')
 const token = process.env.GAIA2_HOOK_TOKEN
 if (!token || token.length < 32) throw new Error('session capability missing')
 const expectedAuth = createHash('sha256').update(`Bearer ${token}`).digest()
 const backend = spec.backendRoot
 const { RuntimePluginHost } = await import(pathToFileURL(join(backend, 'src/core/plugins/runtime-plugin-host.ts')).href)
+const { ToolRoundScheduler } = await import(pathToFileURL(join(backend, 'src/core/tools/tool-round-scheduler.ts')).href)
 const { RuntimeDelegationPipePeer } = await import(pathToFileURL(join(backend, 'src/core/plugins/runtime-delegation-pipe.ts')).href)
 const { RuntimeDelegationNativePipeBinding } = await import(pathToFileURL(join(backend, 'src/core/plugins/runtime-delegation-native-pipe.ts')).href)
 const { RuntimeDelegationMultiAppHostAdapter } = await import(pathToFileURL(join(backend, 'src/core/plugins/runtime-delegation-host-adapter.ts')).href)
@@ -35,6 +42,27 @@ if (entry !== undefined) {
 }
 const host = new RuntimePluginHost(spec.options)
 const initialization = await host.initialize()
+const toolRounds = createToolRoundService({ Scheduler: ToolRoundScheduler, workspaceDir: spec.options.workspaceDir,
+  executionId: spec.options.executionId, sessionId: spec.options.sessionId })
+const retrievalEnabled = spec.retrieval?.enabled === true
+if (spec.retrieval !== undefined && (!spec.retrieval || Object.keys(spec.retrieval).some(key => key !== 'enabled')
+  || typeof spec.retrieval.enabled !== 'boolean')) throw new Error('retrieval diagnostic spec invalid')
+if (retrievalEnabled && !initialization.plugins.some((plugin: any) => plugin.id === 'gaia2-retrieval')) throw new Error('retrieval plugin missing')
+const temporalEnabled = spec.temporal?.enabled === true
+if (spec.temporal !== undefined && (!spec.temporal || Object.keys(spec.temporal).some(key => key !== 'enabled')
+  || typeof spec.temporal.enabled !== 'boolean')) throw new Error('temporal diagnostic spec invalid')
+if (temporalEnabled && (spec.options.a2a?.enabled || !initialization.plugins.some((plugin: any) => plugin.id === 'gaia2-runtime'))) throw new Error('temporal requires a standard runtime plugin')
+const conflictRecoveryEnabled = spec.conflictRecovery?.enabled === true
+if (spec.conflictRecovery !== undefined && (!spec.conflictRecovery || Object.keys(spec.conflictRecovery).some(key => key !== 'enabled')
+  || typeof spec.conflictRecovery.enabled !== 'boolean')) throw new Error('conflict recovery diagnostic spec invalid')
+if (conflictRecoveryEnabled && (spec.options.a2a?.enabled || !initialization.plugins.some((plugin: any) => plugin.id === 'gaia2-runtime'))) throw new Error('conflict recovery requires a standard runtime plugin')
+for (const name of ['entitySemantics', 'mutationReceipts']) {
+  const capability = spec[name]
+  if (capability !== undefined && (!capability || Object.keys(capability).some(key => key !== 'enabled') || typeof capability.enabled !== 'boolean')) throw new Error('semantic capability spec invalid')
+  if (capability?.enabled === true && (spec.options.a2a?.enabled || !initialization.plugins.some((plugin: any) => plugin.id === 'gaia2-runtime'))) throw new Error('semantics require a standard runtime plugin')
+}
+const entitySemanticsEnabled = spec.entitySemantics?.enabled === true
+const mutationReceiptsEnabled = spec.mutationReceipts?.enabled === true
 let closing = false
 const a2a: any = { entries: new Map(), connections: new Set(), expectedAppIds: null, adapter: null, committed: false,
   committing: false, ownerClosing: false, ownerClosed: false, ownerClosePromise: null, poisoned: false,
@@ -199,7 +227,7 @@ const server = createHttpServer(async (req, res) => {
   const reply = (status: number, data: unknown) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)) }
   const supplied = createHash('sha256').update(req.headers.authorization ?? '').digest()
   if (!timingSafeEqual(supplied, expectedAuth)) { reply(403, { error: 'invalid_session_capability' }); return }
-  if (req.method !== 'POST' || !['/invoke', '/shutdown'].includes(req.url ?? '')) { reply(404, { error: 'unknown_operation' }); return }
+  if (req.method !== 'POST' || !['/invoke', '/shutdown', '/tool-round'].includes(req.url ?? '')) { reply(404, { error: 'unknown_operation' }); return }
   let length = 0; const chunks: Buffer[] = []
   try {
     for await (const chunk of req) { length += chunk.length; if (length > 4 * 1024 * 1024) throw new Error('request_size_exceeded'); chunks.push(Buffer.from(chunk)) }
@@ -207,11 +235,37 @@ const server = createHttpServer(async (req, res) => {
     if (input.executionId !== spec.options.executionId || input.sessionId !== spec.options.sessionId) { reply(409, { error: 'foreign_session' }); return }
     if (req.url === '/shutdown') { if (closing) { reply(409, { error: 'already_closing' }); return }; closing = true; try { if (a2a.adapter) await a2a.adapter.close(); else await host.close() } finally { for (const record of a2a.connections) { try { record.binding?.close(); record.peer?.close() } catch {}; record.socket.destroy() } }; reply(200, { status: 'closed' }); server.close(); a2aServer?.close(); return }
     if (closing) { reply(409, { error: 'host_closing' }); return }
+    if (req.url === '/tool-round') { reply(200, toolRounds.invoke(input)); return }
     const { executionId, sessionId, ...invocation } = input
+    const semantic = invocation.outcome?.semanticEvidence
+    if (semantic !== undefined && (!entitySemanticsEnabled || semantic?.executionId !== executionId || semantic?.sessionId !== sessionId)) throw new Error('semantic evidence not authorized')
+    if (invocation.outcome?.mutationEvidence !== undefined) {
+      if (!mutationReceiptsEnabled) throw new Error('mutation evidence not authorized')
+      validateMutationInvocation(invocation, { executionId, sessionId })
+    }
+    // The legacy state-approval control remains retired. The generic
+    // Actor-owned reconcile operation is a separate bounded count check
+    // anchored to visible USER text and is admitted to the runtime Hook.
+    if (invocation.action?.canonicalName?.startsWith('CapybaraTaskContract__')
+      && !(invocation.action.canonicalName === 'CapybaraTaskContract__review' && invocation.action.arguments?.op === 'reconcile')) throw new Error('task contract control is retired')
     const result = await host.invoke(invocation)
     if (invocation.checkpoint === 'before_tool' && result?.evidencePath) a2a.parentResponses.set(result.evidencePath, result)
-    reply(200, result)
-  } catch { reply(422, { error: 'hook_host_rejected' }) }
+    // This is a project transport extension, not a mutation of the Host-owned
+    // RuntimePluginResponse (also used by the independent A2A binding).
+    const retrievalReceipt = retrievalEnabled ? createRetrievalReceipt({ response: result, invocation,
+      workspaceDir: spec.options.workspaceDir, executionId: spec.options.executionId, sessionId: spec.options.sessionId }) : undefined
+    const temporalReceipt = temporalEnabled ? createTemporalReceipt({ response: result, invocation,
+      workspaceDir: spec.options.workspaceDir, executionId: spec.options.executionId, sessionId: spec.options.sessionId }) : undefined
+    const conflictReceipt = conflictRecoveryEnabled ? createConflictReceipt({ response: result, invocation,
+      workspaceDir: spec.options.workspaceDir, executionId: spec.options.executionId, sessionId: spec.options.sessionId }) : undefined
+    const semanticReceipt = entitySemanticsEnabled || mutationReceiptsEnabled ? createSemanticReceipt({ response: result, invocation,
+      workspaceDir: spec.options.workspaceDir, executionId: spec.options.executionId, sessionId: spec.options.sessionId, mutationReceipts: mutationReceiptsEnabled }) : undefined
+    reply(200, retrievalReceipt || temporalReceipt || conflictReceipt || semanticReceipt ? { ...result, ...(retrievalReceipt ? { retrievalReceipt } : {}), ...(temporalReceipt ? { temporalReceipt } : {}), ...(conflictReceipt ? { conflictReceipt } : {}), ...(semanticReceipt ? { semanticReceipt } : {}) } : result)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    const code = /^[A-Za-z0-9_]{1,96}$/.test(message) ? message : 'hook_host_rejected'
+    reply(422, { error: 'hook_host_rejected', code })
+  }
 })
 const a2aServer = spec.options.a2a?.enabled ? createNetServer(socket => { void configureA2A(socket) }) : null
 await new Promise<void>(resolveReady => server.listen(0, '127.0.0.1', resolveReady)); if (a2aServer) await new Promise<void>(resolveReady => a2aServer.listen(0, '127.0.0.1', resolveReady))

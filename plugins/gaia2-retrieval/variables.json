@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "variables": [
+    { "key": "gaia2_retrieval_policy", "type": "object", "label": "Retrieval policy", "description": "Opt-in diagnostic Contacts-only retrieval bounds.", "value": { "enabled": true, "schemaVersion": "gaia2-retrieval-policy-v1", "nativeTools": ["Contacts__get_contacts"], "maxBatchPages": 4, "maxPages": 128, "maxPageRecords": 40 }, "required": true, "readonly": true, "show_in_status": false, "scope": "project" },
+    { "key": "gaia2_retrieval_scope", "type": "object", "label": "Retrieval scope", "description": "Current task-local review scope, never official grading state.", "value": { "scopeId": null, "criteriaVersion": 0, "revision": 0, "status": "idle" }, "required": true, "readonly": false, "show_in_status": true, "scope": "session" },
+    { "key": "gaia2_retrieval_pages", "type": "object", "label": "Retrieval pages", "description": "Bounded page index and trusted native return metadata.", "value": { "items": [], "nativeReceipts": [] }, "required": true, "readonly": false, "show_in_status": false, "scope": "session" },
+    { "key": "gaia2_retrieval_candidates", "type": "object", "label": "Retrieval candidates", "description": "Retained keep/defer records, including unclassified original evidence.", "value": { "items": [] }, "required": true, "readonly": false, "show_in_status": false, "scope": "session" },
+    { "key": "gaia2_retrieval_coverage", "type": "object", "label": "Retrieval coverage", "description": "Actually read and reviewed ranges; no inferred collection completeness.", "value": {}, "required": true, "readonly": false, "show_in_status": false, "scope": "session" },
+    { "key": "gaia2_retrieval_projection", "type": "object", "label": "Retrieval projection", "description": "Evidence-bound presentation certificates; never fresh-read authority.", "value": { "schemaVersion": "gaia2-retrieval-projection-v1", "scopeId": null, "criteriaVersion": 0, "revision": 0, "certificates": [] }, "required": true, "readonly": false, "show_in_status": false, "scope": "session" },
+    { "key": "gaia2_retrieval_control", "type": "object", "label": "Retrieval control receipts", "description": "Bounded local control identities, separate from native tool success.", "value": { "latest": null, "requests": [] }, "required": true, "readonly": false, "show_in_status": false, "scope": "session" },
+    { "key": "gaia2_retrieval_watch", "type": "object", "label": "Retrieval instruction watch", "description": "New official user instructions invalidate presentation eligibility.", "value": { "seenUserIds": [], "invalidated": false }, "required": true, "readonly": false, "show_in_status": false, "scope": "session" },
+    { "key": "gaia2_retrieval_context", "type": "text", "label": "Retrieval context", "description": "Bounded current review status, not the complete candidate evidence.", "value": "", "required": false, "readonly": false, "show_in_status": false, "scope": "session" }
+  ]
+}

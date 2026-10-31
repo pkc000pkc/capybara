@@ -33,7 +33,7 @@ def run_graded_control(report_path, passed):
     actors = []
     def completion(**kwargs):
         messages = kwargs["messages"]
-        assert kwargs["parallel_tool_calls"] is False
+        assert kwargs["parallel_tool_calls"] is True
         assert env.state == fixture.EnvironmentState.PAUSED
         context = messages[1]["content"].split("Live Capybara dynamic context:\n", 1)[1]
         assert os.environ["GAIA2_CORRECTION_STRATEGY_TEXT"] in context

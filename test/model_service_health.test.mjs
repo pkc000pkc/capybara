@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { checkModelService } from '../scripts/model_service_health.mjs'
 
@@ -21,7 +23,9 @@ test('model service health requires both models and chat completion checks', asy
     assert.equal(calls.length, 2)
     assert.match(calls[0].url, /\/v1\/models$/)
     assert.match(calls[1].url, /\/v1\/chat\/completions$/)
-    assert.equal(JSON.parse(calls[1].init.body).model, 'gpt-6-luna')
+    const root = fileURLToPath(new URL('../', import.meta.url))
+    const protocol = JSON.parse(readFileSync(join(root, 'config/phase0-protocol.json'), 'utf8'))
+    assert.equal(JSON.parse(calls[1].init.body).model, protocol.models.actor.model)
   } finally {
     globalThis.fetch = originalFetch
   }

@@ -18,6 +18,14 @@ const sha = value => createHash('sha256').update(value).digest('hex')
 const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0
 const uint = value => Number.isSafeInteger(value) && value >= 0
 const exact = (value, keys) => object(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
+// RuntimePluginHost appends trusted, bounded argument metadata after the
+// delegation action is admitted. Project those derived fields out before
+// validating the legacy semantic action shape.
+const hostActionProjection = value => {
+  if (!object(value)) return value
+  const { argumentHash, argumentFieldHashes, argumentFieldNumbers, argumentMetadataComplete, ...action } = value
+  return action
+}
 const safePath = value => typeof value === 'string' && value && !/^[\\/]|^[A-Za-z]:|[\\:\0]/.test(value) && !value.split('/').some(part => !part || part === '.' || part === '..')
 const absoluteIdentity = value => typeof value === 'string' && !value.includes('\0') && (/^[A-Za-z]:[\\/]/.test(value) || value.startsWith('/'))
 const joinIdentity = (root, path) => { check(absoluteIdentity(root) && safePath(path), 'a2a_evidence_reference_invalid'); return `${portable(root).replace(/\/$/, '')}/${path}` }
@@ -277,14 +285,14 @@ function blockedNativeEvidence(event, reader, inventory, entries, scope) {
       && action.mutationKey === plainHash([scope.environmentGeneration, scope.appId, tool.resourceKey, tool.canonicalName, action.argumentsHash]),
     'a2a_native_blocked_action_invalid')
     seen.add(action.dispatchId)
-    const host = reader.json(data.beforeEvidence), admission = host.trustedNativeCheckpoint
+    const host = reader.json(data.beforeEvidence), admission = host.trustedNativeCheckpoint, hostAction = hostActionProjection(host.input?.action)
     check(host.schemaVersion === 'capybara-runtime-plugin-invocation-v1' && host.executionId === event.childExecutionId && host.sessionId === event.childSessionId
       && uint(host.sequence) && host.sequence > 0 && host.input?.checkpoint === 'before_tool'
-      && exact(host.input.action, ['id', 'name', 'canonicalName', 'arguments', 'effect', 'mutationKey', 'resourceKey', 'authoritativeRead'])
-      && host.input.action.authoritativeRead === (action.effect === 'read')
-      && host.input.action?.id === action.id && host.input.action.name === action.toolId
-      && ['canonicalName', 'effect', 'resourceKey', 'mutationKey'].every(key => host.input.action[key] === action[key])
-      && same(host.input.action.arguments, action.arguments) && object(host.decision) && host.decision.action === data.gateDecision
+      && exact(hostAction, ['id', 'name', 'canonicalName', 'arguments', 'effect', 'mutationKey', 'resourceKey', 'authoritativeRead'])
+      && hostAction.authoritativeRead === (action.effect === 'read')
+      && hostAction?.id === action.id && hostAction.name === action.toolId
+      && ['canonicalName', 'effect', 'resourceKey', 'mutationKey'].every(key => hostAction[key] === action[key])
+      && same(hostAction.arguments, action.arguments) && object(host.decision) && host.decision.action === data.gateDecision
       && host.safetyFailure === null
       && typeof host.decision.reason === 'string' && host.decision.reason.trim() && host.decision.reason.length <= 2000
       && Object.keys(host.decision).every(key => ['action', 'reason', 'mutationKey', 'resourceKey'].includes(key))
@@ -662,8 +670,9 @@ function brokerEvidence(events, event, record, generation) {
  * network, model calls, absolute-path reads, or mutations are permitted here. */
 export function verifyOfficialA2ARuntimeEvidence({ events, identity, readEvidence, environmentLock = null, deadlineRequestTimeoutMs = null }) {
   check(Array.isArray(events), 'a2a_events_invalid')
-  const pool = events.find(event => event.type === 'a2a_client_pool_snapshot')
-  check(pool && Array.isArray(pool.clients), 'a2a_client_pool_missing')
+  const pools = events.filter(event => event.type === 'a2a_client_pool_snapshot')
+  check(pools.length === 1 && Array.isArray(pools[0].clients), pools.length ? 'a2a_client_pool_duplicate' : 'a2a_client_pool_missing')
+  const pool = pools[0]
   const children = events.filter(event => event.type === 'a2a_child_runtime_snapshot')
   const clockContracts = new Map(), childEvidence = new Map()
   for (const event of children) {

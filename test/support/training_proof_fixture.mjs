@@ -253,7 +253,7 @@ export async function trainingProofFixture(t, { kind = 'multi_tool_response_reje
     evidence: { runtimeAttestationHash: digest(parent.result.runtimeAttestation), resultHash: parent.resultHash, manifestHash: parent.manifest.manifestHash } }
   const inputPath = join(outputDir, 'sanitized-training-input.json'); writeJson(inputPath, input, { immutable: true })
   const options = { projectDir: root, workspaceDir: outputDir, plugins, executionId: 'controlled-correction', sessionId: 'controlled-training', scenarioId: parent.task.scenarioId,
-    contract: CORRECTION_CONTRACT, providerCleanupTimeoutMs: 30000 }
+    contract: CORRECTION_CONTRACT, providerCleanupTimeoutMs: 30000, hookTimeoutMs: 900000 }
   const resultPath = join(outputDir, 'host-result.json'), specPath = join(outputDir, 'host-spec.json')
   const settings = { processTimeoutMs: 30000, heartbeatIntervalMs: 100, modelRequestTimeoutSeconds: 3,
     modelRetry: { maxAttempts: 1, backoffBaseSeconds: 0, backoffMaxSeconds: 0, maxRetryWaitSeconds: 0 } }

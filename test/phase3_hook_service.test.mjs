@@ -3,9 +3,12 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { fileDigest } from '../src/phase0_run.mjs'
 import { isProcessIdentityAlive } from '../src/phase1_process.mjs'
 import { startRuntimeHookService } from '../src/phase3_hook_service.mjs'
+
+const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'gaia2-phase3-startup-'))
@@ -27,6 +30,10 @@ setInterval(() => {}, 1000);
 test('malformed ready receipt fails closed and terminates the actually supervised host before returning', { timeout: 30000 }, async () => {
   const input = fixture()
   await assert.rejects(startRuntimeHookService(input), /real plugin host startup failed/)
+  const spec = JSON.parse(readFileSync(join(input.root, input.session.outputDir, 'hook-host/spec.json'), 'utf8'))
+  assert.equal(spec.options.hookTimeoutMs, 900000)
+  assert.match(readFileSync(join(projectRoot, 'src/phase3_hook_service.mjs'), 'utf8'), /hookTimeoutMs:\s*900000/)
+  assert.match(readFileSync(join(projectRoot, 'scripts/phase3_hook_server.ts'), 'utf8'), /createChildHost:\s*async[\s\S]*new RuntimePluginHost\(\{ \.\.\.spec\.options/)
   const path = join(input.root, input.session.outputDir, 'hook-host/process-result.json')
   const process = JSON.parse(readFileSync(path, 'utf8'))
   const lifecycle = JSON.parse(readFileSync(join(input.root, input.session.outputDir, 'hook-host/lifecycle-failure.json'), 'utf8'))
@@ -44,4 +51,12 @@ test('changed capability inventory is rejected before any host is spawned', asyn
   writeFileSync(join(input.root, 'capabilities.json'), '{"plugins":[],"changed":true}')
   await assert.rejects(startRuntimeHookService(input), /differs from frozen plan/)
   assert.equal(existsSync(join(input.root, input.session.outputDir, 'hook-host')), false)
+})
+
+test('retired task-contract capability is rejected before any host is spawned', async () => {
+  const input = fixture()
+  for (const taskContract of [{ enabled: true }, { enabled: false }]) {
+    await assert.rejects(startRuntimeHookService({ ...input, taskContract }), /task contract capability is retired/)
+    assert.equal(existsSync(join(input.root, input.session.outputDir, 'hook-host')), false)
+  }
 })

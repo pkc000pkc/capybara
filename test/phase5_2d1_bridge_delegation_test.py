@@ -164,6 +164,30 @@ class BridgeDelegationTests(unittest.TestCase):
             with self.assertRaisesRegex(HookProtocolError, "delegation_factory_reconfiguration"):
                 bridge.configure_delegation_bridge(lambda *_: None)
 
+    def test_child_format_diagnostic_projection_is_parent_visible_but_answer_blind(self):
+        projected = bridge._safe_a2a_child_diagnostic({
+            "failureCode": "SCOPED_AGENT_FORMAT_FAILURE_THRESHOLD",
+            "failed": True, "completed": False,
+            "formatFailureCount": 3, "consecutiveFormatFailures": 3,
+            "originalObservationsTaken": 0, "modelCalls": 3, "engineCalls": 3,
+            "lastFormatFailureCode": "missing_action",
+            "lastFormatFailure": {
+                "schemaVersion": "gaia2-a2a-child-diagnostic-v1", "kind": "parse_failure",
+                "failureCode": "missing_action", "outputHash": "a" * 64, "errorHash": "b" * 64,
+                "executionId": "child", "sessionId": "session", "requestId": "request",
+                "sequence": 3, "iteration": 3, "consecutiveFormatFailures": 3,
+                "formatFailureCount": 3, "logicalRequests": 3, "nativeActionCount": 0,
+                "recoverable": False,
+            },
+            "rawModelOutput": "private model content must not cross the parent boundary",
+        })
+        self.assertEqual(projected["schemaVersion"], "gaia2-a2a-child-diagnostic-v1")
+        self.assertEqual(projected["failureCode"], "SCOPED_AGENT_FORMAT_FAILURE_THRESHOLD")
+        self.assertEqual(projected["consecutiveFormatFailures"], 3)
+        self.assertEqual(projected["nativeActionCount"], 0)
+        self.assertNotIn("rawModelOutput", projected)
+        self.assertNotIn("private model content", json.dumps(projected))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

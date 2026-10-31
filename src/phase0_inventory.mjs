@@ -7,6 +7,8 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 const PLUGINS = ['gaia2-runtime', 'gaia2-evaluation']
+// Retrieval is opt-in for isolated runs; keep the official default set unchanged.
+const SUPPORTED_PLUGINS = [...PLUGINS, 'gaia2-retrieval']
 const EXCLUDED = new Set(['.git', '__pycache__', 'node_modules'])
 const CODE_DIRS = ['src', 'scripts', 'test', 'schemas', 'config', 'plugins']
 const ARE_PROTOCOL_FILES = [
@@ -65,7 +67,7 @@ export function hashTree(root, { excludeSecrets = false } = {}) {
 
 /** Never use a live user directory as the frozen plugin's runtime path. */
 export function freezePluginSnapshot({ root, id, sourceRoot }) {
-  assert(PLUGINS.includes(id), `unsupported plugin id: ${id}`)
+  assert(SUPPORTED_PLUGINS.includes(id), `unsupported plugin id: ${id}`)
   const source = resolve(sourceRoot)
   const tree = hashTree(source)
   const cacheRoot = resolve(root, '.phase0-cache', 'plugins', id)
@@ -113,8 +115,9 @@ export function inspectPluginResources(snapshot) {
   const manifest = readJson(safePath(root, 'capybara.plugin.json', 'plugin manifest'))
   // Version 1.2 is the evaluation plugin's enum-only, artifact-only correction
   // contract. Historical 1.0/1.1 snapshots remain readable, never upgraded.
-  const supportedVersions = snapshot.id === 'gaia2-evaluation' ? ['1.0.0', '1.1.0', '1.2.0'] : ['1.0.0', '1.1.0']
-  assert(PLUGINS.includes(snapshot.id) && manifest.schemaVersion === 1 && manifest.id === snapshot.id && supportedVersions.includes(manifest.version), `${snapshot.id} manifest must declare schemaVersion 1 and a supported version (${supportedVersions.join('/')})`)
+  const supportedVersions = snapshot.id === 'gaia2-retrieval' ? ['0.1.0']
+    : snapshot.id === 'gaia2-evaluation' ? ['1.0.0', '1.1.0', '1.2.0'] : ['1.0.0', '1.1.0']
+  assert(SUPPORTED_PLUGINS.includes(snapshot.id) && manifest.schemaVersion === 1 && manifest.id === snapshot.id && supportedVersions.includes(manifest.version), `${snapshot.id} manifest must declare schemaVersion 1 and a supported version (${supportedVersions.join('/')})`)
   const resources = manifest.resources
   assert(isObject(resources), `${snapshot.id} resources declaration missing`)
   assert(Object.keys(resources).every((key) => ['variables', 'harnesses', 'hooks', 'trainingHooks'].includes(key)), `${snapshot.id} unknown resource declaration`)
@@ -289,8 +292,12 @@ export function inspectRuntimeBinding(root, backendRoot) {
       { path: livePaths.service, check: 'supervises-real-typescript-host-with-frozen-files-and-session-capability', passed: /manifest.lockRefs.capabilities.sha256/.test(live.service) && /plugins:\s*capabilities.plugins.map/.test(live.service) && /phase3_hook_server.ts/.test(live.service) && /GAIA2_HOOK_TOKEN:\s*token/.test(live.service) && /await processPromise/.test(live.service) },
       { path: livePaths.server, check: 'authenticates-loopback-and-invokes-real-backend-host', passed: /src\/core\/plugins\/runtime-plugin-host.ts/.test(live.server) && /new RuntimePluginHost\(/.test(live.server) && /await host.initialize\(\)/.test(live.server) && /timingSafeEqual\(/.test(live.server) && /executionId, sessionId, \.\.\.invocation/.test(live.server) && /await host.invoke\(invocation\)/.test(live.server) && /127.0.0.1/.test(live.server) },
       { path: livePaths.client, check: 'synchronous-loopback-client-validates-raw-context-sha', passed: /class RuntimeHookClient/.test(live.client) && /self.opener.open\(request/.test(live.client) && /loopback_host_required/.test(live.client) && /context_hash_mismatch/.test(live.client) },
-      { path: paths.bridge, check: 'tool-execution-waits-for-before-tool-allow-and-after-tool-must-pass', passed: /before_tool = _invoke_hook\(client, "before_tool"/.test(sources.bridge) && /permission != "allow"/.test(sources.bridge) && /result = tool\(\*\*arguments\)/.test(sources.bridge) && /after_tool_rejected/.test(sources.bridge) },
-      { path: paths.bridge, check: 'official-arrived-notifications-drive-live-harness-context', passed: /get_by_timestamp\(/.test(sources.bridge) && /_invoke_hook\(client, "before_model"/.test(sources.bridge) && /dynamic_context_injected/.test(sources.bridge) && /actor_input/.test(sources.bridge) },
+      { path: paths.bridge, check: 'tool-execution-waits-for-before-tool-allow-and-after-tool-must-pass', passed: (/before_tool = _invoke_hook\(client, "before_tool"/.test(sources.bridge)
+        || /def _live_hook\(checkpoint,[\s\S]*?response = _invoke_hook\(client, checkpoint, env, _hook_history\(\), revision, iteration/.test(sources.bridge) && /before_tool = _live_hook\("before_tool"/.test(sources.bridge))
+        && /permission != "allow"/.test(sources.bridge) && /result = tool\(\*\*arguments\)/.test(sources.bridge) && /after_tool_rejected/.test(sources.bridge) },
+      { path: paths.bridge, check: 'official-arrived-notifications-drive-live-harness-context', passed: /get_by_timestamp\(/.test(sources.bridge) && (/_invoke_hook\(client, "before_model"/.test(sources.bridge)
+        || /def _live_hook\(checkpoint,[\s\S]*?response = _invoke_hook\(client, checkpoint, env, _hook_history\(\), revision, iteration/.test(sources.bridge) && /before = _live_hook\("before_model"\)/.test(sources.bridge))
+        && /dynamic_context_injected/.test(sources.bridge) && /actor_input/.test(sources.bridge) },
       { path: normalized(join(backendRoot, hostPath)), check: 'isolated-ts-hooks-use-typed-values-and-real-harness-registry', passed: /transformSync\(/.test(host) && /workerCall\(/.test(host) && /new HarnessRegistry\(/.test(host) && /assertSystemVariableValue\(/.test(host) && /safety_hook_missing_decision/.test(host) },
     )
     for (const check of checks) assert(check.passed, `unknown runtime binding: ${check.path}: ${check.check}`)

@@ -1,4 +1,4 @@
-import copy, hashlib, io, json, os, socket, sys, tempfile, threading, unittest
+import copy, hashlib, io, json, os, socket, subprocess, sys, tempfile, threading, unittest
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -225,17 +225,57 @@ def run_argument_preflight_case(case):
 
 @contextmanager
 def hook_server(policy=None,corrupt=None,after_hook=None):
-    state={'requests':[],'failures':[],'unknown':False,'readBackObserved':False}
+    state={'requests':[],'roundRequests':[],'roundResponses':[],'failures':[],'unknown':False,'readBackObserved':False}
+    workspace=tempfile.TemporaryDirectory(prefix='phase3-shared-tool-round-')
+    worker=None
+    def shared_tool_round(request):
+        """Only relay JSON; all round state belongs to the production Node service."""
+        nonlocal worker
+        if worker is None:
+            root=Path(__file__).resolve().parents[1]
+            backend=Path(json.loads((root/'config/phase0-protocol.json').read_text(encoding='utf-8'))['runtime']['backendRoot'])
+            program="""
+import { createInterface } from 'node:readline';
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+const [root, backend, workspace] = process.argv.slice(1);
+const { ToolRoundScheduler } = await import(pathToFileURL(join(backend, 'src/core/tools/tool-round-scheduler.ts')).href);
+const { createToolRoundService } = await import(pathToFileURL(join(root, 'src/tool_round_service.mjs')).href);
+const service = createToolRoundService({ Scheduler: ToolRoundScheduler, workspaceDir: workspace,
+  executionId: 'controlled-execution', sessionId: 'controlled-session' });
+process.stdout.write(JSON.stringify({ ready: true }) + '\\n');
+for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
+  try { process.stdout.write(JSON.stringify(service.invoke(JSON.parse(line))) + '\\n'); }
+  catch (error) { process.stdout.write(JSON.stringify({ error: error.code || error.message }) + '\\n'); }
+}
+"""
+            worker=subprocess.Popen(['node','--import',(backend/'node_modules/tsx/dist/loader.mjs').as_uri(),
+                '--input-type=module','-e',program,str(root),str(backend),workspace.name],
+                cwd=str(backend),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                text=True,encoding='utf-8',bufsize=1,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            ready=worker.stdout.readline()
+            assert ready and json.loads(ready).get('ready') is True, 'Shared Node scheduler worker failed to initialize'
+        state['roundRequests'].append(copy.deepcopy(request))
+        worker.stdin.write(json.dumps(request,ensure_ascii=False)+'\n');worker.stdin.flush()
+        result=json.loads(worker.stdout.readline(8*1024*1024+1))
+        assert 'error' not in result,result
+        state['roundResponses'].append(copy.deepcopy(result))
+        return result
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args): pass
         def do_POST(self):
             try:
-                assert self.path=='/invoke'
+                assert self.path in ('/invoke','/tool-round')
                 assert self.headers.get('Authorization')=='Bearer controlled-token'
                 request=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 assert request['executionId']=='controlled-execution'
                 assert request['sessionId']=='controlled-session'
-                assert all(set(message)<={'role','content','id','name','toolCallId','requestId','observation','notificationType'} for message in request['messages'])
+                if self.path=='/tool-round':
+                    raw=json.dumps(shared_tool_round(request),ensure_ascii=False).encode('utf-8')
+                    self.send_response(200);self.send_header('Content-Type','application/json')
+                    self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+                    return
+                assert all(set(message)<={'role','content','id','name','toolCallId','requestId','observation','notificationType','sourceHash'} for message in request['messages'])
                 for message in request['messages']:
                     if 'observation' in message:
                         assert message['role']=='tool'
@@ -273,11 +313,18 @@ def hook_server(policy=None,corrupt=None,after_hook=None):
     thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
     settings={'GAIA2_HOOK_URL':f'http://127.0.0.1:{server.server_port}/invoke','GAIA2_HOOK_TOKEN':'controlled-token',
               'GAIA2_EXECUTION_ID':'controlled-execution','GAIA2_SESSION_ID':'controlled-session',
+              'GAIA2_TOOL_ROUND_WORKSPACE':workspace.name,
               'GAIA2_E2E_MAX_ACTIONS':'30'}
     try:
         with patch.dict(os.environ,settings): yield state
     finally:
         server.shutdown(); server.server_close(); thread.join(2)
+        if worker is not None:
+            worker.stdin.close()
+            try:worker.wait(timeout=5)
+            except subprocess.TimeoutExpired:worker.terminate();worker.wait(timeout=5)
+            worker.stdout.close();worker.stderr.close()
+        workspace.cleanup()
         assert not state['failures'],state['failures']
 
 @contextmanager
@@ -383,7 +430,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(len([e for e in self.events if e['type']=='dynamic_context_injected']),3)
         self.assertTrue(all(e['contextHash']==e['injectedContextHash'] for e in self.events if e['type']=='dynamic_context_injected'))
 
-    def test_01b_actor_guidance_requires_exact_writes_messages_and_readback(self):
+    def test_01b_actor_owns_business_plan_without_universal_readback_approval(self):
         scenario,env,aui,system,ledger=setup_scenario()
         calls=[]
         def model(messages,*unused):
@@ -398,17 +445,19 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(calls),1)
         system_text=calls[0][0]['content']
         for phrase in (
-            'determine the exact required targets',
-            'Do not repeat a successful write or message',
-            'private checklist',
-            'does not substitute for a requested app-to-app message',
-            'read back the authoritative state or conversation',
-            'A pre-execution read-back block is safe to retry only after the same resource is freshly verified',
-            "Honor the user's ordering: verify outbound messages and attachments before moving or deleting their source",
-            'Reuse exact identifiers and absolute paths returned by the same app',
-            'For content predicates, inspect all relevant candidates before mutating',
+            'decide the business plan, verification needs and completion yourself',
+            'Never blindly replay an unknown write',
+            'Follow the latest user instructions, including time windows and notification restrictions',
+            'they execute sequentially in listed order',
+            'Technical limits and silence are not proof of business success',
+            'Decompose the request into independently verifiable subgoals',
+            'defer only that branch and continue other branches',
+            'reconcile every user clause against the action and observation ledger',
         ):
             self.assertIn(phrase, system_text)
+        for retired in ('private checklist', 'After each mutation', 'Independent task contracts',
+                        'inspect all relevant candidates before mutating'):
+            self.assertNotIn(retired, system_text)
         self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='after_tool']),1)
 
     def test_01c_windows_fallback_hydrates_and_open_results_close(self):
@@ -490,10 +539,11 @@ class Tests(unittest.TestCase):
         self.assertTrue(metadata['compacted'])
         self.assertLessEqual(metadata['compactedBytes'], 9000)
         self.assertGreater(metadata['hiddenMessageCount'], 0)
-        self.assertIn('runtime compaction', '\n'.join(
-            item.get('content', '') for item in compacted
-            if item.get('role') == 'tool'
-        ))
+        self.assertTrue(
+            'runtime compaction' in '\n'.join(item.get('content', '') for item in compacted
+                                               if item.get('role') in ('system', 'tool'))
+            or metadata['hiddenToolCallIds'] or metadata['truncatedToolCallIds']
+        )
         self.assertEqual(compacted[:2], messages[:2])
         self.assertIn(messages[2], compacted)
         for index, message in enumerate(compacted):
@@ -678,14 +728,16 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(judged),1)
         self.assertFalse(judged[0]['validationSuccess'])
 
-    def test_14_multiple_calls_are_not_partially_executed(self):
+    def test_14_exclusive_wait_mixed_batch_is_not_partially_executed(self):
         scenario,env,aui,system,ledger=setup_scenario()
         two=response('LedgerApp__write',{'value':'a'},call_id='one')
-        two.choices[0].message.tool_calls.append(response('LedgerApp__write',{'value':'b'},call_id='two').choices[0].message.tool_calls[0])
+        two.choices[0].message.tool_calls.append(response('SystemApp__wait_for_notification',{'timeout':1},call_id='two').choices[0].message.tool_calls[0])
         with hook_server() as host,patch.dict(os.environ,{'GAIA2_E2E_MAX_ACTIONS':'1'}):
             with self.assertRaises(bridge.BridgeBudgetExceeded):self.run_bridge(scenario,env,lambda *a:two)
         self.assertEqual(ledger.values,[])
         self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='after_tool']),0)
+        self.assertEqual(host['roundResponses'][0]['state']['status'],'rejected')
+        self.assertEqual(host['roundResponses'][0]['state']['reason'],'exclusive_tool_requires_single_call')
 
     def test_15_client_rejects_remote_proxy_redirect_and_invalid_identity(self):
         for url in ('https://127.0.0.1:1/invoke','http://localhost:1/invoke','http://example.com:1/invoke',
@@ -835,18 +887,18 @@ class Tests(unittest.TestCase):
                 self.assertFalse(self.end_event()['evaluationAttempted'])
                 self.assertEqual(env.state,EnvironmentState.RUNNING)
 
-    def test_25_request_disables_parallel_calls_and_all_parameter_dropping(self):
+    def test_25_request_enables_multiple_calls_and_disables_parameter_dropping(self):
         with patch.object(bridge,'completion') as completion:
             bridge._call_model([{'role':'user','content':'Controlled request'}],[],
                                'controlled-no-model','openai','http://127.0.0.1:1/v1')
         request=completion.call_args.kwargs
-        self.assertIs(request['parallel_tool_calls'],False)
+        self.assertIs(request['parallel_tool_calls'],True)
         self.assertIs(request['drop_params'],False)
         self.assertEqual(request['additional_drop_params'],[])
         self.assertEqual(request['allowed_openai_params'],[])
         self.assertEqual(request['tool_choice'],'auto')
 
-    def test_26_final_http_payload_contains_false_and_single_action_finishes(self):
+    def test_26_final_http_payload_contains_true_and_single_action_finishes(self):
         scenario,env,aui,system,ledger=setup_scenario()
         replies=[response('LedgerApp__read',call_id='single-read'),response(content='Single-action transport completed')]
         with hook_server() as host,completion_server(replies) as (server,endpoint):
@@ -855,7 +907,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(server['requests']),2)
         for request in server['requests']:
             self.assertIn('parallel_tool_calls',request)
-            self.assertIs(request['parallel_tool_calls'],False)
+            self.assertIs(request['parallel_tool_calls'],True)
             self.assertEqual(request['tool_choice'],'auto')
             self.assertTrue(request['tools'])
             self.assertNotIn('drop_params',request)
@@ -872,7 +924,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(caught.exception.category,'configuration_error')
         self.assertFalse(caught.exception.retryable)
         self.assertEqual(len(server['requests']),1)
-        self.assertIs(server['requests'][0]['parallel_tool_calls'],False)
+        self.assertIs(server['requests'][0]['parallel_tool_calls'],True)
         self.assertEqual(ledger.values,[]);self.assertEqual(ledger.reads,0)
         self.assertEqual(scenario.judge_calls,0)
         self.assertFalse(any(r['checkpoint'] in ('before_tool','after_tool') for r in host['requests']))
@@ -905,34 +957,38 @@ class Tests(unittest.TestCase):
         protocol_failure_audits.append({'case':'local_unsupported_parameter','exceptionType':type(caught.exception).__name__,
                                         'events':copy.deepcopy(self.events)})
 
-    def test_29_provider_ignoring_false_cannot_execute_three_or_four_calls(self):
+    def test_29_exclusive_reply_in_three_or_four_call_batches_cannot_partially_execute(self):
         for count in (3,4):
             with self.subTest(count=count):
                 scenario,env,aui,system,ledger=setup_scenario()
                 batch=response('LedgerApp__write',{'value':'unsafe-0'},call_id='batch-0')
                 for index in range(1,count):
-                    batch.choices[0].message.tool_calls.extend(response('LedgerApp__write',
-                        {'value':'unsafe-'+str(index)},call_id='batch-'+str(index)).choices[0].message.tool_calls)
+                    batch.choices[0].message.tool_calls.extend(response(
+                        'AgentUserInterface__send_message_to_user' if index==count-1 else 'LedgerApp__write',
+                        {'content':'Must not notify'} if index==count-1 else {'value':'unsafe-'+str(index)},
+                        call_id='batch-'+str(index)).choices[0].message.tool_calls)
                 with hook_server() as host,completion_server([batch]) as (server,endpoint),\
                      patch.dict(os.environ,{'GAIA2_E2E_MAX_ACTIONS':'1'}):
                     with self.assertRaises(bridge.BridgeBudgetExceeded):self.run_transport(scenario,env,endpoint)
                 self.assertEqual(len(server['requests']),1)
-                self.assertIs(server['requests'][0]['parallel_tool_calls'],False)
+                self.assertIs(server['requests'][0]['parallel_tool_calls'],True)
                 self.assertEqual(ledger.values,[]);self.assertEqual(ledger.reads,0)
                 self.assertEqual(scenario.judge_calls,0)
-                self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='before_tool']),count)
+                self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='before_tool']),0)
                 self.assertFalse(any(r['checkpoint']=='after_tool' for r in host['requests']))
-                blocked=[e for e in self.events if e['type']=='tool_call_blocked'][-count:]
-                self.assertEqual([e['reason'] for e in blocked],['multiple_tool_calls_not_supported']*count)
+                blocked=[e for e in self.events if e['type']=='tool_call_cancelled'][-count:]
+                self.assertEqual([e['reason'] for e in blocked],['exclusive_tool_requires_single_call']*count)
                 observations=[json.loads(m['content']) for m in host['requests'][-1]['messages'] if m['role']=='tool']
                 self.assertEqual(len(observations),count)
                 self.assertTrue(all(not item['executed'] for item in observations))
-                self.assertTrue(all('exactly one tool' in item['feedback'] for item in observations))
+                self.assertTrue(all(item['status']=='cancelled' and item['reason']=='exclusive_tool_requires_single_call' for item in observations))
+                self.assertEqual(host['roundResponses'][0]['state']['status'],'rejected')
+                self.assertEqual([r['op'] for r in host['roundRequests']],['begin'])
 
-    def test_30_multiple_call_feedback_enters_next_http_request_for_replanning(self):
+    def test_30_exclusive_batch_feedback_enters_next_http_request_for_replanning(self):
         scenario,env,aui,system,ledger=setup_scenario()
         batch=response('LedgerApp__write',{'value':'cancelled-first'},call_id='multi-first')
-        batch.choices[0].message.tool_calls.extend(response('LedgerApp__write',{'value':'cancelled-second'},
+        batch.choices[0].message.tool_calls.extend(response('SystemApp__wait_for_notification',{'timeout':1},
                                                            call_id='multi-second').choices[0].message.tool_calls)
         replies=[batch,response('LedgerApp__write',{'value':'replanned'},call_id='fresh-single'),response(content='Completed')]
         with hook_server() as host,completion_server(replies) as (server,endpoint):
@@ -941,10 +997,44 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(server['requests']),3)
         observations=[json.loads(message['content']) for message in server['requests'][1]['messages'] if message['role']=='tool']
         self.assertEqual(len(observations),2)
-        self.assertTrue(all(item['reason']=='multiple_tool_calls_not_supported' for item in observations))
-        self.assertTrue(all(item['requiredAction']=='replan' and not item['executed'] for item in observations))
+        self.assertTrue(all(item['reason']=='exclusive_tool_requires_single_call' for item in observations))
+        self.assertTrue(all(item['status']=='cancelled' and not item['executed'] for item in observations))
+        self.assertEqual([m['tool_call_id'] for m in server['requests'][1]['messages'] if m['role']=='tool'],['multi-first','multi-second'])
+        self.assertEqual(host['roundResponses'][0]['state']['status'],'rejected')
         self.assertEqual(len([r for r in host['requests'] if r['checkpoint']=='after_tool']),2)
         self.assertEqual(scenario.judge_calls,1)
+
+    def test_30b_oversized_parallel_round_is_replanned_without_hook_failure(self):
+        scenario,env,aui,system,ledger=setup_scenario()
+        oversized=response('LedgerApp__read',call_id='oversized-0')
+        for index in range(1,65):
+            oversized.choices[0].message.tool_calls.extend(
+                response('LedgerApp__read',call_id=f'oversized-{index}').choices[0].message.tool_calls)
+        replies=[oversized,
+                 response('LedgerApp__read',call_id='bounded-read'),
+                 response('AgentUserInterface__send_message_to_user',
+                          {'content':'Oversized round was replanned'},call_id='finish')]
+        with hook_server() as host,completion_server(replies) as (server,endpoint):
+            result=self.run_transport(scenario,env,endpoint)
+        self.assertTrue(result.success)
+        self.assertEqual(ledger.reads,1)
+        self.assertEqual(scenario.judge_calls,1)
+        self.assertEqual(len(server['requests']),3)
+        self.assertTrue(any(e['type']=='tool_round_rejected'
+                            and e['reason']=='parallel_tool_round_limit'
+                            and e['totalCalls']==65 for e in self.events))
+        cancelled=[e for e in self.events
+                   if e['type']=='tool_call_cancelled'
+                   and e['reason']=='parallel_tool_round_limit']
+        self.assertEqual(len(cancelled),65)
+        first_observations=[json.loads(message['content']) for message in server['requests'][1]['messages']
+                            if message.get('tool_call_id','').startswith('oversized-')]
+        self.assertEqual(len(first_observations),65)
+        self.assertTrue(all(item['status']=='blocked' and not item['executed']
+                            and item['reason']=='parallel_tool_round_limit'
+                            for item in first_observations))
+        self.assertFalse(any(e['type']=='attempt_execution_ended'
+                             and e['terminationReason']=='live_hook_failure' for e in self.events))
 
     def test_31_unsafe_global_parameter_transforms_fail_before_transport(self):
         for setting in ('drop_params','modify_params','add_function_to_prompt'):
@@ -1032,6 +1122,72 @@ class Tests(unittest.TestCase):
 
     def test_39_binding_errors_do_not_invoke_the_official_tool(self):
         self.check_argument_preflight('binding')
+
+    def test_40_actor_reconciliation_roundtrip_reaches_the_real_bridge_path(self):
+        scenario, env, aui, system, ledger = setup_scenario()
+        calls = []
+
+        def model(messages, *unused):
+            calls.append(copy.deepcopy(messages))
+            if len(calls) == 1:
+                return response('capybara_task_reconcile', {
+                    'mode': 'enforce', 'quote': 'Initial request', 'obligations': [],
+                }, call_id='reconcile-entry')
+            if len(calls) == 2:
+                return response('AgentUserInterface__send_message_to_user',
+                                {'content': 'Reconciliation roundtrip complete'}, call_id='finish-entry')
+            raise AssertionError('model unexpectedly continued')
+
+        with hook_server() as host, patch.dict(os.environ, {'GAIA2_TASK_RECONCILIATION_ENABLED': '1'}):
+            result = self.run_bridge(scenario, env, model)
+        self.assertTrue(result.success)
+        self.assertEqual(len(calls), 2)
+        completed = [event for event in self.events if event['type'] == 'task_reconciliation_completed']
+        self.assertEqual(len(completed), 1)
+        inventory = [event for event in self.events if event['type'] == 'official_tool_inventory']
+        self.assertEqual(len(inventory), 1)
+        self.assertTrue(inventory[0]['taskReconciliationEnabled'])
+        self.assertEqual(completed[0]['mode'], 'enforce')
+        self.assertEqual(completed[0]['status'], 'succeeded')
+        self.assertFalse(completed[0]['oracleConsulted'])
+        reconciliation_before = [request for request in host['requests']
+                                 if request['checkpoint'] == 'before_tool'
+                                 and request['action']['canonicalName'] == 'CapybaraTaskContract__review']
+        reconciliation_after = [request for request in host['requests']
+                                if request['checkpoint'] == 'after_tool'
+                                and request['action']['canonicalName'] == 'CapybaraTaskContract__review']
+        self.assertEqual(len(reconciliation_before), 1)
+        self.assertEqual(len(reconciliation_after), 1)
+        self.assertEqual(reconciliation_before[0]['action']['id'], completed[0]['callId'])
+        self.assertEqual(reconciliation_after[0]['action']['id'], completed[0]['callId'])
+        self.assertEqual(aui.messages[-1].content, 'Reconciliation roundtrip complete')
+        self.assertEqual(host['requests'][-1]['checkpoint'], 'attempt_end')
+
+    def test_41_invalid_reconciliation_quote_is_feedback_not_success(self):
+        scenario, env, aui, system, ledger = setup_scenario()
+        calls = []
+
+        def model(messages, *unused):
+            calls.append(copy.deepcopy(messages))
+            if len(calls) == 1:
+                return response('capybara_task_reconcile', {
+                    'mode': 'enforce', 'quote': 'not present in USER history', 'obligations': [],
+                }, call_id='reconcile-invalid')
+            return response('AgentUserInterface__send_message_to_user',
+                            {'content': 'Recovered after reconciliation feedback'}, call_id='finish-recovered')
+
+        with hook_server() as host, patch.dict(os.environ, {'GAIA2_TASK_RECONCILIATION_ENABLED': '1'}):
+            result = self.run_bridge(scenario, env, model)
+        self.assertTrue(result.success)
+        failed = [event for event in self.events if event['type'] == 'task_reconciliation_completed']
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]['status'], 'failed_before_execution')
+        self.assertEqual(failed[0]['reason'], 'task_reconciliation_quote_binding')
+        self.assertEqual(aui.messages[-1].content, 'Recovered after reconciliation feedback')
+        reconcile_after = [request for request in host['requests']
+                           if request['checkpoint'] == 'after_tool'
+                           and request['action']['canonicalName'] == 'CapybaraTaskContract__review']
+        self.assertEqual(reconcile_after, [])
 
 if len(sys.argv)==3 and sys.argv[1]=='--argument-preflight-fixture':
     if sys.argv[2] not in ARGUMENT_PREFLIGHT_CASES:raise SystemExit('unknown controlled fixture')

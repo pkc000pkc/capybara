@@ -39,7 +39,8 @@ export function prepareCorrectionReadonlyInitialization({ root, manifest, task, 
   return { ...verified, evidencePath: portable(relative(root, path)), files }
 }
 
-export async function startRuntimeHookService({ root, manifest, task, session, settings, signal, entry = null }) {
+export async function startRuntimeHookService({ root, manifest, task, session, settings, signal, entry = null, retrieval = null, temporal = null, conflictRecovery = null, entitySemantics = null, mutationReceipts = null, ...retiredOptions }) {
+  if (Object.hasOwn(retiredOptions, 'taskContract')) throw new Error('task contract capability is retired; use native waiting and Actor judgment')
   const protocol = readJson(join(root, 'config/phase0-protocol.json'))
   const capabilityPath = resolve(root, manifest.lockRefs.capabilities.path)
   if (fileDigest(capabilityPath) !== manifest.lockRefs.capabilities.sha256) throw new Error('hook capability inventory differs from frozen plan')
@@ -63,12 +64,31 @@ export async function startRuntimeHookService({ root, manifest, task, session, s
   lifecycle('lifecycle-start.json', { schemaVersion: 'gaia2-hook-lifecycle-v1', phase: 'start', executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, startedAt: new Date().toISOString() })
   const token = randomBytes(32).toString('hex'), readyPath = join(serviceRoot, 'ready.json'), specPath = join(serviceRoot, 'spec.json')
   const options = { projectDir: root, workspaceDir: workspace, plugins: capabilities.plugins.map(({ id, snapshotRoot, files }) => ({ id, snapshotRoot, files })), executionId: task.executionId, sessionId: session.sessionId, scenarioId: task.scenarioId, attemptIndex: task.attemptIndex ?? 0, runNumber: task.runNumber,
+    // The official session owner raises short frozen Hook defaults to the
+    // shared 15-minute runtime ceiling.  The plugin source and its hash stay
+    // unchanged; generic Hosts without this trusted option keep local budgets.
+    hookTimeoutMs: 900000,
     // The A2A listener is a private, loopback-only transport.  It is present
     // only for the official agent2agent phase; standard/noise runs keep the
     // public Hook Host surface unchanged.
     ...(task.phase === 'agent2agent' ? { a2a: { enabled: true, channelId: randomBytes(32).toString('hex'), bindingHash: randomBytes(32).toString('hex'), requestTimeoutMs: Math.max(1, Math.min(2147483647, Math.trunc((settings.scenarioTimeoutSeconds ?? 480000) * 1000))), maxNativeActions: 100 } } : {}) }
   if (correctionAuthority) options.trustedReadonlySessionInitialValues = [correctionAuthority.initializer]
+  if (retrieval !== null && (retrieval.enabled !== true || task.phase !== 'standard'
+    || !options.plugins.some(plugin => plugin.id === 'gaia2-retrieval'))) throw new Error('retrieval requires an explicit standard-session plugin snapshot')
+  if (temporal !== null && (temporal.enabled !== true || Object.keys(temporal).some(key => key !== 'enabled') || task.phase !== 'standard'
+    || !options.plugins.some(plugin => plugin.id === 'gaia2-runtime'))) throw new Error('temporal requires an explicit standard-session runtime snapshot')
+  if (conflictRecovery !== null && (conflictRecovery.enabled !== true || Object.keys(conflictRecovery).some(key => key !== 'enabled') || task.phase !== 'standard'
+    || !options.plugins.some(plugin => plugin.id === 'gaia2-runtime'))) throw new Error('conflict recovery requires an explicit standard-session runtime snapshot')
+  for (const [name, capability] of [['entity semantics', entitySemantics], ['mutation receipts', mutationReceipts]]) {
+    if (capability !== null && (capability.enabled !== true || Object.keys(capability).some(key => key !== 'enabled') || task.phase !== 'standard'
+      || !options.plugins.some(plugin => plugin.id === 'gaia2-runtime'))) throw new Error(`${name} requires an explicit standard-session runtime snapshot`)
+  }
   writeFileSync(specPath, JSON.stringify({ backendRoot: protocol.runtime.backendRoot, readyPath, options,
+    ...(retrieval !== null ? { retrieval: { enabled: true } } : {}),
+    ...(temporal !== null ? { temporal: { enabled: true } } : {}),
+    ...(conflictRecovery !== null ? { conflictRecovery: { enabled: true } } : {}),
+    ...(entitySemantics !== null ? { entitySemantics: { enabled: true } } : {}),
+    ...(mutationReceipts !== null ? { mutationReceipts: { enabled: true } } : {}),
     ...(entry ? { entry: { schemaVersion: entry.schemaVersion, path: entry.path, relativePath: entry.relativePath, sha256: entry.sha256, value: entry.value } } : {}) }) + '\n', { flag: 'wx' })
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/(?:API_KEY|ACCESS_TOKEN|AUTHORIZATION|HF_TOKEN|HUGGINGFACE_TOKEN|GAIA2_HOOK_TOKEN)/i.test(key)))
   const controller = new AbortController(), abort = () => controller.abort()
@@ -78,7 +98,12 @@ export async function startRuntimeHookService({ root, manifest, task, session, s
   const processPromise = runChildProcess({ command: process.execPath, args: [`--import=${pathToFileURL(join(protocol.runtime.backendRoot, 'node_modules/tsx/dist/loader.mjs')).href}`, '--conditions=development', join(root, 'scripts/phase3_hook_server.ts'), '--spec', specPath], cwd: workspace, env: { ...env, GAIA2_HOOK_TOKEN: token }, outputDir: serviceRoot, processTimeoutMs: settings.processTimeoutMs, heartbeatIntervalMs: settings.heartbeatIntervalMs, signal: controller.signal, secrets: [token] }).then(result => { ended = result; return result }, error => { startupError = error; return null })
   let ready
   try {
-    const deadline = Date.now() + 30000
+    // Hook Host startup includes loading the TypeScript runtime, backend
+    // dependencies and frozen plugin inventory.  A long preceding ARE task
+    // can leave the machine under load, so 30s turns a healthy Host into a
+    // false technical failure.  Keep a bounded startup guard, independent of
+    // the much longer scenario/process budget.
+    const deadline = Date.now() + 120000
     while (!existsSync(readyPath) && !ended && !startupError && !controller.signal.aborted && Date.now() < deadline) await sleep(50)
     if (!existsSync(readyPath) || startupError) throw new Error('real plugin host did not initialize')
     ready = readJson(readyPath)

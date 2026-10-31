@@ -42,6 +42,12 @@ export function modelRuntimeEnvironment(settings) {
   return { GAIA2_E2E_LLM_TIMEOUT_SECONDS: String(settings.modelRequestTimeoutSeconds), REQUEST_TIMEOUT: String(settings.modelRequestTimeoutSeconds), GAIA2_MODEL_MAX_ATTEMPTS: String(retry.maxAttempts), GAIA2_MODEL_BACKOFF_BASE_SECONDS: String(retry.backoffBaseSeconds), GAIA2_MODEL_BACKOFF_MAX_SECONDS: String(retry.backoffMaxSeconds), GAIA2_MODEL_MAX_RETRY_WAIT_SECONDS: String(retry.maxRetryWaitSeconds) }
 }
 
+/** Formal phase1 runs use the same generic Actor-owned task contract as the
+ * full-library entrypoint; the Hook still validates every declaration. */
+export function taskReconciliationEnvironment() {
+  return { GAIA2_TASK_RECONCILIATION_ENABLED: '1' }
+}
+
 // ARE manifests use ``local`` for an OpenAI-compatible endpoint.  LiteLLM
 // needs the transport provider explicitly; otherwise arbitrary model names
 // such as gpt-6-luna are rejected before the request reaches the endpoint.
@@ -71,7 +77,8 @@ function walk(dir) {
 
 export function readNativeResult({ root, outputDir, task, session, events = [] }) {
   const output = resolve(root, outputDir)
-  const files = walk(output).filter(path => path.endsWith('output.jsonl'))
+  const allFiles = walk(output)
+  const files = allFiles.filter(path => path.endsWith('output.jsonl'))
   const rows = files.flatMap(path => readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).map(line => ({ path, row: JSON.parse(line) })))
   assert(rows.length === 1, 'expected exactly one native result for this session')
   const { row, path } = rows[0], metadata = row.metadata ?? {}
@@ -89,8 +96,20 @@ export function readNativeResult({ root, outputDir, task, session, events = [] }
   const hasException = metadata.has_exception === true || definition.has_exception === true || Boolean(metadata.exception_type || definition.exception_type)
   const businessPassed = row.score === 1 && metadata.status === 'success' ? true : row.score === 0 && metadata.status === 'failed' ? false : null
   const evaluationComplete = !hasException && typeof businessPassed === 'boolean' && validation?.hasException === false && validation.validationSuccess === businessPassed
+  const liteFiles = allFiles.filter(file => /(?:^|[\\/])lite[\\/][^\\/]+\.json$/i.test(file))
+  let officialEvidence = null
+  if (liteFiles.length === 1) {
+    const litePath = liteFiles[0]
+    const lite = JSON.parse(readFileSync(litePath, 'utf8'))
+    if (lite.scenario_id === task.scenarioId && ['Valid', 'Invalid'].includes(lite.validation_decision)
+        && ((lite.validation_decision === 'Valid' && row.score === 1) || (lite.validation_decision === 'Invalid' && row.score === 0))) {
+      officialEvidence = { schemaVersion: 'gaia2-official-validation-evidence-v1',
+        validationDecision: lite.validation_decision, rawScore: row.score,
+        fileSha256: fileDigest(litePath), source: 'are_lite_validation_metadata-v1' }
+    }
+  }
   return {
-    report: { scenarioId: task.scenarioId, runNumber: task.runNumber, evaluationComplete, businessPassed: evaluationComplete ? businessPassed : null, score: evaluationComplete ? row.score : null, status: metadata.status, hasException, exceptionType: hasException ? String(metadata.exception_type ?? definition.exception_type ?? 'UnknownException').replace(/[^A-Za-z0-9_]/g, '').slice(0, 80) : null, nativeEnvelopeHasRunNumber: metadata.run_number !== undefined },
+    report: { scenarioId: task.scenarioId, runNumber: task.runNumber, evaluationComplete, businessPassed: evaluationComplete ? businessPassed : null, score: evaluationComplete ? row.score : null, status: metadata.status, hasException, exceptionType: hasException ? String(metadata.exception_type ?? definition.exception_type ?? 'UnknownException').replace(/[^A-Za-z0-9_]/g, '').slice(0, 80) : null, nativeEnvelopeHasRunNumber: metadata.run_number !== undefined, officialEvidence },
     artifacts: [path, tracePath].map(file => ({ path: portable(relative(root, file)), sha256: fileDigest(file) })),
   }
 }
@@ -138,10 +157,32 @@ export async function executeOfficialTask({ root, manifest, task, session, setti
   const augmentationArgs = task.phase === 'agent2agent'
     ? ['--a2a_app_prop', '1.0', '--a2a_app_agent', 'default_app_agent', '--a2a_model', manifest.models.actor.model, '--a2a_model_provider', resolveTransportProvider(manifest.models.actor.provider), '--a2a_endpoint', connection.baseUrl]
     : task.phase === 'noise' ? ['--noise'] : []
+  // Retrieval is an explicit capability-level opt-in.  It is only enabled
+  // for standard search pilots whose manifest carries the capability flag;
+  // all other configurations retain the frozen two-plugin tool surface.
+  const retrievalEnabled = manifest.retrieval?.enabled === true && task.phase === 'standard' && task.config === 'search'
   const args = ['-c', runnerCode, 'run', '--dataset', datasetRoot, '--config', task.config, '--agent', 'default', '--model', manifest.models.actor.model, '--provider', resolveTransportProvider(manifest.models.actor.provider), '--endpoint', connection.baseUrl, '--judge_model', manifest.models.judge.model, '--judge_provider', resolveTransportProvider(manifest.models.judge.provider), '--judge_endpoint', connection.baseUrl, '--limit', '1', '--num_runs', '1', '--max_concurrent_scenarios', '1', '--scenario_timeout', String(settings.scenarioTimeoutSeconds), '--output_dir', output, '--trace_dump_format', 'both', '--log-level', 'INFO', ...augmentationArgs]
-  const hookService = await startRuntimeHookService({ root, manifest, task, session, settings, signal, entry })
+  const hookService = await startRuntimeHookService({ root, manifest, task, session, settings, signal, entry, ...(retrievalEnabled ? { retrieval: { enabled: true } } : {}) })
   const authority = hookService.correctionAuthority
-  const childEnv = { ...process.env, ...modelRuntimeEnvironment(settings), PYTHONPATH: resolve(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', OPENAI_API_KEY: connection.apiKey, GAIA2_E2E_MINIMAL: '0', GAIA2_E2E_MAX_ACTIONS: String(settings.maxActions), GAIA2_E2E_TOOL_ALLOWLIST: '', GAIA2_E2E_ATTEMPT_INDEX: String(task.attemptIndex ?? task.runNumber), GAIA2_E2E_CORRECTION_ORDINAL: String(task.correctionOrdinal ?? 0), GAIA2_CORRECTION_STRATEGY_TEXT: authority?.initializer.value ?? '', GAIA2_CORRECTION_STRATEGY_HASH: authority?.context.strategyHash ?? '', GAIA2_CORRECTION_CONTEXT_HASH: authority ? digest(authority.context) : '', GAIA2_EXECUTION_ID: task.executionId, GAIA2_SESSION_ID: session.sessionId, GAIA2_RUNTIME_EVENT_FILE: eventPath, GAIA2_HOOK_URL: hookService.endpoint, GAIA2_HOOK_TOKEN: hookService.token, GAIA2_OFFICIAL_ENTRY_REQUIRED: '1', GAIA2_OFFICIAL_ENTRY_PATH: entry.path, GAIA2_OFFICIAL_ENTRY_SHA256: entry.sha256, GAIA2_MODEL_HTTP_GUARD_REQUIRED: '1', TMP: workspace, TEMP: workspace, TMPDIR: workspace,
+  const childEnv = { ...process.env, ...modelRuntimeEnvironment(settings), ...taskReconciliationEnvironment(), PYTHONPATH: resolve(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', OPENAI_API_KEY: connection.apiKey, GAIA2_E2E_MINIMAL: '0', GAIA2_E2E_MAX_ACTIONS: String(settings.maxActions), GAIA2_E2E_TOOL_ALLOWLIST: '',
+    // The formal phase1 path must expose the same Actor-owned reconciliation
+    // contract as the full-library runner.  This is an entrypoint policy, not
+    // a scenario-specific hint; the Hook still admits only visible USER-bound
+    // declarations and Host-derived actual evidence.
+    GAIA2_E2E_ATTEMPT_INDEX: String(task.attemptIndex ?? task.runNumber), GAIA2_E2E_CORRECTION_ORDINAL: String(task.correctionOrdinal ?? 0), GAIA2_CORRECTION_STRATEGY_TEXT: authority?.initializer.value ?? '', GAIA2_CORRECTION_STRATEGY_HASH: authority?.context.strategyHash ?? '', GAIA2_CORRECTION_CONTEXT_HASH: authority ? digest(authority.context) : '', GAIA2_EXECUTION_ID: task.executionId, GAIA2_SESSION_ID: session.sessionId, GAIA2_RUNTIME_EVENT_FILE: eventPath, GAIA2_HOOK_URL: hookService.endpoint, GAIA2_HOOK_TOKEN: hookService.token, GAIA2_OFFICIAL_ENTRY_REQUIRED: '1', GAIA2_OFFICIAL_ENTRY_PATH: entry.path, GAIA2_OFFICIAL_ENTRY_SHA256: entry.sha256, GAIA2_MODEL_HTTP_GUARD_REQUIRED: '1',
+    // The live bridge validates scheduler receipts against the session workspace.
+    // Keep this binding explicit in the manifest-driven runner as it is in the
+    // standalone full-library runner; inherited diagnostic variables are not a
+    // trustworthy source for an execution-owned evidence root.
+    GAIA2_TOOL_ROUND_WORKSPACE: workspace,
+    GAIA2_RETRIEVAL_ENABLED: retrievalEnabled ? '1' : '0',
+    // Hook calls may carry a compacted but still large evidence/context
+    // projection.  Keep the transport ceiling aligned with the 15-minute
+    // long-tool policy; the model request timeout remains independent.
+    GAIA2_HOOK_TIMEOUT_SECONDS: '900',
+    GAIA2_TEMPORAL_WORKSPACE: workspace, GAIA2_CONFLICT_RECOVERY_WORKSPACE: workspace,
+    GAIA2_RETRIEVAL_WORKSPACE: workspace, GAIA2_TASK_CONTRACT_WORKSPACE: workspace,
+    TMP: workspace, TEMP: workspace, TMPDIR: workspace,
     ...(task.phase === 'agent2agent' ? { GAIA2_A2A_PIPE_HOST: hookService.ready?.a2a?.host ?? '', GAIA2_A2A_PIPE_PORT: String(hookService.ready?.a2a?.port ?? ''), GAIA2_A2A_PIPE_CHANNEL: hookService.ready?.a2a?.channelId ?? '', GAIA2_A2A_PIPE_BINDING: hookService.ready?.a2a?.bindingHash ?? '', GAIA2_A2A_MODEL: manifest.models.actor.model, GAIA2_A2A_PROVIDER: resolveTransportProvider(manifest.models.actor.provider), GAIA2_A2A_ENDPOINT: connection.baseUrl, GAIA2_A2A_WORKSPACE: workspace } : {}) }
   let processResult, hostProcess
   try { processResult = await runChildProcess({ command: resolve(root, protocol.runtime.python), args, cwd: workspace, env: childEnv, outputDir: output, processTimeoutMs: settings.processTimeoutMs, heartbeatIntervalMs: settings.heartbeatIntervalMs, signal, secrets: [connection.apiKey, hookService.token] }) }

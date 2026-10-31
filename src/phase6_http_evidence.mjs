@@ -39,7 +39,7 @@ export function verifyModelHttpDispatchEvidence({ journalBytes, events, identity
   requireProof(entry.schemaVersion === 'gaia2-official-entry-handshake-v1', 'entry_schema')
   requireProof(digest(Object.keys(entry).sort()) === digest(['schemaVersion', 'runId', 'manifestHash', 'executionId', 'sessionId', 'scenarioId', 'scenarioVersion', 'scenarioHash', 'config', 'runNumber', 'attemptIndex', 'correctionOrdinal', 'phase', 'launcherProcessId'].sort()), 'entry_fields')
   requireProof(SAFE_ID.test(entry.scenarioVersion ?? '') && HASH.test(entry.scenarioHash ?? '') && SAFE_ID.test(entry.config ?? '') && ['standard', 'agent2agent', 'noise'].includes(entry.phase)
-    && integer(entry.runNumber) && entry.runNumber > 0 && integer(entry.attemptIndex) && entry.attemptIndex > 0 && integer(entry.correctionOrdinal)
+    && integer(entry.runNumber) && entry.runNumber > 0 && integer(entry.attemptIndex) && integer(entry.correctionOrdinal)
     && Number.isSafeInteger(entry.launcherProcessId) && entry.launcherProcessId > 0, 'entry_task_fields')
   for (const field of ['runId', 'manifestHash', 'executionId', 'sessionId', 'scenarioId']) requireProof(entry[field] === identity[field], 'entry_identity')
   for (const field of ['runNumber', 'phase', 'config', 'scenarioVersion', 'scenarioHash', 'attemptIndex', 'correctionOrdinal', 'launcherProcessId']) if (identity[field] !== undefined) requireProof(entry[field] === identity[field], 'entry_task_identity')

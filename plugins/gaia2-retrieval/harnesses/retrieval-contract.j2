@@ -1,0 +1,11 @@
+Opt-in GAIA2 Contacts retrieval contract:
+- Use the registered retrieval step control only for visible Contacts pagination. It is local bookkeeping, not an official App action or authoritative read.
+- Classification is optional: classify selected records as keep, reject, or defer only when useful. Unclassified records remain deferred with their original evidence; they never block pagination. Rejecting text requires its exact visible quote and path; do not invent nested fields inside a text record.
+- Read the first native page of 10, then request 1/2/4 consecutive pages as useful. continue_read requires no classification; review_next may combine a partial review with another read. A control success is not business progress or task completion.
+- Rejected text may exit active context, but original evidence remains. Keep/defer evidence, current user instructions, unknown writes and conflicts remain protected.
+- Changed criteria invalidate prior exclusions and classifications, restoring the original records as deferred. Reopening old evidence does not make it fresh. Before business writes obtain a fresh native target-detail read and obey all existing gates.
+- No match in one page is not proof of absence or uniqueness. Budget exhaustion does not mean a full scan.
+{% if builtin.variables.gaia2_retrieval_context %}
+Current retrieval status:
+{{ builtin.variables.gaia2_retrieval_context }}
+{% endif %}

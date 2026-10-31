@@ -12,7 +12,7 @@ import { freezePluginSnapshot } from '../src/phase0_inventory.mjs'
 const project = dirname(dirname(fileURLToPath(import.meta.url)))
 const backend = JSON.parse(readFileSync(join(project, 'config/phase0-protocol.json'), 'utf8')).runtime.backendRoot
 const hash = value => createHash('sha256').update(value).digest('hex')
-const cases = ['duplicate-ttl', 'ttl-before-model', 'native-return-time', 'future-return-time', 'failed-complete-metadata', 'conflict-query', 'partial-query-recovery', 'precise-recovery-unknown-write', 'provider-view-history', 'provider-view-direct-gate', 'view-binding-negative', 'finite-progress', 'freshness-not-progress', 'known-progress-write-wait', 'notification-progress']
+const cases = ['duplicate-ttl', 'ttl-before-model', 'native-return-time', 'future-return-time', 'failed-complete-metadata', 'successful-missing-complete', 'conflict-query', 'partial-query-recovery', 'precise-recovery-unknown-write', 'provider-view-history', 'provider-view-direct-gate', 'view-binding-negative', 'finite-progress', 'freshness-not-progress', 'known-progress-write-wait', 'notification-progress']
 
 if (!process.argv.includes('--probe')) {
   test('phase5 information-noise contract executes through the actual frozen TS HookHost, not a model or benchmark', { timeout: 180000 }, async t => {
@@ -57,7 +57,7 @@ if (!process.argv.includes('--probe')) {
         await invoke('before_model', 70)
         assert.equal(state().gaia2_observation_state.stale_ids.length, 0, '60 seconds is not expired')
         const stale = await invoke('before_tool', 71, { action: action('mutation', 'write-a', 'Mail', 'write', 'EmailClientV2__send') })
-        assert.equal(stale.response.decision.action, 'read_back'); assert.deepEqual(state().gaia2_observation_state.stale_ids, ['obs-dup-b'])
+        assert.equal(stale.response.decision.action, 'allow', 'TTL is advisory, not business approval'); assert.deepEqual(state().gaia2_observation_state.stale_ids, ['obs-dup-b'])
         await read('dup-c', 'query-a', 'same', 72)
         assert.equal(state().gaia2_observation_state.stale_ids.length, 0)
         assert.equal(state().gaia2_observation_state.observations.find(item => item.actionId === 'dup-b').verifiedBy, 'dup-c')
@@ -65,15 +65,16 @@ if (!process.argv.includes('--probe')) {
       if (name === 'conflict-query') {
         await read('first', 'query-a', 'old', 0)
         await read('changed', 'query-a', 'new', 1)
-        assert.deepEqual(state().gaia2_observation_state.conflict_ids, ['obs-first', 'obs-changed'])
+        assert.deepEqual(state().gaia2_observation_state.conflict_ids, [])
+        assert.equal(last().changedFromActionId, 'first')
         await read('other-query', 'query-b', 'different', 2)
         await read('other-app', 'query-a', 'different', 3, { resource: 'Chats' })
-        assert.equal(state().gaia2_observation_state.conflict_ids.length, 2, 'other query or app cannot create or clear this conflict')
+        assert.equal(state().gaia2_observation_state.conflict_ids.length, 0, 'changed native results do not require a confirmation query')
         const blocked = await invoke('before_tool', 4, { action: action('write-conflict', 'write-a', 'Mail', 'write', 'EmailClientV2__send') })
-        assert.equal(blocked.response.decision.action, 'read_back')
+        assert.equal(blocked.response.decision.action, 'allow', 'evidence diagnostics do not veto business judgment')
         await read('confirmed', 'query-a', 'new', 5)
         assert.equal(last().duplicateOf, 'obs-changed'); assert.equal(state().gaia2_observation_state.conflict_ids.length, 0)
-        assert.equal(state().gaia2_observation_state.observations.find(item => item.actionId === 'first').status, 'verified_by_fresh_read')
+        assert.equal(state().gaia2_observation_state.observations.find(item => item.actionId === 'first').status, 'superseded_by_fresh_read')
       }
       if (name === 'ttl-before-model') {
         await read('old', 'query-a', 'same', 100)
@@ -104,13 +105,21 @@ if (!process.argv.includes('--probe')) {
         assert.equal(last().status, 'failed')
         assert.deepEqual(state().gaia2_observation_state.unverified_ids, ['obs-official-noise-error'])
         const blocked = await invoke('before_tool', 3, { action: action('noise-write', 'mutation-a', 'Mail', 'write', 'EmailClientV2__send') })
-        assert.equal(blocked.response.decision.action, 'read_back', 'complete failure cannot authorize a mutation')
+        assert.equal(blocked.response.decision.action, 'allow', 'complete failure remains visible evidence, not a resource-wide mutation ban')
+      }
+      if (name === 'successful-missing-complete') {
+        const input = action('successful-missing-complete', 'query-a')
+        const after = await invoke('after_tool', 2, { action: input, outcome: { status: 'succeeded', executed: true, resultHash: hash('partial-success') } })
+        assert.equal(after.response.hookReceipts.find(item => item.hookId === 'gaia2-noise-classifier').status, 'passed')
+        assert.equal(last().status, 'incomplete')
+        assert.equal(last().complete, false)
+        assert.deepEqual(state().gaia2_observation_state.unverified_ids, ['obs-successful-missing-complete'])
       }
       if (name === 'partial-query-recovery') {
         await read('prior', 'query-a', 'old', 0)
         await read('changed', 'query-a', 'new', 1)
         await read('partial', 'query-a', 'new', 2, { complete: false })
-        assert.equal(state().gaia2_observation_state.conflict_ids.length, 2)
+        assert.equal(state().gaia2_observation_state.conflict_ids.length, 0)
         assert.deepEqual(state().gaia2_observation_state.unverified_ids, ['obs-partial'])
         await read('full', 'query-a', 'new', 3)
         assert.equal(state().gaia2_observation_state.conflict_ids.length, 0)
@@ -133,9 +142,11 @@ if (!process.argv.includes('--probe')) {
         await read('visible', 'query-a', 'full', 0)
         const oldView = viewFor(last())
         await invoke('before_model', 1, { messages: [oldView] })
-        assert.deepEqual(state().gaia2_observation_state.unverified_ids, ['obs-visible'])
+        assert.deepEqual(state().gaia2_observation_state.unverified_ids, [])
+        assert.deepEqual(state().gaia2_observation_state.visibility_ids, ['obs-visible'])
+        assert.equal(last().status, 'observed', 'presentation loss does not corrupt native truth')
         const blocked = await invoke('before_tool', 2, { action: action('view-write', 'mutation-a', 'Mail', 'write', 'EmailClientV2__send'), messages: [oldView] })
-        assert.equal(blocked.response.decision.action, 'read_back')
+        assert.equal(blocked.response.decision.action, 'allow', 'hidden presentation is diagnostic')
         await read('reread', 'query-a', 'full', 3)
         await invoke('before_model', 4, { messages: [oldView] })
         const recovered = await invoke('before_tool', 5, { action: action('recovered-write', 'mutation-a', 'Mail', 'write', 'EmailClientV2__send'), messages: [oldView] })
@@ -153,17 +164,18 @@ if (!process.argv.includes('--probe')) {
         await read('visible', 'query-a', 'full', 0)
         const hidden = viewFor(last()); hidden.observation.viewIncompleteReason = 'hidden'
         const blocked = await invoke('before_tool', 1, { action: action('hidden-write', 'mutation-a', 'Mail', 'write', 'EmailClientV2__send'), messages: [hidden] })
-        assert.equal(blocked.response.decision.action, 'read_back', 'direct tool gate must consume missing provider evidence without relying on a prompt marker')
+        assert.equal(blocked.response.decision.action, 'allow', 'direct tool gate records missing presentation without vetoing business judgment')
         assert.equal(last().viewIncompleteReason, 'hidden')
       }
       if (name === 'finite-progress') {
         await read('failure', 'query-a', 'failure', 0, { status: 'failed_before_execution' })
         const write = action('repeat-1', 'mutation-a', 'Mail', 'write', 'EmailClientV2__send')
-        for (let index = 1; index <= 6; index++) await invoke('before_tool', index, { action: { ...write, id: 'repeat-' + index } })
-        assert.equal(state().gaia2_progress_state.recommendation, 'clarify_or_safe_finish')
+        for (let index = 1; index <= 6; index++) assert.equal((await invoke('before_tool', index, { action: { ...write, id: 'repeat-' + index } })).response.decision.action, 'allow')
+        assert.equal(state().gaia2_progress_state.consecutive_no_progress, 1, 'admission alone does not inflate business-progress counters')
         const stoppedRepeat = await invoke('before_tool', 7, { action: { ...write, id: 'repeat-last' } })
-        assert.equal(stoppedRepeat.response.decision.action, 'block')
-        assert.match(stoppedRepeat.response.decision.reason, /no_progress_replan_required/)
+        assert.equal(stoppedRepeat.response.decision.action, 'allow')
+        assert.doesNotMatch(stoppedRepeat.response.decision.reason, /no_progress_replan_required/)
+        assert.equal(stoppedRepeat.response.hookReceipts.find(item => item.hookId === 'gaia2-conflict-gate').status, 'passed')
         assert.equal((await invoke('before_tool', 8, { action: action('wait-safe', 'wait', 'SystemApp', 'wait', 'SystemApp__wait_for_notification') })).response.decision.action, 'allow')
         assert.equal((await invoke('before_tool', 8, { action: action('finish-safe', 'finish', 'AgentUserInterface', 'finish', 'AgentUserInterface__send_message_to_user') })).response.decision.action, 'allow')
         await read('recovered', 'query-a', 'fresh', 9)

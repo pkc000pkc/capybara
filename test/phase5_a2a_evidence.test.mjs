@@ -11,7 +11,7 @@ const id = character => character.repeat(32)
 const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : value && typeof value === 'object'
   ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}` : JSON.stringify(value)
 
-function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore = false, blockedArguments,
+function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore = false, blockedArguments, hostArgumentMetadata = false,
   deadlineClock = false, scopeDeadline = 1000, clockTimeoutMs = 900000, clockUnit = 'seconds', nativeAdmission = false, nativeRefusal = false } = {}) {
   if (nativeAdmission || nativeRefusal) deadlineClock = true
   const clockVersion = nativeAdmission || nativeRefusal ? 'gaia2-official-a2a-clock-v2' : 'gaia2-official-a2a-clock-v1'
@@ -94,9 +94,11 @@ function fixture({ sourceReturn = false, failedGeneration = false, blockedBefore
     const beforeClockEvidenceRef = store(`${root}/json/clock-${id('8')}.json`, { schemaVersion: 'gaia2-private-native-clock-receipt-v1', ...common,
       checkpoint: 'before_tool', clock, clockAuthority: 'ARE', revisionMeaning: 'owner_observation_sequence_not_are_revision', nativeReturnEvidenceRef: null })
     const decision = { action: 'read_back', reason: 'A fresh authoritative read is required.', resourceKey: writer.resourceKey }
+    const hostAction = { id: action.id, name: writer.toolId, canonicalName: writer.canonicalName, effect: writer.effect, resourceKey: writer.resourceKey,
+      mutationKey: action.mutationKey, arguments: argumentsValue, authoritativeRead: false,
+      ...(hostArgumentMetadata ? { argumentHash: argumentsHash, argumentFieldHashes: { '': argumentsHash, '/title': sha(canonical(argumentsValue.title)) }, argumentFieldNumbers: {}, argumentMetadataComplete: true } : {}) }
     const beforeEvidence = store('C:/evidence/child-host/blocked-before.json', { schemaVersion: 'capybara-runtime-plugin-invocation-v1', sequence: 2,
-      executionId: 'child', sessionId: 'child-session', input: { checkpoint: 'before_tool', clock, action: { id: action.id, name: writer.toolId,
-        canonicalName: writer.canonicalName, effect: writer.effect, resourceKey: writer.resourceKey, mutationKey: action.mutationKey, arguments: argumentsValue, authoritativeRead: false } },
+      executionId: 'child', sessionId: 'child-session', input: { checkpoint: 'before_tool', clock, action: hostAction },
       decision, safetyFailure: null, hookReceipts: [{ hookId: 'gaia2-conflict-gate', status: 'passed', matched: true, decision }], trustedNativeCheckpoint: { schemaVersion: 'capybara-trusted-native-checkpoint-v1',
         scopeHash, checkpoint: 'before_tool', actionHash: wire(action), clockEvidenceRef: beforeClockEvidenceRef, hookOutcome: null } })
     const nativeDiscardEvidenceRef = store(`${root}/json/discard-${id('9')}.json`, { schemaVersion: 'gaia2-private-native-discard-v1', ...common,
@@ -257,6 +259,14 @@ test('clock-v2 requires a sealed native deadline contract and checks physical ad
     assert.equal(proof.nativeAdmissionGuardedChildCount, 0)
     assert.equal(proof.nativeAdmissionRefusalCount, 0)
   }
+})
+
+test('A2A evidence rejects duplicate client-pool snapshots before selecting the first one', () => {
+  const value = fixture({ deadlineClock: true })
+  const pool = value.events.find(event => event.type === 'a2a_client_pool_snapshot')
+  assert.ok(pool)
+  value.events.push(structuredClone(pool))
+  assert.deepEqual(officialA2ARuntimeEvidenceErrors(value.events, value.identity, value.options), ['a2a_client_pool_duplicate'])
 })
 
 test('owner expiry after allowed Hook charges the reservation but proves zero physical native body', () => {
@@ -476,6 +486,11 @@ test('blocked action hashes use exact registry canonical bytes for numeric keys,
   const value = fixture({ blockedBefore: true, blockedArguments: { '2': 'later', '10': 'lexically first', nested: { '\u{1F9AB}': '中文\n', '\ue000': '\t', amount: 0.0000001, negative: -0, items: [1.5, 0.000001] } } })
   const verified = verifyOfficialA2ARuntimeEvidence({ events: value.events, identity: value.identity, ...value.options })
   assert.equal(verified.consumedEvidencePaths.length, value.refs.length)
+})
+
+test('A2A blocked evidence accepts trusted Host-derived argument metadata', () => {
+  const value = fixture({ blockedBefore: true, hostArgumentMetadata: true })
+  assert.doesNotThrow(() => verifyOfficialA2ARuntimeEvidence({ events: value.events, identity: value.identity, ...value.options }))
 })
 
 const blockedDispatch = '00000000-0000-4000-8000-000000000002'

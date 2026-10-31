@@ -13,8 +13,8 @@
     "time",
     "ambiguity"
   ],
-  "model": "gpt-6-luna",
-  "officialVerifier": "meta-agents-research-environments==1.2.0 ScenarioValidationResult (judge_model=gpt-6-luna, judge_provider=local, judge_endpoint=baseUrl)",
+  "model": "gpt-6.1-terra",
+  "officialVerifier": "meta-agents-research-environments==1.2.0 ScenarioValidationResult (judge_model=gpt-6.1-terra, judge_provider=local, judge_endpoint=baseUrl)",
   "a2a": "official-ten-app-pool-source-bound-production-delegation",
   "noise": "official-augmentation-with-source-bound-observation-ledger",
   "seed": 20260930,

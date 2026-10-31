@@ -1,13 +1,13 @@
 {
   "schemaVersion": "gaia2-capability-inventory-v1",
-  "generatedAt": "2026-10-14T05:53:34.512Z",
+  "generatedAt": "2026-10-30T21:46:18.692Z",
   "noModelExecution": true,
   "plugins": [
     {
       "id": "gaia2-runtime",
       "sourceRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/plugins/gaia2-runtime",
-      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/1a3731b583c39aed31de211068c513ea28e4f8d13f60a2eaefc12550372ec69e",
-      "treeSha256": "1a3731b583c39aed31de211068c513ea28e4f8d13f60a2eaefc12550372ec69e",
+      "snapshotRoot": "D:/gitlocals/kanli8-human/capybara-test-workspaces/gaia2-project/.phase0-cache/plugins/gaia2-runtime/9b803399f688313791e2bb972cf64238c7f5cbb3cdd8c0c48766a9e90f45955c",
+      "treeSha256": "9b803399f688313791e2bb972cf64238c7f5cbb3cdd8c0c48766a9e90f45955c",
       "files": [
         {
           "relativePath": "capybara.plugin.json",
@@ -16,13 +16,13 @@
         },
         {
           "relativePath": "harnesses/manifest.json",
-          "sha256": "ee74877e77881744a54c3ea12618947efd9638da130d4f486070d20a963f1def",
-          "bytes": 523
+          "sha256": "b3f2e2075d8d1ffb3650fdcab832e75b109190d708c120220238115e2243e30d",
+          "bytes": 937
         },
         {
           "relativePath": "harnesses/runtime-contract.j2",
-          "sha256": "8bb62f4bbbfce7bcb89466cc0421ae8be11e611dcf64f0c0e4d4e821d450b2c4",
-          "bytes": 2710
+          "sha256": "afaf21672d735bd3a595f2e7857c210d4091d9095284702d5b887ea56721fea2",
+          "bytes": 10454
         },
         {
           "relativePath": "hooks/gaia2-a2a-guard.ts",
@@ -30,29 +30,44 @@
           "bytes": 1541
         },
         {
+          "relativePath": "hooks/gaia2-action-ledger.ts",
+          "sha256": "3f987f210c09bf82d46c92e30b74c07fb1bc8ff89897e75b2d5ffa9cf416e1a8",
+          "bytes": 9701
+        },
+        {
           "relativePath": "hooks/gaia2-attempt-finalize.ts",
-          "sha256": "9c82c412ed18c20ad2934286206e663b6e3cd0752821e7da302c70db8b774874",
-          "bytes": 811
+          "sha256": "027df12de069ddd6b724e64f7cdaa8522f84f006a2f0dfdb2d0db6a52e77602a",
+          "bytes": 5611
+        },
+        {
+          "relativePath": "hooks/gaia2-conflict-context-refresh.ts",
+          "sha256": "7c2626477fdf5e88206b87ec544c0a1be8fc1690d74807124f3403141a6637e0",
+          "bytes": 1293
         },
         {
           "relativePath": "hooks/gaia2-conflict-gate.ts",
-          "sha256": "ac0da71bf857dce20a490590eb569665ee29dbb9f1861e8588f698fcbe11d569",
-          "bytes": 6833
+          "sha256": "9b7a27fc74a5d429c086998f47b80c80da736521cc686ce2dbe156998b505bb6",
+          "bytes": 7761
         },
         {
           "relativePath": "hooks/gaia2-event-sync.ts",
-          "sha256": "ecb0c15939813e1652429413b76963bef38e73bfcd34b1eefb29f40a61cce9ec",
-          "bytes": 2211
+          "sha256": "831c8f08ca910ed48e9ed32c3de3e5311294452c485c509a4ae59073f2ab58c2",
+          "bytes": 2822
+        },
+        {
+          "relativePath": "hooks/gaia2-finish-guard.ts",
+          "sha256": "86cfb2d7eb0537bcad8650dbf07c6d6f9f79c3bde1ed34686d3c0d527afa1887",
+          "bytes": 7545
         },
         {
           "relativePath": "hooks/gaia2-noise-classifier.ts",
-          "sha256": "46611e57ba94642a36f71cc1ce15f044fc25a0691466f61ecdfcc6875455b4e1",
-          "bytes": 7477
+          "sha256": "ff5af007f710c87b39e3b029fc70c7f3cdf7728342f3a87989d4e468ffec0ced",
+          "bytes": 19021
         },
         {
           "relativePath": "hooks/gaia2-observation-refresh.ts",
-          "sha256": "bbd05aadf2530357780da52d0200bc48aeebaf772609131afcfbc9321d88d4aa",
-          "bytes": 3951
+          "sha256": "ddd6b93445a8824a2447b79ac45117379e3d310ccd6643b2aba4a000158965ed",
+          "bytes": 7884
         },
         {
           "relativePath": "hooks/gaia2-replan.ts",
@@ -60,19 +75,44 @@
           "bytes": 1386
         },
         {
+          "relativePath": "hooks/gaia2-task-contract-commit.ts",
+          "sha256": "97c028758952292c7b49ef215e3d88df987c63083cba47a65d6fb86c9c24e45a",
+          "bytes": 13053
+        },
+        {
+          "relativePath": "hooks/gaia2-task-reconciliation.ts",
+          "sha256": "80b062823b5ef6d5448aac08420ffac36aa8aea33e9f08958fa6d9a471dce69a",
+          "bytes": 21184
+        },
+        {
+          "relativePath": "hooks/gaia2-temporal-commit.ts",
+          "sha256": "bee6a419e6366b5d4b196b87991cf1aa06532e9a350bb4245f55d85bcb417469",
+          "bytes": 6518
+        },
+        {
+          "relativePath": "hooks/gaia2-window-obligation-advance.ts",
+          "sha256": "fd4a9ffa95f7b31da9a0f1b86fa1ab74983febd1ca17809adfcb12853d8d1fca",
+          "bytes": 6658
+        },
+        {
+          "relativePath": "hooks/gaia2-window-obligation-register.ts",
+          "sha256": "27ccb03a471256bf108baad3d798df27904500e431b64db28ae241c610b477ca",
+          "bytes": 5338
+        },
+        {
           "relativePath": "hooks/gaia2-write-guard.ts",
-          "sha256": "f7823a2e99e2a3fdec5ee3612dc9935ac6f86eb74b7f34762a50a7654c377abc",
-          "bytes": 2925
+          "sha256": "dcce6d3e1567a375c0b5d99d3a98a884e770c6b4373c028bda5e525e322604ce",
+          "bytes": 3301
         },
         {
           "relativePath": "hooks/gaia2-write-outcome.ts",
-          "sha256": "6a2529306736e2059575ce66d5b17a214642b787ac5d87976ea651eb342bb9aa",
-          "bytes": 1807
+          "sha256": "f4dd2bc5f93b7587fa8f571fa4d846b66380f2e04c89efd6f286ba96e53e73fd",
+          "bytes": 5369
         },
         {
           "relativePath": "variables.json",
-          "sha256": "92a3cd9e7889e697b67308dab562569322c8384be8cd38865a1a09145b3c4913",
-          "bytes": 5553
+          "sha256": "4ed1299989cd4e9e1f313db3f5a0c5a5e9990245bae2d75609470c727ff13c44",
+          "bytes": 13352
         }
       ],
       "immutablePolicy": "content-addressed-readonly-files-never-overwrite-verify-before-use",
@@ -100,7 +140,7 @@
       },
       "variables": {
         "path": "variables.json",
-        "count": 12,
+        "count": 28,
         "keys": [
           "gaia2_runtime_policy",
           "gaia2_correction_policy",
@@ -109,13 +149,29 @@
           "gaia2_event_state",
           "gaia2_attempt_state",
           "gaia2_write_state",
+          "gaia2_mutation_context",
           "gaia2_replan_state",
           "gaia2_observation_state",
           "gaia2_noise_state",
           "gaia2_progress_state",
+          "gaia2_action_ledger",
+          "gaia2_action_ledger_context",
+          "gaia2_entity_state",
+          "gaia2_entity_context",
+          "gaia2_task_contract_state",
+          "gaia2_task_contract_context",
+          "gaia2_task_reconciliation",
+          "gaia2_task_reconciliation_context",
+          "gaia2_window_obligation_state",
+          "gaia2_window_obligation_source",
+          "gaia2_window_obligation_context",
+          "gaia2_conflict_state",
+          "gaia2_conflict_context",
+          "gaia2_temporal_state",
+          "gaia2_temporal_context",
           "gaia2_runtime_context"
         ],
-        "typedObjectCount": 11
+        "typedObjectCount": 19
       },
       "harnesses": [
         {
@@ -123,7 +179,7 @@
           "type": "persistent",
           "manifestPath": "harnesses/manifest.json",
           "entryPath": "harnesses/runtime-contract.j2",
-          "sha256": "8bb62f4bbbfce7bcb89466cc0421ae8be11e611dcf64f0c0e4d4e821d450b2c4"
+          "sha256": "afaf21672d735bd3a595f2e7857c210d4091d9095284702d5b887ea56721fea2"
         }
       ],
       "hooks": [
@@ -135,38 +191,59 @@
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
+          "name": "gaia2-action-ledger",
+          "checkpoint": "after_tool",
+          "path": "hooks/gaia2-action-ledger.ts",
+          "sha256": "3f987f210c09bf82d46c92e30b74c07fb1bc8ff89897e75b2d5ffa9cf416e1a8",
+          "inspection": "static-resource-shape-only-not-executed"
+        },
+        {
           "name": "gaia2-attempt-finalize",
           "checkpoint": "attempt_end",
           "path": "hooks/gaia2-attempt-finalize.ts",
-          "sha256": "9c82c412ed18c20ad2934286206e663b6e3cd0752821e7da302c70db8b774874",
+          "sha256": "027df12de069ddd6b724e64f7cdaa8522f84f006a2f0dfdb2d0db6a52e77602a",
+          "inspection": "static-resource-shape-only-not-executed"
+        },
+        {
+          "name": "gaia2-conflict-context-refresh",
+          "checkpoint": "before_model",
+          "path": "hooks/gaia2-conflict-context-refresh.ts",
+          "sha256": "7c2626477fdf5e88206b87ec544c0a1be8fc1690d74807124f3403141a6637e0",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-conflict-gate",
           "checkpoint": "before_tool",
           "path": "hooks/gaia2-conflict-gate.ts",
-          "sha256": "ac0da71bf857dce20a490590eb569665ee29dbb9f1861e8588f698fcbe11d569",
+          "sha256": "9b7a27fc74a5d429c086998f47b80c80da736521cc686ce2dbe156998b505bb6",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-event-sync",
           "checkpoint": "before_model",
           "path": "hooks/gaia2-event-sync.ts",
-          "sha256": "ecb0c15939813e1652429413b76963bef38e73bfcd34b1eefb29f40a61cce9ec",
+          "sha256": "831c8f08ca910ed48e9ed32c3de3e5311294452c485c509a4ae59073f2ab58c2",
+          "inspection": "static-resource-shape-only-not-executed"
+        },
+        {
+          "name": "gaia2-finish-guard",
+          "checkpoint": "before_tool",
+          "path": "hooks/gaia2-finish-guard.ts",
+          "sha256": "86cfb2d7eb0537bcad8650dbf07c6d6f9f79c3bde1ed34686d3c0d527afa1887",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-noise-classifier",
           "checkpoint": "after_tool",
           "path": "hooks/gaia2-noise-classifier.ts",
-          "sha256": "46611e57ba94642a36f71cc1ce15f044fc25a0691466f61ecdfcc6875455b4e1",
+          "sha256": "ff5af007f710c87b39e3b029fc70c7f3cdf7728342f3a87989d4e468ffec0ced",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-observation-refresh",
           "checkpoint": "before_model",
           "path": "hooks/gaia2-observation-refresh.ts",
-          "sha256": "bbd05aadf2530357780da52d0200bc48aeebaf772609131afcfbc9321d88d4aa",
+          "sha256": "ddd6b93445a8824a2447b79ac45117379e3d310ccd6643b2aba4a000158965ed",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
@@ -177,17 +254,52 @@
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
+          "name": "gaia2-task-contract-commit",
+          "checkpoint": "after_tool",
+          "path": "hooks/gaia2-task-contract-commit.ts",
+          "sha256": "97c028758952292c7b49ef215e3d88df987c63083cba47a65d6fb86c9c24e45a",
+          "inspection": "static-resource-shape-only-not-executed"
+        },
+        {
+          "name": "gaia2-task-reconciliation",
+          "checkpoint": "after_tool",
+          "path": "hooks/gaia2-task-reconciliation.ts",
+          "sha256": "80b062823b5ef6d5448aac08420ffac36aa8aea33e9f08958fa6d9a471dce69a",
+          "inspection": "static-resource-shape-only-not-executed"
+        },
+        {
+          "name": "gaia2-temporal-commit",
+          "checkpoint": "after_tool",
+          "path": "hooks/gaia2-temporal-commit.ts",
+          "sha256": "bee6a419e6366b5d4b196b87991cf1aa06532e9a350bb4245f55d85bcb417469",
+          "inspection": "static-resource-shape-only-not-executed"
+        },
+        {
+          "name": "gaia2-window-obligation-advance",
+          "checkpoint": "after_tool",
+          "path": "hooks/gaia2-window-obligation-advance.ts",
+          "sha256": "fd4a9ffa95f7b31da9a0f1b86fa1ab74983febd1ca17809adfcb12853d8d1fca",
+          "inspection": "static-resource-shape-only-not-executed"
+        },
+        {
+          "name": "gaia2-window-obligation-register",
+          "checkpoint": "before_model",
+          "path": "hooks/gaia2-window-obligation-register.ts",
+          "sha256": "27ccb03a471256bf108baad3d798df27904500e431b64db28ae241c610b477ca",
+          "inspection": "static-resource-shape-only-not-executed"
+        },
+        {
           "name": "gaia2-write-guard",
           "checkpoint": "before_tool",
           "path": "hooks/gaia2-write-guard.ts",
-          "sha256": "f7823a2e99e2a3fdec5ee3612dc9935ac6f86eb74b7f34762a50a7654c377abc",
+          "sha256": "dcce6d3e1567a375c0b5d99d3a98a884e770c6b4373c028bda5e525e322604ce",
           "inspection": "static-resource-shape-only-not-executed"
         },
         {
           "name": "gaia2-write-outcome",
           "checkpoint": "after_tool",
           "path": "hooks/gaia2-write-outcome.ts",
-          "sha256": "6a2529306736e2059575ce66d5b17a214642b787ac5d87976ea651eb342bb9aa",
+          "sha256": "f4dd2bc5f93b7587fa8f571fa4d846b66380f2e04c89efd6f286ba96e53e73fd",
           "inspection": "static-resource-shape-only-not-executed"
         }
       ],
@@ -403,8 +515,8 @@
         "passed": true
       }
     ],
-    "inspectedProjectSourceCount": 124,
-    "inspectedBackendSourceCount": 48,
+    "inspectedProjectSourceCount": 176,
+    "inspectedBackendSourceCount": 51,
     "projectPluginLoader": {
       "status": "session_scoped_real_backend_host",
       "evidence": [
@@ -438,7 +550,7 @@
     "schemaEvidence": [
       {
         "path": "D:/gitlocals/kanli8-human/capybara-backend/src/core/project-resources.ts",
-        "sha256": "5ceadb80a8efaa4f371452a8609939a690e0112b98b6ba9dada72fb65a869132"
+        "sha256": "f6900df5d7c384f36f81b9337334be11e6c91a285c1bbfc1e05f192b91ff75a6"
       },
       {
         "path": "D:/gitlocals/kanli8-human/capybara-backend/src/core/harnesses/harness-registry.ts",
@@ -446,7 +558,7 @@
       },
       {
         "path": "D:/gitlocals/kanli8-human/capybara-backend/src/core/plugins/runtime-plugin-host.ts",
-        "sha256": "363d237baf318a5cd8c34a407e4468ccb3a9c4cbb6da37fcb5a40e73cac36a1d"
+        "sha256": "d960dace2f115352fd93c0f4428bb269363a3b0f7c6d9d245537fd68a7d4f78b"
       }
     ],
     "gaps": [],

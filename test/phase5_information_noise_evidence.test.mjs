@@ -33,15 +33,15 @@ function after({ previous = base(), id = 'new', hash = h('b'), action = {}, outc
     outcome: { status: 'succeeded', complete: true, resultHash: hash, ...outcome } }
   const nextRecord = record(id, input.outcome.resultHash || null, { observedAt: 20, canonicalName: input.action.canonicalName,
     resourceKey: input.action.resourceKey, queryHash: input.action.mutationKey || null,
-    status: status || (input.outcome.status !== 'succeeded' ? 'failed' : input.outcome.complete === false || input.outcome.viewComplete === false ? 'incomplete' : duplicateOf ? 'duplicate' : 'observed'),
-    outcomeStatus: input.outcome.status, complete: input.outcome.complete !== false, viewComplete: input.outcome.viewComplete !== false,
+    status: status || (input.outcome.status !== 'succeeded' ? 'failed' : input.outcome.complete !== true || input.outcome.viewComplete === false ? 'incomplete' : duplicateOf ? 'duplicate' : 'observed'),
+    outcomeStatus: input.outcome.status, complete: input.outcome.complete === true, viewComplete: input.outcome.viewComplete !== false,
     authoritativeRead: input.action.effect === 'read' && input.action.authoritativeRead === true, ...(duplicateOf ? { duplicateOf } : {}) })
   const current = observations(clone(previous), rows || [...clone(previous.gaia2_observation_state.observations), nextRecord])
   current.gaia2_noise_state.decisions.push(nextRecord)
   if (duplicateOf) current.gaia2_noise_state.deduplicated.push(nextRecord.observationId)
   const oldProgress = previous.gaia2_progress_state, count = advanced ? 0 : oldProgress.consecutive_no_progress + 1
   const signature = JSON.stringify([input.action.canonicalName, input.action.resourceKey, input.action.mutationKey || null])
-  const full = input.outcome.status === 'succeeded' && input.outcome.complete !== false && input.outcome.viewComplete !== false
+  const full = input.outcome.status === 'succeeded' && input.outcome.complete === true && input.outcome.viewComplete !== false
   current.gaia2_progress_state = { ...oldProgress, steps: oldProgress.steps + 1, consecutive_no_progress: count,
     blocked_repetitions: advanced ? 0 : oldProgress.blocked_repetitions, blocked_signature: advanced ? null : oldProgress.blocked_signature,
     last_reason: advanced ? resolved ? 'evidence_verified' : 'new_observable_progress' : 'repeated_or_uncertain_result',
@@ -83,7 +83,9 @@ test('absent/v1 contracts preserve historical evidence; unknown versions do not'
 })
 test('complete native after_tool binds source/resource/query/hash/clock and artifacts', () => good(after()))
 test('default metadata and failed null hash do not invent noise or reject legacy action IDs', () => {
-  const full = after({ id: 'native call: legacy/id' }); delete full.input.outcome.complete; good(full)
+  const incomplete = after({ id: 'native call: legacy/id', outcome: { complete: undefined }, advanced: false }); delete incomplete.input.outcome.complete; good(incomplete)
+  assert.equal(incomplete.variables.gaia2_observation_state.observations.at(-1).complete, false)
+  assert.equal(incomplete.variables.gaia2_observation_state.observations.at(-1).status, 'incomplete')
   good(after({ id: 'legacy-failed', hash: null, outcome: { status: 'failed', complete: false }, advanced: false }))
 })
 test('rebound outcome hash cannot bless a stale record or forged classification artifact', () => {

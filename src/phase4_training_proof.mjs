@@ -155,9 +155,9 @@ export function verifyTrainingProbeEvidence({ trainingReportRef, readEvidence })
     evidence: { runtimeAttestationHash: digest(parent.result.runtimeAttestation), resultHash: parent.resultHash, manifestHash: parent.manifest.manifestHash } }
   check(digest(input) === digest(expectedInput)
     && report.trainingInputHash === digest(input) && digest(spec.invocation) === digest(invocation), 'training input binding')
-  check(digest(spec.options.contract) === digest(CORRECTION_CONTRACT) && spec.options.providerCleanupTimeoutMs === 30000
+  check(digest(spec.options.contract) === digest(CORRECTION_CONTRACT) && spec.options.providerCleanupTimeoutMs === 30000 && spec.options.hookTimeoutMs === 900000
     && spec.options.scenarioId === parent.task.scenarioId && spec.options.executionId !== parent.task.executionId && spec.options.sessionId !== parent.session.sessionId
-    && digest(Object.keys(spec.options).sort()) === digest(['projectDir', 'workspaceDir', 'plugins', 'executionId', 'sessionId', 'scenarioId', 'contract', 'providerCleanupTimeoutMs'].sort())
+    && digest(Object.keys(spec.options).sort()) === digest(['projectDir', 'workspaceDir', 'plugins', 'executionId', 'sessionId', 'scenarioId', 'contract', 'providerCleanupTimeoutMs', 'hookTimeoutMs'].sort())
     && digest(spec.models) === digest(manifest.models) && digest(spec.options.plugins) === digest(capabilities.plugins.map(({ id, snapshotRoot, files }) => ({ id, snapshotRoot, files }))), 'training Host frozen configuration')
   check(host.schemaVersion === 'gaia2-phase4-training-host-result-v1' && host.status === 'passed' && host.result?.status === 'passed'
     && host.cleanupCompleted === true && host.manualInspectionRequired === false && host.failureCode === null, 'training Host not healthy')

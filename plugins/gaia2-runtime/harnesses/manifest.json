@@ -9,7 +9,7 @@
       "entry": "runtime-contract.j2",
       "priority": 210,
       "activation": {},
-      "inputs": ["builtin.variables.gaia2_runtime_context", "builtin.variables.gaia2_observation_state", "builtin.variables.gaia2_write_state"],
+      "inputs": ["builtin.variables.gaia2_runtime_context", "builtin.variables.gaia2_clock_state", "builtin.variables.gaia2_write_state", "builtin.variables.gaia2_mutation_context", "builtin.variables.gaia2_action_ledger_context", "builtin.variables.gaia2_task_reconciliation_context", "builtin.variables.gaia2_temporal_context", "builtin.variables.gaia2_temporal_state", "builtin.variables.gaia2_window_obligation_context", "builtin.variables.gaia2_window_obligation_state", "builtin.variables.gaia2_entity_context", "builtin.variables.gaia2_entity_state"],
       "requiredTools": []
     }
   ]

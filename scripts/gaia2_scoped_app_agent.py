@@ -263,6 +263,7 @@ class ScopedAppAgentRunner:
                  model_binding: dict | None = None, model_gate: Callable | None = None,
                  model_attempt: Callable | None = None, model_finish: Callable | None = None,
                  max_logical_requests: int | None = None, log_callback: Callable | None = None,
+                 diagnostic_callback: Callable | None = None,
                  generation_time_owner_factory: Callable[[], ScopedAREGenerationTimeOwner] | None = None,
                  generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None,
                  deadline_factory: Callable[[str], ScopedOSDeadline] | None = None,
@@ -272,7 +273,8 @@ class ScopedAppAgentRunner:
                 or not isinstance(env, Environment) or not isinstance(llm_engine, LLMEngine)
                 or not callable(dispatch)
                 or app.time_manager is not env.time_manager
-                or (log_callback is not None and not callable(log_callback))):
+                or (log_callback is not None and not callable(log_callback))
+                or (diagnostic_callback is not None and not callable(diagnostic_callback))):
             _fatal("SCOPED_AGENT_INITIALIZATION_INVALID")
         registered = env.apps.get(app.name)
         if registered is not app:
@@ -313,6 +315,11 @@ class ScopedAppAgentRunner:
                     or notification_reader.time_manager is not env.time_manager):
                 _fatal("SCOPED_AGENT_NOTIFICATION_READER_SCOPE_INVALID")
         self.__notification_reader = notification_reader
+        self.__diagnostic_callback = diagnostic_callback
+        self.__format_failure_count = 0
+        self.__consecutive_format_failures = 0
+        self.__format_failure_sequence = 0
+        self.__last_format_failure = None
         if notification_pump is not None and (not callable(notification_pump) or notification_reader is None):
             _fatal("SCOPED_AGENT_NOTIFICATION_PUMP_INVALID")
         self.__notification_pump = notification_pump
@@ -513,6 +520,7 @@ class ScopedAppAgentRunner:
                 "parse_action", "execute_parsed_action", "extract_action", "_append_final_answer", "update_tools")),
             _callable_identity(self.app_agent.expert_agent), _callable_identity(base.log_callback),
             _callable_identity(self.__official_log_callback),
+            _callable_identity(self.__diagnostic_callback) if self.__diagnostic_callback is not None else (),
             _callable_identity(self.__official_execute_parsed),
             _callable_identity(self.__dispatch), _callable_identity(getattr(self.__dispatch, "__call__", None)),
             id(self.__owner), _callable_identity(self.__owner.manifest),
@@ -634,11 +642,68 @@ class ScopedAppAgentRunner:
             _callable_identity(deadline.remaining), deadline.scope_id, deadline.duration_seconds)
         return deadline
 
+    def __format_failure_code(self, log) -> str | None:
+        if not isinstance(log, ErrorLog):
+            return None
+        error_type = log.error if isinstance(log.error, str) else ""
+        exception = log.exception if isinstance(log.exception, str) else ""
+        if error_type == "FormatError" or "multiple actions" in exception.lower():
+            return "multiple_actions"
+        if error_type == "InvalidActionAgentError":
+            lowered = exception.lower()
+            if "no 'action:' token" in lowered or "did not contain action" in lowered:
+                return "missing_action"
+            return "invalid_action_format"
+        if error_type in {"JSONDecodeError", "JSONDecodeError"} and "action" in exception.lower():
+            return "invalid_action_json"
+        return None
+
+    def __record_format_failure(self, log, code: str) -> None:
+        self.__format_failure_count += 1
+        self.__consecutive_format_failures += 1
+        self.__format_failure_sequence += 1
+        exception_text = log.exception if isinstance(log.exception, str) else ""
+        diagnostic = {
+            "schemaVersion": "gaia2-a2a-child-diagnostic-v1",
+            "kind": "parse_failure",
+            "failureCode": code,
+            "executionId": self.__scope["childExecutionId"],
+            "sessionId": self.__scope["childSessionId"],
+            "requestId": self.__scope["requestId"],
+            "sequence": self.__format_failure_sequence,
+            "iteration": self.base_agent.iterations,
+            "consecutiveFormatFailures": self.__consecutive_format_failures,
+            "formatFailureCount": self.__format_failure_count,
+            "logicalRequests": self.__model_calls,
+            "nativeActionCount": len(self.__actions),
+            "recoverable": self.__consecutive_format_failures < 3,
+            "outputHash": hashlib.sha256(exception_text.encode("utf-8")).hexdigest(),
+            "errorHash": hashlib.sha256((code + "|" + exception_text).encode("utf-8")).hexdigest(),
+        }
+        self.__last_format_failure = diagnostic
+        if self.__diagnostic_callback is not None:
+            try:
+                self.__diagnostic_callback(_clone(diagnostic))
+            except BaseException:
+                self.__failed = True
+                self.__failure_code = "SCOPED_AGENT_DIAGNOSTIC_CALLBACK_FAILED"
+                _fatal(self.__failure_code)
+        if self.__consecutive_format_failures >= 3:
+            self.__failed = True
+            self.__failure_code = "SCOPED_AGENT_FORMAT_FAILURE_THRESHOLD"
+            self.base_agent.stop()
+
     def __log_callback(self, log):
         # The official append_agent_log method remains intact. Only its trusted
         # callback exception boundary is guarded, including pre-action logs.
         try:
-            return self.__official_log_callback(log)
+            result = self.__official_log_callback(log)
+            code = self.__format_failure_code(log)
+            if code is not None:
+                self.__record_format_failure(log, code)
+            elif isinstance(log, ErrorLog):
+                self.__consecutive_format_failures = 0
+            return result
         except BaseException:
             self.__failed = True
             self.__failure_code = "SCOPED_AGENT_LOG_FAILED"
@@ -1407,6 +1472,7 @@ class ScopedAppAgentRunner:
         """
         try:
             self.__check()
+            self.__consecutive_format_failures = 0
             self.__official_execute_parsed(parsed_action, append_agent_log, make_timestamp, agent_id)
             self.__check()
         except BaseException as error:
@@ -1485,6 +1551,11 @@ class ScopedAppAgentRunner:
             "started": self.__started, "closed": self.__closed, "completed": self.__completed and not self.__failed,
             "failed": self.__failed, "failureCode": self.__failure_code,
             "completionEvidenceRef": self.__completion_ref, "actions": self.__actions, "blockedActions": self.__blocked_actions,
+            "formatFailureCount": self.__format_failure_count,
+            "consecutiveFormatFailures": self.__consecutive_format_failures,
+            "lastFormatFailureCode": None if self.__last_format_failure is None else self.__last_format_failure["failureCode"],
+            "lastFormatFailure": self.__last_format_failure,
+            "diagnosticCallbackAttached": self.__diagnostic_callback is not None,
             "notificationReaderAttached": self.__notification_reader is not None,
             "notificationPumpAttached": self.__notification_pump is not None,
             "notificationDeliveryReceipts": self.__notification_delivery_receipts,
@@ -1514,10 +1585,12 @@ def build_scoped_app_agent(*, app: App, owner: NativeAppBinding, env: Environmen
                           generation_ledger_factory: Callable[..., ScopedGenerationTimeLedger] | None = None,
                           deadline_factory: Callable[[str], ScopedOSDeadline] | None = None,
                           notification_reader: ScopedChildNotificationReader | None = None,
-                          notification_pump: Callable[[str], bool] | None = None) -> ScopedAppAgentRunner:
+                          notification_pump: Callable[[str], bool] | None = None,
+                          diagnostic_callback: Callable[[dict], None] | None = None) -> ScopedAppAgentRunner:
     return ScopedAppAgentRunner(app=app, owner=owner, env=env, scope=scope,
         llm_engine=llm_engine, dispatch=dispatch, model_binding=model_binding, model_gate=model_gate,
         model_attempt=model_attempt, model_finish=model_finish, max_logical_requests=max_logical_requests,
         log_callback=log_callback, generation_time_owner_factory=generation_time_owner_factory,
         generation_ledger_factory=generation_ledger_factory, deadline_factory=deadline_factory,
-        notification_reader=notification_reader, notification_pump=notification_pump)
+        notification_reader=notification_reader, notification_pump=notification_pump,
+        diagnostic_callback=diagnostic_callback)
