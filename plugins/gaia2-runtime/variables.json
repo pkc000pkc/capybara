@@ -126,7 +126,7 @@
       "type": "object",
       "label": "GAIA2 information-noise state",
       "description": "Profile, independent seed, injection decisions, deduplicated records, conflicts, quarantined results, and schedule hash.",
-      "value": { "semanticVersion": 2, "profile": "off", "seed": null, "decisions": [], "deduplicated": [], "conflicts": [], "quarantined": [], "schedule_hash": "" },
+      "value": { "semanticVersion": 2, "profile": "off", "seed": null, "decisions": [], "deduplicated": [], "conflicts": [], "quarantined": [], "candidateLedger": { "schemaVersion": "gaia2-noise-candidate-ledger-v1", "revision": 0, "retained": [], "candidates": [], "quarantined": [] }, "schedule_hash": "" },
       "required": false,
       "readonly": false,
       "show_in_status": true,

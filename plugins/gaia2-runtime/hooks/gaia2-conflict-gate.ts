@@ -67,13 +67,27 @@ export default defineHook({
       conflict_ids: observations.filter(item => item.status === "conflicting").map(item => item.observationId),
       visibility_ids: observations.filter(item => !["verified_by_fresh_read", "superseded_by_fresh_read", "verified_absent_after_delete", "confirmed_mutation"].includes(item.status) && item.viewComplete === false && item.presentation !== "retrieval_filtered").map(item => item.observationId) };
     const diagnosticIds = [...new Set([...state.unverified_ids, ...state.stale_ids, ...state.conflict_ids, ...state.visibility_ids])];
+    const oldLedger = noise.candidateLedger;
+    const candidateLedger = oldLedger?.schemaVersion === "gaia2-noise-candidate-ledger-v1" ? (() => {
+      const byId = new Map(observations.map(item => [item.observationId, item]));
+      const move = item => {
+        const row = byId.get(item.observationId);
+        return row && ["failed", "incomplete", "stale", "conflicting"].includes(row.status)
+          ? { ...item, status: "quarantined", quarantineReason: row.status } : item;
+      };
+      const retained = (oldLedger.retained || []).map(move).filter(item => item.status === "retained").slice(-256);
+      const candidates = (oldLedger.candidates || []).map(move).filter(item => item.status === "candidate" || item.status === "reviewed").slice(-256);
+      const quarantined = [...(oldLedger.quarantined || []), ...(oldLedger.retained || []).map(move).filter(item => item.status === "quarantined"), ...(oldLedger.candidates || []).map(move).filter(item => item.status === "quarantined")]
+        .reduce((acc, item) => acc.some(existing => existing.candidateId === item.candidateId) ? acc : [...acc, item], []).slice(-256);
+      return { ...oldLedger, retained, candidates, quarantined };
+    })() : oldLedger;
     // Runtime checks provenance, not business sufficiency. No query or recovery
     // plan is synthesized and no TTL/presentation/progress diagnostic vetoes a call.
     const idle = { schemaVersion: "gaia2-conflict-state-v1", status: "idle", userRef: null, blockedAction: null, blockerIds: [], requests: [], reason: null };
     return { decision: { action: "allow", reason: "Evidence diagnostics are advisory; the Actor owns business judgment." },
       patches: [
         { op: "replace", path: "/builtin/variables/gaia2_observation_state", value: state },
-        { op: "replace", path: "/builtin/variables/gaia2_noise_state", value: { ...noise, conflicts: state.conflict_ids, quarantined: [...state.unverified_ids, ...state.stale_ids, ...state.conflict_ids] } },
+        { op: "replace", path: "/builtin/variables/gaia2_noise_state", value: { ...noise, conflicts: state.conflict_ids, quarantined: [...state.unverified_ids, ...state.stale_ids, ...state.conflict_ids], ...(candidateLedger ? { candidateLedger } : {}) } },
         { op: "replace", path: "/builtin/variables/gaia2_conflict_state", value: idle },
         { op: "replace", path: "/builtin/variables/gaia2_conflict_context", value: "" },
       ],

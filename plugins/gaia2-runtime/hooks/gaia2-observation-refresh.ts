@@ -76,6 +76,19 @@ export default defineHook({
     const progress = values.gaia2_progress_state;
     const context = "Advisory evidence diagnostics: " + [...state.unverified_ids, ...state.stale_ids, ...state.conflict_ids].slice(-12).join(", ") + ". Hidden/truncated views: " + state.visibility_ids.slice(-12).join(", ") + ". These flags do not veto actions or prescribe queries; decide whether more evidence is needed from the current request and actual native results. Presentation changes never refresh native time or query coverage.";
     const recovery = progress.recommendation !== "continue" ? " Observable no-progress count: " + progress.consecutive_no_progress + ". This is diagnostic, not a stop or replan instruction." : "";
-    return { patches: [{ op: "replace", path: "/builtin/variables/gaia2_observation_state", value: state }, { op: "replace", path: "/builtin/variables/gaia2_noise_state", value: { ...noise, conflicts: state.conflict_ids, quarantined: [...state.unverified_ids, ...state.stale_ids, ...state.conflict_ids] } }, ...(changed.length || recovery ? [{ op: "replace", path: "/builtin/variables/gaia2_runtime_context", value: context + recovery }] : [])], artifacts: [{ title: "GAIA2 evidence freshness refresh", value: { clockNow: clock.now, ttlSeconds: ttl, changed, recommendation: progress.recommendation } }] };
+    const oldLedger = noise.candidateLedger;
+    const ledger = oldLedger?.schemaVersion === "gaia2-noise-candidate-ledger-v1" ? (() => {
+      const rows = new Map(all.map(item => [item.observationId, item]));
+      const update = item => {
+        const row = rows.get(item.observationId), uncertain = row && ["failed", "incomplete", "stale", "conflicting"].includes(row.status);
+        return uncertain ? { ...item, status: "quarantined", quarantineReason: row.status } : item;
+      };
+      const retained = (oldLedger.retained || []).map(update).filter(item => item.status === "retained").slice(-256);
+      const candidates = (oldLedger.candidates || []).map(update).filter(item => item.status === "candidate" || item.status === "reviewed").slice(-256);
+      const quarantined = [...(oldLedger.quarantined || []), ...(oldLedger.retained || []).map(update).filter(item => item.status === "quarantined"), ...(oldLedger.candidates || []).map(update).filter(item => item.status === "quarantined")]
+        .reduce((acc, item) => acc.some(existing => existing.candidateId === item.candidateId) ? acc : [...acc, item], []).slice(-256);
+      return { ...oldLedger, revision: Number(oldLedger.revision || 0) + (changed.length ? 1 : 0), retained, candidates, quarantined };
+    })() : oldLedger;
+    return { patches: [{ op: "replace", path: "/builtin/variables/gaia2_observation_state", value: state }, { op: "replace", path: "/builtin/variables/gaia2_noise_state", value: { ...noise, conflicts: state.conflict_ids, quarantined: [...state.unverified_ids, ...state.stale_ids, ...state.conflict_ids], ...(ledger ? { candidateLedger: ledger } : {}) } }, ...(changed.length || recovery ? [{ op: "replace", path: "/builtin/variables/gaia2_runtime_context", value: context + recovery }] : [])], artifacts: [{ title: "GAIA2 evidence freshness refresh", value: { clockNow: clock.now, ttlSeconds: ttl, changed, recommendation: progress.recommendation } }] };
   },
 });

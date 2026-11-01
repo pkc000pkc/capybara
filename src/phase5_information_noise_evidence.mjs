@@ -48,6 +48,47 @@ const v2Index = observations => ({
   visibility_ids: observations.filter(item => !v2Terminal(item) && item.viewComplete === false && item.presentation !== 'retrieval_filtered').map(item => item.observationId),
 })
 const v2Summary = observation => ({ conflicts: observation.conflict_ids, quarantined: [...observation.unverified_ids, ...observation.stale_ids, ...observation.conflict_ids] })
+const candidateStatus = new Set(['retained', 'candidate', 'reviewed', 'quarantined'])
+function candidateLedgerErrors({ noise, previousNoise, observations, values, fail }) {
+  const ledger = noise?.candidateLedger
+  if (ledger === undefined) return
+  if (!object(ledger) || ledger.schemaVersion !== 'gaia2-noise-candidate-ledger-v1'
+    || !Number.isSafeInteger(ledger.revision) || ledger.revision < 0
+    || !Array.isArray(ledger.retained) || !Array.isArray(ledger.candidates) || !Array.isArray(ledger.quarantined)
+    || ledger.retained.length > 256 || ledger.candidates.length > 256 || ledger.quarantined.length > 256) { fail('noise_candidate_ledger_invalid'); return }
+  const byObservation = new Map(observations.map(item => [item.observationId, item]))
+  const seen = new Set()
+  for (const [bucket, rows] of [['retained', ledger.retained], ['candidates', ledger.candidates], ['quarantined', ledger.quarantined]]) {
+    for (const item of rows) {
+      if (!object(item) || !text(item.candidateId) || !text(item.observationId) || seen.has(item.candidateId)
+        || !candidateStatus.has(item.status) || item.status === 'retained' && bucket !== 'retained'
+        || ['candidate', 'reviewed'].includes(item.status) && bucket !== 'candidates'
+        || item.status === 'quarantined' && bucket !== 'quarantined') { fail('noise_candidate_ledger_invalid'); continue }
+      const row = byObservation.get(item.observationId)
+      if (!row || item.actionId !== row.actionId || item.resourceKey !== row.resourceKey
+        || item.canonicalName !== row.canonicalName || item.queryHash !== row.queryHash || item.resultHash !== row.resultHash
+        || !finite(item.observedAt) || item.observedAt !== row.observedAt
+        || !Array.isArray(item.obligationIds) || item.obligationIds.length > 64) fail('noise_candidate_binding_invalid')
+      if (item.status === 'quarantined' && !['failed', 'incomplete', 'stale', 'conflicting'].includes(row.status)
+        && row.viewComplete !== false && row.presentation !== 'retrieval_filtered') fail('noise_candidate_quarantine_invalid')
+      seen.add(item.candidateId)
+    }
+  }
+  const priorLedger = previousNoise?.candidateLedger
+  if (priorLedger?.schemaVersion === 'gaia2-noise-candidate-ledger-v1') {
+    const nextIds = new Set([...ledger.retained, ...ledger.candidates, ...ledger.quarantined].map(item => item.candidateId))
+    for (const item of [...(priorLedger.retained || []), ...(priorLedger.candidates || []), ...(priorLedger.quarantined || [])]) {
+      if (!nextIds.has(item.candidateId)) fail('noise_candidate_erased')
+    }
+  }
+  const obligations = [...(values?.gaia2_window_obligation_state?.obligations || []), ...(values?.gaia2_task_contract_state?.obligations || [])]
+  for (const item of [...ledger.candidates, ...ledger.quarantined]) {
+    for (const obligationId of item.obligationIds || []) {
+      const obligation = obligations.find(row => row?.id === obligationId)
+      if (!obligation || item.status === 'quarantined' && ['satisfied', 'window_completed'].includes(obligation.status)) fail('noise_candidate_obligation_binding_invalid')
+    }
+  }
+}
 
 function v2TransitionErrors({ previousValues, input, variables, artifacts, decision } = {}) {
   const previous = values(previousValues), current = values(variables), errors = [], fail = code => { if (!errors.includes(code)) errors.push(code) }
@@ -76,6 +117,7 @@ function v2TransitionErrors({ previousValues, input, variables, artifacts, decis
   const derived = v2Index(rows)
   for (const key of ['provenance', 'stale_ids', 'unverified_ids', 'conflict_ids', 'visibility_ids']) if (!same(observation[key], derived[key])) fail('noise_observation_index_mismatch')
   for (const key of ['conflicts', 'quarantined']) if (!same(noise[key], v2Summary(derived)[key])) fail('noise_observation_index_mismatch')
+  candidateLedgerErrors({ noise, previousNoise, observations: rows, values: current, fail })
   for (const prior of priorRows) {
     const next = byId.get(prior.observationId)
     if (!next || !['actionId', 'resourceKey', 'canonicalName', 'queryHash', 'resultHash', 'outcomeStatus', 'complete', 'authoritativeRead'].every(key => same(next[key], prior[key]))) fail('noise_observation_identity_invalid')

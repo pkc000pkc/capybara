@@ -4,6 +4,54 @@ function argumentBytes(text) {
   for (const char of text) { const point = char.codePointAt(0); bytes += point <= 127 ? 1 : point <= 2047 ? 2 : point <= 65535 ? 3 : 4; }
   return bytes;
 }
+const candidateStatuses = new Set(["retained", "candidate", "quarantined", "reviewed"]);
+const uncertainStatuses = new Set(["failed", "incomplete", "stale", "conflicting"]);
+function candidateSignal(outcome, result) {
+  return outcome?.candidate === true || outcome?.candidateReady === true
+    || result?.candidate === true || result?.candidateReady === true
+    || result?.signal?.kind === "candidate_changed";
+}
+function candidateEntry(record, outcome, result, oldLedger, obligations, clockNow) {
+  const noisy = uncertainStatuses.has(record.status) || record.viewComplete !== true || record.presentation === "retrieval_filtered";
+  const signaled = candidateSignal(outcome, result);
+  const status = noisy ? "quarantined" : signaled ? "candidate" : "retained";
+  const quarantineReason = noisy ? (record.status !== "observed" ? record.status : record.viewComplete !== true ? "incomplete_view" : "retrieval_filtered") : null;
+  const prior = (oldLedger?.retained || []).find(item => item.observationId === record.observationId)
+    || (oldLedger?.candidates || []).find(item => item.observationId === record.observationId)
+    || (oldLedger?.quarantined || []).find(item => item.observationId === record.observationId);
+  const candidate = {
+    candidateId: prior?.candidateId || "candidate-" + record.observationId,
+    observationId: record.observationId, actionId: record.actionId,
+    resourceKey: record.resourceKey, canonicalName: record.canonicalName,
+    queryHash: record.queryHash, resultHash: record.resultHash,
+    observedAt: record.observedAt, status,
+    source: "native_observation", retainedAt: prior?.retainedAt ?? record.observedAt,
+    candidateAt: status === "candidate" ? (prior?.candidateAt ?? clockNow) : (prior?.candidateAt ?? null),
+    quarantineReason: quarantineReason || prior?.quarantineReason || null,
+    obligationIds: Array.isArray(prior?.obligationIds) ? [...prior.obligationIds] : [],
+    review: prior?.review || null,
+  };
+  if (status === "candidate" && obligations?.length) {
+    const matched = obligations.filter(item => item?.status === "pending" || item?.status === "window_expired_unreviewed" || item?.status === "candidate_pending_review")
+      .filter(item => item?.recipe?.queryTool === record.canonicalName && item?.recipe?.queryHash === record.queryHash)
+      .map(item => item.id);
+    const explicit = [outcome?.obligationId, outcome?.result?.obligationId, ...(Array.isArray(outcome?.obligationIds) ? outcome.obligationIds : []), ...(Array.isArray(outcome?.result?.obligationIds) ? outcome.result.obligationIds : [])]
+      .filter(id => typeof id === "string" && obligations.some(item => item?.id === id));
+    candidate.obligationIds = [...new Set([...candidate.obligationIds, ...matched, ...explicit])].slice(-64);
+  }
+  return candidate;
+}
+function mergeCandidateLedger(noise, record, outcome, result, values, clockNow) {
+  const prior = noise?.candidateLedger || { schemaVersion: "gaia2-noise-candidate-ledger-v1", revision: 0, retained: [], candidates: [], quarantined: [] };
+  const obligations = [...(values.gaia2_task_contract_state?.obligations || []), ...(values.gaia2_window_obligation_state?.obligations || [])];
+  const entry = candidateEntry(record, outcome, result, prior, obligations, clockNow);
+  const all = [...(prior.retained || []), ...(prior.candidates || []), ...(prior.quarantined || [])].filter(item => item.observationId !== record.observationId);
+  all.push(entry);
+  const retained = all.filter(item => item.status === "retained").slice(-256);
+  const candidates = all.filter(item => item.status === "candidate" || item.status === "reviewed").slice(-256);
+  const quarantined = all.filter(item => item.status === "quarantined").slice(-256);
+  return { schemaVersion: "gaia2-noise-candidate-ledger-v1", revision: Number(prior.revision || 0) + 1, retained, candidates, quarantined };
+}
 function entityEvidence(values, action, outcome, observedAt, loop) {
   const evidence = outcome.semanticEvidence;
   if (evidence === undefined) return null;
@@ -135,6 +183,27 @@ export default defineHook({
     if (mutation) { record.evidenceKind = "mutation_receipt"; record.mutationReceipt = mutation; }
     if (!duplicateAction) all.push(record);
     const state = { schemaVersion: "gaia2-observation-state-v2", observations: all, provenance: all.map(item => item.provenance), stale_ids: all.filter(item => item.status === "stale").map(item => item.observationId), unverified_ids: all.filter(item => ["incomplete", "failed"].includes(item.status)).map(item => item.observationId), conflict_ids: all.filter(item => item.status === "conflicting").map(item => item.observationId), visibility_ids: all.filter(item => active(item) && item.viewComplete === false && item.presentation !== "retrieval_filtered").map(item => item.observationId) };
+    // Retention is a presentation/evidence step.  A retained observation is
+    // only promoted to candidate when a trusted controller/result explicitly
+    // signals a candidate.  Stale, conflicting, incomplete, failed, or
+    // filtered views remain quarantined and can never satisfy an obligation.
+    const candidateLedger = mergeCandidateLedger(noise, record, outcome, outcome.result, values, clock.now);
+    const candidate = [...candidateLedger.candidates, ...candidateLedger.quarantined, ...candidateLedger.retained]
+      .find(item => item.observationId === record.observationId);
+    const candidateObligations = candidate?.status === "candidate" ? candidate.obligationIds : [];
+    const candidateEvidence = candidate?.status === "candidate" ? {
+      candidateId: candidate.candidateId, observationId: record.observationId,
+      actionId: record.actionId, canonicalName: record.canonicalName,
+      queryHash: record.queryHash, resultHash: record.resultHash,
+      observedAt: record.observedAt, complete: record.complete,
+      viewComplete: record.viewComplete,
+    } : null;
+    const window = values.gaia2_window_obligation_state;
+    const nextWindow = window?.enabled === true && candidateEvidence ? {
+      ...window, revision: Number.isSafeInteger(window.revision) ? window.revision + 1 : 1, areNow: clock.now,
+      obligations: (window.obligations || []).map(item => candidateObligations.includes(item.id) && item.status !== "window_completed"
+        ? { ...item, status: "candidate_pending_review", candidateEvidence, lastSignal: "candidate_changed" } : item),
+    } : null;
     const progress = values.gaia2_progress_state, identity = JSON.stringify([action.canonicalName, action.resourceKey, queryHash]);
     const seen = (progress.seen_queries || []).find(item => item.identity === identity);
     const controllerWait = values.gaia2_temporal_state?.enabled === true && action.effect === "wait";
@@ -146,6 +215,7 @@ export default defineHook({
       { op: "replace", path: "/builtin/variables/gaia2_entity_state", value: semantic.state },
       { op: "replace", path: "/builtin/variables/gaia2_entity_context", value: "Exact native entity evidence: " + semantic.state.records.slice(-6).map(item => JSON.stringify({ kind: item.kind, entityRef: item.entityRef, actionId: item.callRef.actionId, observedAt: item.callRef.observedAt, deleteReceiptId: item.deleteReceiptRef?.receiptId || null, invalidatedBy: item.invalidatedBy || null })).join("; ") + ". entity_absent explains only the recorded post-delete point-read error for this exact entity; the raw error is preserved. It does not resolve other queries, resource-wide conflicts, UNKNOWN writes, or prove scenario completion. A later entity_present or invalidatedBy marker invalidates the prior tombstone; never use that historical proof as current absence." },
     ] : [];
-    return { patches: [{ op: "replace", path: "/builtin/variables/gaia2_observation_state", value: state }, { op: "replace", path: "/builtin/variables/gaia2_noise_state", value: { ...noise, decisions: [...(noise.decisions || []), record], deduplicated: [...(noise.deduplicated || []), ...(duplicateOf ? [record.observationId] : [])], conflicts: state.conflict_ids, quarantined: [...state.unverified_ids, ...state.stale_ids, ...state.conflict_ids] } }, { op: "replace", path: "/builtin/variables/gaia2_progress_state", value: next }, ...semanticPatches], artifacts: [{ title: "GAIA2 observable evidence classification", value: record }, { title: "GAIA2 finite progress decision", value: { actionId: action.id, advanced, resolved, consecutiveNoProgress: count, recommendation: next.recommendation } }] };
+    const noiseNext = { ...noise, decisions: [...(noise.decisions || []), record], deduplicated: [...(noise.deduplicated || []), ...(duplicateOf ? [record.observationId] : [])], conflicts: state.conflict_ids, quarantined: [...state.unverified_ids, ...state.stale_ids, ...state.conflict_ids], candidateLedger };
+    return { patches: [{ op: "replace", path: "/builtin/variables/gaia2_observation_state", value: state }, { op: "replace", path: "/builtin/variables/gaia2_noise_state", value: noiseNext }, { op: "replace", path: "/builtin/variables/gaia2_progress_state", value: next }, ...(nextWindow ? [{ op: "replace", path: "/builtin/variables/gaia2_window_obligation_state", value: nextWindow }, { op: "replace", path: "/builtin/variables/gaia2_window_obligation_context", value: "A current native observation became a candidate for explicit Actor review. Candidate evidence is not business completion. " + JSON.stringify({ obligationIds: candidateObligations }) }] : []), ...semanticPatches], artifacts: [{ title: "GAIA2 observable evidence classification", value: record }, { title: "GAIA2 finite progress decision", value: { actionId: action.id, advanced, resolved, consecutiveNoProgress: count, recommendation: next.recommendation } }, { title: "GAIA2 retained candidate ledger", value: { candidateId: candidate?.candidateId || null, observationId: record.observationId, status: candidate?.status || "retained", obligationIds: candidateObligations, businessSuccess: "not_inferred" } }] };
   },
 });
