@@ -1926,6 +1926,55 @@ def _native_run_with_agent(
         if active_tool_round is not None:
             active_tool_round.settle(status, reason)
 
+    def _settle_control_tool_round(result, *, executed=False, default_status="succeeded"):
+        """Settle an already-claimed local control node before advancing.
+
+        Control tools are handled inside the bridge instead of the ordinary
+        native dispatch path.  They still belong to the shared ordered
+        ``ToolRound`` and therefore must ACK their claim before the next node
+        can be claimed.  A controller may use a domain status such as
+        ``signaled`` (temporal) or omit a status entirely (retrieval); those
+        statuses mean that the control operation itself completed and are
+        represented as a scheduler ``succeeded`` node.  Validation failures
+        and explicit blocked/unknown outcomes retain their conservative
+        scheduler status.
+        """
+        value = result if isinstance(result, dict) else {}
+        raw_status = value.get("status")
+        if raw_status in ("blocked", "unknown", "failed", "failed_before_execution", "cancelled"):
+            status = raw_status
+        elif raw_status in ("succeeded", "signaled", None):
+            status = default_status
+        else:
+            # An unrecognised controller result is not proof of success.  It
+            # must nevertheless be settled so the scheduler cannot strand the
+            # round in ``in_flight``; the diagnostic reason remains visible.
+            status = "failed"
+        reason = value.get("reason")
+        if reason is None and isinstance(value.get("signal"), dict):
+            reason = value["signal"].get("kind")
+        _settle_tool_round(status, reason)
+        return status
+
+    def _control_execution_outcome(result, *, executed=False, effect="read"):
+        """Build adapter-owned metadata for locally handled control results."""
+        value = result if isinstance(result, dict) else {}
+        status = value.get("status")
+        if status in ("blocked", "cancelled") and not executed:
+            normalized = status
+        elif status in ("unknown", "failed"):
+            normalized = status
+        elif status == "failed_before_execution" and not executed:
+            normalized = status
+        else:
+            # ``signaled`` is the temporal controller's domain result and a
+            # retrieval step has no top-level status.  Both are completed
+            # control operations from the scheduler's perspective.
+            normalized = "succeeded" if executed or status in ("succeeded", "signaled", None) else "failed"
+        return {"status": normalized, "executed": bool(executed), "complete": True,
+                "effect": effect, "effectApplied": False if not executed else None,
+                "toolPublicName": value.get("toolPublicName")}
+
     def _close_tool_round(reason, *, uncertain=False):
         nonlocal revision, pending_round_summary
         if active_tool_round is None:
@@ -3228,12 +3277,16 @@ def _native_run_with_agent(
                             raise HookProtocolError("task_reconciliation_after_rejected")
                         result = {"status": "succeeded", "executed": True, "complete": True,
                                   "mode": request["mode"], "feedback": "Reconciliation committed. Review the next runtime context for actual call counts and mismatches."}
+                    control_executed = result.get("executed") is True
                     messages.append(_new_message("tool", json.dumps(result, ensure_ascii=False, allow_nan=False),
-                                                 tool_call_id=call_id, name=name))
+                                                 tool_call_id=call_id, name=name,
+                                                 executionOutcome=_control_execution_outcome(
+                                                     result, executed=control_executed)))
                     revision += 1
                     _emit_runtime_event("task_reconciliation_completed", turn=iteration, callId=call_id,
                                         status=result.get("status"), mode=(request.get("mode") if request else None),
                                         reason=result.get("reason"), oracleConsulted=False)
+                    _settle_control_tool_round(result, executed=control_executed)
                     continue
                 if temporal is not None and name == "capybara_wait_watch":
                     from gaia2_temporal import TemporalError, validate_arguments as validate_temporal_arguments
@@ -3303,9 +3356,13 @@ def _native_run_with_agent(
                             _emit_runtime_event("temporal_watch_completed", turn=iteration, callId=call_id,
                                                 signal=result.get("signal"), watchId=result.get("watchId"),
                                                 stateHash=after_control["temporalReceipt"]["stateHash"])
+                    control_executed = not blocked
                     messages.append(_new_message("tool", json.dumps(result, ensure_ascii=False, allow_nan=False),
-                                                 tool_call_id=call_id, name=name))
+                                                 tool_call_id=call_id, name=name,
+                                                 executionOutcome=_control_execution_outcome(
+                                                     result, executed=control_executed)))
                     revision += 1
+                    _settle_control_tool_round(result, executed=control_executed)
                     if temporal_stopped:
                         termination_reason = "environment_stop"
                         break
@@ -3341,14 +3398,18 @@ def _native_run_with_agent(
                                 result["nextOffset"] = retrieval.snapshot()["coverage"].get("nextOffset")
                                 result["allowedPageCounts"] = [1, 2, 4]
                             usage["blockedTools"] += 1
+                    control_executed = not blocked
                     messages.append(_new_message("tool", json.dumps(result, ensure_ascii=False),
-                                                 tool_call_id=call_id, name=name))
+                                                 tool_call_id=call_id, name=name,
+                                                 executionOutcome=_control_execution_outcome(
+                                                     result, executed=control_executed)))
                     revision += 1
                     usage["retrievalControlCalls"] = usage.get("retrievalControlCalls", 0) + 1
                     _emit_runtime_event("retrieval_step_completed", turn=iteration, callId=call_id,
                                         requestId=arguments.get("requestId"), status=result.get("status", "succeeded"),
                                         reviewCommitted=result.get("reviewCommitted", False),
                                         nextReadStatus=result.get("nextReadStatus"))
+                    _settle_control_tool_round(result, executed=control_executed)
                     continue
                 tool = tool_map.get(name)
                 preflight = (validate_tool_arguments(tool, arguments) if not argument_error else {

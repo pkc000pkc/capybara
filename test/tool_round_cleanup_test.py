@@ -86,7 +86,8 @@ for await (const line of createInterface({input:process.stdin,crlfDelay:Infinity
 def production_helpers(context):
     path = ROOT / "scripts/capybara_official_bridge.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    names = {"_close_tool_round", "_new_message", "_provider_message_sequence", "_validate_provider_tool_pairs", "_stable_hash"}
+    names = {"_close_tool_round", "_settle_control_tool_round", "_control_execution_outcome",
+             "_new_message", "_provider_message_sequence", "_validate_provider_tool_pairs", "_stable_hash"}
     definitions = [copy.deepcopy(node) for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name in names]
     class Lift(ast.NodeTransformer):
         def visit_Nonlocal(self, node):
@@ -112,7 +113,8 @@ class ToolRoundCleanupTests(unittest.TestCase):
                          {"role": "assistant", "content": "", "tool_calls": [
                              {"id": identity, "type": "function", "function": {"name": name, "arguments": arguments}}
                              for identity, name, arguments in CALLS]}],
-            "_emit_runtime_event": lambda *a, **kw: None}
+            "_emit_runtime_event": lambda *a, **kw: None,
+            "_settle_tool_round": lambda status, reason=None: self.adapter.settle(status, reason)}
         self.close_round = production_helpers(self.context)
 
     def tearDown(self):
@@ -226,6 +228,40 @@ class ToolRoundCleanupTests(unittest.TestCase):
         self.assertEqual(self.context["messages"], before)
         self.assertEqual(len(self.client.requests), count)
         self.assertEqual(self.native_executions, 3)
+
+    def test_control_node_settlement_allows_following_native_node(self):
+        """Local controls must ACK their claim before the next node is claimed."""
+        self.begin()
+        self.adapter.claim(0)
+        control_result = {"schemaVersion": "gaia2-retrieval-step-v1", "requestId": "control-1"}
+        self.context["_settle_control_tool_round"](control_result, executed=True)
+        self.adapter.claim(1)
+        self.actual_result(1)
+        self.adapter.settle("succeeded")
+        self.adapter.claim(2)
+        self.actual_result(2)
+        self.adapter.settle("succeeded")
+        self.assertEqual(self.adapter.state["status"], "completed")
+        self.assertEqual([node["status"] for node in self.adapter.state["nodes"]],
+                         ["succeeded", "succeeded", "succeeded"])
+
+    def test_control_statuses_are_conservative_but_never_leave_node_in_flight(self):
+        """Temporal domain signals and validation failures map to settled states."""
+        for result, executed, expected in (
+            ({"status": "signaled", "signal": {"kind": "deadline"}}, True, "succeeded"),
+            ({"status": "failed_before_execution", "reason": "schema"}, False, "failed"),
+            ({"status": "blocked", "reason": "stale_dynamic_context"}, False, "blocked"),
+        ):
+            self.adapter = ToolRoundAdapter(self.client, "round-" + uuid.uuid4().hex, CALLS, [], lambda *a, **kw: None,
+                                            defer_begin=True)
+            self.context["active_tool_round"] = self.adapter
+            self.begin()
+            self.adapter.claim(0)
+            self.context["_settle_control_tool_round"](result, executed=executed)
+            self.assertEqual(self.adapter.state["nodes"][0]["status"], expected)
+            self.adapter.cancel("control_test_tail")
+            self.assertTrue(all(node["status"] not in ("pending", "in_flight")
+                                for node in self.adapter.state["nodes"]))
 
 
 if __name__ == "__main__":
