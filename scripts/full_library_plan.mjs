@@ -16,9 +16,66 @@ import { collectTemporalFrozenSources } from './temporal_official_ten.mjs'
 export const FULL_LIBRARY_SCHEMA = 'gaia2-full-library-once-manifest-v1'
 export const FULL_LIBRARY_CAPABILITIES = Object.freeze(['execution', 'search', 'adaptability', 'time', 'ambiguity'])
 export const FULL_LIBRARY_STOP_POLICY = Object.freeze({ firstScoredOutcomes: 40, stopIfAllScoresZero: true, technicalAndUnscoredExcluded: true })
+/**
+ * A bounded execution scope is a run-time view over the frozen 1120-slot
+ * manifest.  Keeping this policy in the manifest prevents a CLI invocation
+ * from silently widening the campaign while still allowing the runner to
+ * execute a prefix for controlled validation.
+ */
+export const FULL_LIBRARY_SCOPE_POLICY = Object.freeze({ maxExecutions: 200, checkpointEvery: 40, firstWindowDistinctScenarioIds: 40 })
 export const FULL_LIBRARY_SELECTION_RULE = 'All 800 original non-mini submission validation rows once in Standard, all 160 original mini validation rows once in agent2agent and once in noise; no oracle, prompt, historical score or success-based selection; seven-stream coverage-balanced ordering with distinct scenario IDs in the first 40 queued executions; run1, attempt0, correction0; no resume or prior result reuse'
 const BUCKETS = [...FULL_LIBRARY_CAPABILITIES.map(config => `standard/${config}`), 'agent2agent/mini', 'noise/mini']
 const SHA256 = /^[0-9a-f]{64}$/
+
+/** Stable identity for one planned execution slot, independent of its ordinal. */
+export function taskSlotIdentity(task) {
+  assert.ok(task && typeof task === 'object' && !Array.isArray(task), 'task slot must be an object')
+  return digest({
+    phase: task.phase ?? null,
+    config: task.config ?? null,
+    scenarioId: task.scenarioId ?? null,
+    sourcePath: task.sourcePath ?? null,
+    rowIndex: task.rowIndex ?? null,
+    scenarioHash: task.scenarioHash ?? null,
+    scenarioVersion: task.scenarioVersion ?? null,
+    runNumber: task.runNumber ?? null,
+    attemptIndex: task.attemptIndex ?? null,
+    correctionOrdinal: task.correctionOrdinal ?? null,
+  })
+}
+
+// Descriptive alias for callers that prefer the full namespace in imports.
+export const fullLibraryTaskSlotIdentity = taskSlotIdentity
+
+/**
+ * Derive and validate a bounded prefix without changing the frozen plan.
+ * Scenario IDs may repeat after the first coverage window because enhanced
+ * mini executions intentionally reuse original questions; execution and
+ * source-slot identities must remain unique throughout the scope.
+ */
+export function fullLibraryScope(tasks, { taskLimit = FULL_LIBRARY_SCOPE_POLICY.maxExecutions } = {}) {
+  assert.ok(Array.isArray(tasks) && tasks.length > 0, 'full-library task list must be non-empty')
+  assert.ok(Number.isInteger(taskLimit) && taskLimit > 0 && taskLimit <= FULL_LIBRARY_SCOPE_POLICY.maxExecutions,
+    `full-library scope must contain 1..${FULL_LIBRARY_SCOPE_POLICY.maxExecutions} executions`)
+  assert.ok(taskLimit <= tasks.length, 'full-library scope exceeds planned executions')
+  const scoped = tasks.slice(0, taskLimit)
+  const executionIds = scoped.map(task => task.executionId)
+  assert.ok(executionIds.every(value => typeof value === 'string' && value.length > 0), 'scope execution identity missing')
+  assert.equal(new Set(executionIds).size, executionIds.length, 'bounded scope contains duplicate execution IDs')
+  const taskSlotIds = scoped.map(taskSlotIdentity)
+  assert.equal(new Set(taskSlotIds).size, taskSlotIds.length, 'bounded scope contains duplicate task slots')
+  const firstWindow = scoped.slice(0, FULL_LIBRARY_SCOPE_POLICY.firstWindowDistinctScenarioIds)
+  assert.equal(new Set(firstWindow.map(task => task.scenarioId)).size, firstWindow.length,
+    'first coverage window contains duplicate scenario IDs')
+  return {
+    taskLimit,
+    taskListHash: digest(scoped),
+    executionIds,
+    scenarioIds: scoped.map(task => task.scenarioId),
+    taskSlotIds,
+    remainingExecutions: tasks.length - taskLimit,
+  }
+}
 
 /** Pure permutation. Mini categories/oracle contents are never consulted. */
 export function orderFullLibraryTasks(tasks) {
@@ -140,12 +197,14 @@ export function validateFullLibraryPlanIdentity(manifest, { protocol, datasetLoc
   assert.equal(manifest.originalCampaignModified, false)
   assert.equal(manifest.selectionRule, FULL_LIBRARY_SELECTION_RULE)
   assert.equal(manifest.executionBinding, 'phase3_live_plugin_host_required')
+  assert.deepEqual(manifest.scopePolicy, FULL_LIBRARY_SCOPE_POLICY)
   assert.equal(manifest.correctionEnabled, false)
   assert.equal(manifest.resumeEnabled, false)
   assert.equal(manifest.reusePriorResults, false)
   assert.equal(Object.hasOwn(manifest, 'taskContract'), false, 'task contract is retired')
   for (const key of ['temporal', 'conflictRecovery', 'entitySemantics', 'mutationReceipts']) assert.deepEqual(manifest[key], { enabled: true })
-  assert.deepEqual(manifest.capabilityScope, { temporal: 'standard', conflictRecovery: 'standard', entitySemantics: 'standard', mutationReceipts: 'standard' })
+  assert.deepEqual(manifest.retrieval, { enabled: true, profile: 'standard-search' })
+  assert.deepEqual(manifest.capabilityScope, { temporal: 'standard', conflictRecovery: 'standard', entitySemantics: 'standard', mutationReceipts: 'standard', retrieval: 'standard-search' })
   assert.deepEqual(manifest.stopPolicy, FULL_LIBRARY_STOP_POLICY)
   assert.deepEqual(manifest.models, protocol.models)
   assert.equal(typeof manifest.models.actor.model, 'string')
@@ -196,7 +255,7 @@ export function assertFullLibraryFrozen(root, manifest) {
   for (const key of Object.keys(model)) assert.deepEqual(manifest[key], model[key], 'public model configuration or effective endpoint changed')
   const capabilities = readJson(resolve(root, manifest.lockRefs.capabilities.path))
   assert.equal(capabilities.schemaVersion, 'gaia2-full-library-capabilities-v1')
-  assert.deepEqual(capabilities.plugins.map(plugin => plugin.id), ['gaia2-runtime', 'gaia2-evaluation'])
+  assert.deepEqual(capabilities.plugins.map(plugin => plugin.id), ['gaia2-runtime', 'gaia2-evaluation', 'gaia2-retrieval'])
   for (const plugin of capabilities.plugins) {
     for (const path of [plugin.snapshotRoot, plugin.sourceRoot]) assert.equal(hashTree(path).treeSha256, plugin.treeSha256, 'plugin source or snapshot changed')
     assert.deepEqual(inspectPluginResources(plugin), plugin)
@@ -252,7 +311,7 @@ export async function prepareFullLibrary({ root = ROOT } = {}) {
   const runId = `full-library-once-${new Date().toISOString().replace(/[-:.]/g, '')}-${randomUUID().slice(0, 8)}`
   const runRoot = `runs/${runId}`, directory = join(root, runRoot)
   assert.ok(!existsSync(directory)); mkdirSync(directory, { recursive: true })
-  const plugins = ['gaia2-runtime', 'gaia2-evaluation'].map(id => inspectPluginResources(freezePluginSnapshot({ root, id, sourceRoot: join(root, 'plugins', id) })))
+  const plugins = ['gaia2-runtime', 'gaia2-evaluation', 'gaia2-retrieval'].map(id => inspectPluginResources(freezePluginSnapshot({ root, id, sourceRoot: join(root, 'plugins', id) })))
   const capabilityRef = save(join(directory, 'capabilities.json'), { schemaVersion: 'gaia2-full-library-capabilities-v1', plugins })
   const sourcePaths = ['config/phase0-protocol.json', 'locks/dataset-lock.json', 'data/scenario-index.jsonl', 'package.json', 'package-lock.json']
   const sources = sourcePaths.map(path => ({ path, sha256: fileDigest(join(root, path)) }))
@@ -261,9 +320,9 @@ export async function prepareFullLibrary({ root = ROOT } = {}) {
     uniqueOriginalQuestionCount: 800, plannedExecutions: 1120, enhancedRunCount: 320,
     phaseCounts: { standard: 800, agent2agent: 160, noise: 160 }, syntheticFixtureOnly: false, officialSubmissionReady: false,
     selectionRule: FULL_LIBRARY_SELECTION_RULE, correctionEnabled: false, resumeEnabled: false, reusePriorResults: false,
-    temporal: { enabled: true }, conflictRecovery: { enabled: true }, entitySemantics: { enabled: true }, mutationReceipts: { enabled: true },
-    capabilityScope: { temporal: 'standard', conflictRecovery: 'standard', entitySemantics: 'standard', mutationReceipts: 'standard' },
-    stopPolicy: { ...FULL_LIBRARY_STOP_POLICY }, executionBinding: 'phase3_live_plugin_host_required', models, settings, ...modelConfiguration,
+    temporal: { enabled: true }, conflictRecovery: { enabled: true }, entitySemantics: { enabled: true }, mutationReceipts: { enabled: true }, retrieval: { enabled: true, profile: 'standard-search' },
+    capabilityScope: { temporal: 'standard', conflictRecovery: 'standard', entitySemantics: 'standard', mutationReceipts: 'standard', retrieval: 'standard-search' },
+    stopPolicy: { ...FULL_LIBRARY_STOP_POLICY }, scopePolicy: { ...FULL_LIBRARY_SCOPE_POLICY }, executionBinding: 'phase3_live_plugin_host_required', models, settings, ...modelConfiguration,
     dataset: { kind: 'submission', id: dataset.id, revision: dataset.revision, split: dataset.split, standardCount: 800, miniCount: 160, files: dataset.files },
     lockRefs: { capabilities: { path: portable(relative(root, capabilityRef.path)), sha256: capabilityRef.sha256 },
       protocol: sources.find(ref => ref.path === 'config/phase0-protocol.json'), dataset: sources.find(ref => ref.path === 'locks/dataset-lock.json'), scenarioIndex: datasetLock.scenarioIndex },

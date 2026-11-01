@@ -466,10 +466,17 @@ class TaskContractRuntime:
         for key in counts:
             item["counts"][key] += counts[key]
         item["lastSignal"] = kind
-        if any(item["counts"][key] > self.limits[key] for key in self.limits) or kind in {"scan_budget", "native_error", "incomplete_observation", "clock_error"}:
+        if any(item["counts"][key] > self.limits[key] for key in self.limits) or kind in {"native_error", "incomplete_observation", "clock_error"}:
             item["status"], item["pendingEvidence"] = "technical_blocked", None
         elif kind in {"environment_stop", "cancelled"}:
             item["status"], item["pendingEvidence"] = "interrupted", None
+        elif kind == "scan_budget":
+            # A scan budget bounds one controller invocation; it is not the
+            # business-window deadline. Keep the obligation active so the
+            # actor can register the next wait call without converting a
+            # normal rescan boundary into a technical failure.
+            item["pendingEvidence"] = None
+            item["status"] = "elapsed_pending_review" if now >= item["deadline"] else "pending"
         elif kind == "user_update":
             item["pendingEvidence"] = None
             item["status"] = "elapsed_pending_review" if now >= item["deadline"] else "pending"

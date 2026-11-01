@@ -27,12 +27,13 @@ class WindowObligationTests(unittest.TestCase):
         self.ledger.note_wait(self.obligation, waits=1, scans=1, signal="unchanged", now=130)
         self.ledger.note_wait(self.obligation, waits=1, scans=1, signal="scan_budget", now=160)
         state = self.ledger.snapshot()["obligations"][0]
-        self.assertEqual(state["status"], "technical_termination")
-        self.assertEqual(state["terminationSignal"], "scan_budget")
+        self.assertEqual(state["status"], "pending")
+        self.assertIsNone(state["terminationSignal"])
         self.assertFalse(self.ledger.finish(160)["allowed"])
 
     def test_candidate_requires_review_and_monitor_cannot_complete_early(self):
         self.ledger.candidate(self.obligation, self.evidence(observed=140), now=140)
+        self.assertEqual(self.ledger.snapshot()["obligations"][0]["lifecycle"], "signal_received")
         reply = self.ledger.authorize_reply(self.obligation, now=140)
         self.assertFalse(reply["allowed"])
         self.assertEqual(reply["reason"], "window_pending")
@@ -41,7 +42,9 @@ class WindowObligationTests(unittest.TestCase):
                                reason="candidate found", now=140)
         self.ledger.review(self.obligation, action_id="read-1", decision="continue",
                            reason="candidate is not sufficient", now=140)
-        self.assertEqual(self.ledger.snapshot()["obligations"][0]["status"], "pending")
+        item = self.ledger.snapshot()["obligations"][0]
+        self.assertEqual(item["status"], "pending")
+        self.assertEqual(item["lifecycle"], "watching")
 
     def test_deadline_requires_final_complete_evidence(self):
         self.ledger.advance(220)
@@ -51,6 +54,7 @@ class WindowObligationTests(unittest.TestCase):
         self.ledger.candidate(self.obligation, self.evidence("read-final", observed=220), now=220)
         self.ledger.review(self.obligation, action_id="read-final", decision="deadline_reviewed",
                            reason="final complete read covers the window", now=220)
+        self.assertEqual(self.ledger.snapshot()["obligations"][0]["lifecycle"], "obligations_verified")
         self.assertTrue(self.ledger.finish(220)["allowed"])
         self.assertTrue(self.ledger.authorize_reply(self.obligation, now=220)["allowed"])
 

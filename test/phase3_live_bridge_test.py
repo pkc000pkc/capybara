@@ -1183,6 +1183,13 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(failed), 1)
         self.assertEqual(failed[0]['status'], 'failed_before_execution')
         self.assertEqual(failed[0]['reason'], 'task_reconciliation_quote_binding')
+        feedback = [message for message in calls[1]
+                    if message.get('role') == 'tool' and message.get('tool_call_id') == 'reconcile-invalid']
+        self.assertEqual(len(feedback), 1)
+        feedback_payload = json.loads(feedback[0]['content'])
+        self.assertEqual(feedback_payload['errorCode'], 'task_reconciliation_quote_binding')
+        self.assertIn('quote', feedback_payload['requiredFields'])
+        self.assertNotIn('expectedActions', feedback_payload)
         self.assertEqual(aui.messages[-1].content, 'Recovered after reconciliation feedback')
         reconcile_after = [request for request in host['requests']
                            if request['checkpoint'] == 'after_tool'

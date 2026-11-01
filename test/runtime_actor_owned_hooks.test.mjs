@@ -154,10 +154,14 @@ if (!process.argv.includes('--probe')) {
     values.gaia2_action_ledger = { schemaVersion: 'gaia2-action-ledger-v1', totalCalls: 1, groups: [{ key: 'send', canonicalName: 'EmailClientV2__send_email', resourceKey: 'Emails', effect: 'write', totalCalls: 1, counts: { succeeded: 1, failed: 0, unknown: 0, not_executed: 0 } }], recent: [], omittedGroups: 0 }
     const actionValue = { id: 'contract-review', name: 'capybara_task_reconcile', canonicalName: 'CapybaraTaskContract__review', effect: 'read', resourceKey: 'CapybaraTaskContract', authoritativeRead: false, arguments: { op: 'reconcile' } }
     const request = { schemaVersion: 'gaia2-task-reconciliation-request-v1', mode: 'enforce', source: { userRef: 'user-1', sourceHash: hash(content), quote: 'send exactly one email' }, obligations: [{ id: 'send-one', canonicalName: 'EmailClientV2__send_email', effect: 'write', minCalls: 1, maxCalls: 1 }] }
-    invoke(values, 'gaia2-task-reconciliation', { action: actionValue, messages: [userMessage(content)], outcome: { status: 'succeeded', executed: true, complete: true, result: { taskReconciliation: request } } })
+    const reconciliation = invoke(values, 'gaia2-task-reconciliation', { action: actionValue, messages: [userMessage(content)], outcome: { status: 'succeeded', executed: true, complete: true, result: { taskReconciliation: request } } })
     assert.equal(values.gaia2_task_reconciliation.status, 'enforce')
     assert.deepEqual(values.gaia2_task_reconciliation.mismatches, [])
     assert.equal(values.gaia2_task_reconciliation.obligations[0].actualCalls, 1)
+    const evidence = reconciliation.artifacts.find(item => item.title === 'GAIA2 Actor-owned task reconciliation').value.evidenceSummary
+    assert.deepEqual(JSON.parse(JSON.stringify(evidence[0])), { id: 'send-one', canonicalName: 'EmailClientV2__send_email', resourceKey: null, effect: 'write', minCalls: 1, maxCalls: 1,
+      actualCalls: 1, attemptedCalls: 1, failedCalls: 0, unknownCalls: 0, notExecutedCalls: 0,
+      argumentMatchedCalls: null, argumentMismatchCalls: null, fieldMismatchIds: [], status: 'satisfied' })
     assert.match(values.gaia2_task_reconciliation_context, /expected actions are model-declared, not inferred/)
     values.gaia2_task_reconciliation.mismatches = [{ id: 'missing-checkout', status: 'missing', actualCalls: 0, minCalls: 1, maxCalls: 1 }]
     const finish = { id: 'finish', name: 'AgentUserInterface__send_message_to_user', canonicalName: 'AgentUserInterface__send_message_to_user', effect: 'finish', resourceKey: 'AgentUserInterface' }
@@ -487,6 +491,19 @@ if (!process.argv.includes('--probe')) {
     const decision = invoke(values, 'gaia2-finish-guard', { action: finish }).decision
     assert.equal(decision.action, 'block')
     assert.equal(decision.reason, 'action_ledger_unresolved')
+  })
+  test('finish guard does not double-count the same unresolved group in global and USER scope ledgers', () => {
+    const values = defaults(), finish = { id: 'finish', effect: 'finish' }
+    const group = { key: 'send', canonicalName: 'EmailClientV2__send_email', resourceKey: 'Emails', effect: 'write', totalCalls: 1,
+      counts: { succeeded: 0, failed: 0, unknown: 1, not_executed: 0 } }
+    values.gaia2_action_ledger = { schemaVersion: 'gaia2-action-ledger-v1', totalCalls: 1,
+      groups: [group], recent: [{ actionId: 'unknown-send', canonicalName: group.canonicalName, resourceKey: group.resourceKey,
+        effect: 'write', status: 'unknown' }], omittedGroups: 0, scopes: [{ userRef: 'user-1', totalCalls: 1, groups: [group], recent: [], omittedGroups: 0 }], omittedScopes: 0 }
+    const result = invoke(values, 'gaia2-finish-guard', { action: finish })
+    assert.equal(result.decision.reason, 'action_ledger_unresolved')
+    const boundary = result.artifacts.find(item => item.title === 'GAIA2 controller lifecycle boundary').value
+    assert.equal(boundary.unresolvedGroupCount, 1)
+    assert.equal(boundary.unresolvedGroups.length, 1)
   })
   test('finish guard blocks incomplete action groups even without a visible unresolved recent entry', () => {
     const values = defaults(), finish = { id: 'finish', effect: 'finish' }

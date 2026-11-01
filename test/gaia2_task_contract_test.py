@@ -130,6 +130,17 @@ class TaskContractTests(unittest.TestCase):
         self.signal(runtime, identity, at=150, call="watch-2", native=evidence(150, "native-read-2"))
         self.assertEqual(runtime.snapshot()["obligations"][0]["deadline"], 200)
 
+    def test_scan_budget_keeps_window_active_for_next_watch(self):
+        runtime, identity = self.registered()
+        runtime.note_signal(identity, "scan_budget", None, 130, "watch-budget",
+                            {"nativeWaits": 3, "nativeScans": 3})
+        item = runtime.snapshot()["obligations"][0]
+        self.assertEqual(item["status"], "pending")
+        self.assertEqual(item["lastSignal"], "scan_budget")
+        self.assertFalse(runtime.finish_decision(130)["allowed"])
+        self.signal(runtime, identity, at=150, call="watch-next", native=evidence(150, "native-read-next"))
+        self.assertEqual(runtime.snapshot()["obligations"][0]["status"], "pending")
+
     def test_same_source_replay_is_idempotent_not_a_new_deadline(self):
         runtime, identity = self.registered()
         runtime.resolve_user("user-1", "Monitor for one hundred seconds", 100)

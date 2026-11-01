@@ -816,8 +816,12 @@ def _task_reconcile_tool_schema() -> dict[str, Any]:
     return {"type": "function", "function": {
         "name": "capybara_task_reconcile",
         "description": ("Declare and reconcile atomic actions derived only from the visible user request. "
-                         "Use mode=advisory for feedback or mode=enforce before the final reply. "
-                         "The runtime compares your declared canonical tool/count bounds with actual calls; it never invents expected actions or reads evaluator state."),
+                         "For the current USER message, quote one exact unique substring, omit scopeAnchor, "
+                         "and use userRef=latest or omit userRef. Add scopeAnchor only when the same task "
+                         "explicitly continues across later USER messages; then provide continuationQuotes "
+                         "as exact unique substrings in visible message order. Use mode=advisory for feedback "
+                         "or mode=enforce before the final reply. The runtime compares your declared canonical "
+                         "tool/count bounds with actual calls; it never invents expected actions or reads evaluator state."),
         "parameters": {"type": "object", "additionalProperties": False, "required": ["mode", "quote", "obligations"],
                        "properties": {
                            "mode": {"type": "string", "enum": ["advisory", "enforce"]},
@@ -1671,6 +1675,23 @@ def _strict_arguments(raw: str) -> dict[str, Any]:
     return result
 
 
+def _normalize_native_arguments(arguments: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Remove only adapter-generated empty variadic bags before dispatch.
+
+    Some ARE schemas expose a Python ``**kwargs`` bucket.  Passing an empty
+    nested ``kwargs`` object through the public wrapper is not equivalent to
+    omitting it: for Files__mkdir the wrapper forwarded ``kwargs={}`` to the
+    underlying fsspec implementation, which raised TypeError before the
+    requested operation.  Non-empty bags are preserved verbatim; no model
+    value is rewritten or guessed.
+    """
+    if not isinstance(arguments, dict) or arguments.get("kwargs") != {}:
+        return arguments, []
+    normalized = dict(arguments)
+    normalized.pop("kwargs", None)
+    return normalized, ["kwargs"]
+
+
 def _call_model(messages: list[dict[str, Any]], tools: list[dict[str, Any]], model: str, provider: str | None, endpoint: str | None):
     _assert_native_model_protocol()
     # ``local`` is the ARE manifest label for an OpenAI-compatible endpoint;
@@ -1779,7 +1800,9 @@ def _native_run_with_agent(
     )
     if task_reconciliation_enabled:
         system += ("Before a final reply, use capybara_task_reconcile when you can state atomic actions from the visible USER request. "
-                   "Anchor the plan with an exact quote and declare canonical tool names plus minCalls/maxCalls; use advisory for feedback or enforce when you want the finish gate to require those bounds. "
+                   "For the current USER message, use one exact unique quote and omit scopeAnchor (userRef=latest is optional). "
+                   "Only when the same task explicitly continues across later USER messages, add scopeAnchor.continuationQuotes with exact unique quotes in visible order. "
+                   "Declare canonical tool names plus minCalls/maxCalls; use advisory for feedback or enforce when you want the finish gate to require those bounds. "
                    "When the visible request specifies critical fields, optionally declare argumentChecks with JSON-pointer paths and equals_hash/present/array_contains_hash/number_range; values are hashed by the trusted bridge and are never treated as evaluator data. "
                    "If the same task continues in later USER messages, use scopeAnchor with exact unique quotes for those prior USER messages; never assume an unquoted USER belongs to the task. "
                    "To explicitly replace an unresolved prior enforce plan, provide supersedeQuote as a unique visible phrase in the new USER request; a new enforce call without it cannot clear the old gate. "
@@ -1824,10 +1847,22 @@ def _native_run_with_agent(
     a2a_lifecycle = None
     a2a_notification_pump = None
     a2a_pending_notifications = []
+    # Parent-visible child results are tracked independently from the raw
+    # child snapshot.  A child completion is not parent convergence until the
+    # result has been included in a subsequent parent model request.
+    a2a_pending_results = {}
+    a2a_consumed_results = 0
+    # A child result published after the last parent turn needs one bounded
+    # parent opportunity to become visible.  This is deliberately local
+    # control state: it never replays a child/native write and never marks a
+    # result consumed without an actual model request.
+    a2a_terminal_drain_attempts = 0
+    a2a_terminal_drain_limit = 1
     a2a_stop_observed = False
     retrieval = None
     retrieval_frames = []
     retrieval_enabled = os.environ.get("GAIA2_RETRIEVAL_ENABLED") == "1"
+    noise_enabled = os.environ.get("GAIA2_NOISE_ENABLED") == "1"
     retrieval_control_args = {}
     retrieval_receipt = None
     temporal = None
@@ -1945,6 +1980,41 @@ def _native_run_with_agent(
             frames.append(item)
         return [*visible, *frames]
 
+    def _hook_artifacts(response):
+        """Read only bounded Hook artifacts from the Host evidence reference.
+
+        RuntimePluginHost keeps the full artifact list in the evidence file
+        and returns only ``evidencePath`` in the admission response.  The
+        bridge must use that trusted reference for observability; it must not
+        copy task text, tool arguments, or result bodies into runtime events.
+        Controlled fixtures may still provide a top-level ``artifacts`` list,
+        so both shapes are accepted without changing the business path.
+        """
+        if not isinstance(response, dict):
+            return []
+        direct = response.get("artifacts")
+        if isinstance(direct, list):
+            return direct
+        evidence_path = response.get("evidencePath")
+        if not isinstance(evidence_path, str) or not evidence_path:
+            return []
+        try:
+            path = Path(evidence_path)
+            if (path.is_symlink() or not path.is_file()
+                    or path.stat().st_size > 8 * 1024 * 1024):
+                return []
+            with path.open("r", encoding="utf-8") as handle:
+                evidence = json.load(handle)
+        except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+            return []
+        if not isinstance(evidence, dict):
+            return []
+        artifacts = evidence.get("artifacts")
+        if not isinstance(artifacts, list):
+            nested = evidence.get("response")
+            artifacts = nested.get("artifacts") if isinstance(nested, dict) else None
+        return artifacts if isinstance(artifacts, list) else []
+
     def _live_hook(checkpoint, **kwargs):
         nonlocal retrieval_receipt, temporal_receipt, conflict_receipt
         response = _invoke_hook(client, checkpoint, env, _hook_history(), revision, iteration, **kwargs)
@@ -1964,7 +2034,109 @@ def _native_run_with_agent(
             raise HookProtocolError("semantic_receipt_required")
         if mutation_enabled and not isinstance(response["semanticReceipt"].get("writeState"), dict):
             raise HookProtocolError("mutation_write_state_required")
+        if noise_enabled and checkpoint == "after_tool":
+            # The classifier Hook owns the decision; the bridge only emits
+            # bounded metadata so audits can prove that filtering/progress
+            # ran without copying task text, arguments or result bodies.
+            for artifact in _hook_artifacts(response):
+                if not isinstance(artifact, dict):
+                    continue
+                value = artifact.get("value") if isinstance(artifact.get("value"), dict) else {}
+                title = artifact.get("title")
+                if title == "GAIA2 observable evidence classification":
+                    safe = {key: value.get(key) for key in ("actionId", "status", "outcomeStatus", "complete", "viewComplete", "presentation", "duplicateOf", "authoritativeRead") if key in value}
+                    _emit_runtime_event("noise_event_classified", **safe)
+                    # ``presentation`` is optional in the v2 classifier.  An
+                    # omitted field means the classifier did not make a
+                    # visibility decision, not that the evidence was
+                    # filtered.  Emit the filtered event only for an explicit
+                    # non-visible decision or a terminal/noisy status.
+                    if ("presentation" in safe and safe.get("presentation") != "visible") or safe.get("status") in {"duplicate", "failed", "incomplete", "conflicting"}:
+                        _emit_runtime_event("noise_filtered", actionId=safe.get("actionId"), reason=safe.get("presentation") or safe.get("status"))
+                elif title == "GAIA2 finite progress decision":
+                    safe = {key: value.get(key) for key in ("actionId", "advanced", "resolved", "consecutiveNoProgress", "recommendation") if key in value}
+                    _emit_runtime_event("noise_progress_updated", **safe)
         return response
+
+    def _finish_gate_diagnostics(response: dict[str, Any]) -> dict[str, Any]:
+        """Read bounded non-secret lifecycle diagnostics from Host.
+
+        The live Host artifact is preferred.  Some loopback Host versions
+        validate and return only the public context/decision envelope even
+        though the same lifecycle artifact is persisted in the receipt.  In
+        that compatibility path, recover only the actual action-ledger JSON
+        embedded in the public context; no arguments, content, or expected
+        actions are inferred.
+        """
+        empty = {"unresolvedActionIds": [], "unresolvedGroupCount": 0,
+                 "unresolvedGroups": [], "ledgerIncomplete": False}
+
+        def from_value(value):
+            if not isinstance(value, dict):
+                return None
+            groups = value.get("unresolvedGroups")
+            if isinstance(groups, list):
+                normalized = [{key: group.get(key) for key in ("canonicalName", "resourceKey", "effect", "counts")
+                               if key in group}
+                              for group in groups if isinstance(group, dict)][:64]
+                return {
+                    "unresolvedActionIds": [item for item in value.get("unresolvedActionIds", [])
+                                            if isinstance(item, str)][:64],
+                    "unresolvedGroupCount": (value.get("unresolvedGroupCount")
+                                             if isinstance(value.get("unresolvedGroupCount"), int)
+                                             else len(normalized)),
+                    "unresolvedGroups": normalized,
+                    "ledgerIncomplete": value.get("ledgerIncomplete") is True,
+                }
+            return None
+
+        for artifact in _hook_artifacts(response):
+            if not isinstance(artifact, dict) or artifact.get("title") != "GAIA2 controller lifecycle boundary":
+                continue
+            parsed = from_value(artifact.get("value"))
+            if parsed is not None:
+                return parsed
+
+        context = response.get("context") if isinstance(response, dict) else None
+        marker = "Actual action ledger (expected actions are not inferred): "
+        if isinstance(context, str) and marker in context:
+            raw = context.rsplit(marker, 1)[-1]
+            raw = raw.split("\n\n\n", 1)[0]
+            try:
+                ledger = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                ledger = None
+            if isinstance(ledger, dict):
+                global_groups = [group for group in ledger.get("groups", []) if isinstance(group, dict)]
+                global_keys = {group.get("key") for group in global_groups}
+                scoped_groups = []
+                for scope in ledger.get("scopes", []) if isinstance(ledger.get("scopes"), list) else []:
+                    for group in scope.get("groups", []) if isinstance(scope, dict) and isinstance(scope.get("groups"), list) else []:
+                        if isinstance(group, dict) and group.get("key") not in global_keys:
+                            scoped_groups.append(group)
+                groups = global_groups + scoped_groups
+                unresolved = [group for group in groups
+                              if group.get("effect") in ("write", "finish", "unknown")
+                              and isinstance(group.get("counts"), dict)
+                              and (group["counts"].get("unknown", 0) > 0
+                                   or group["counts"].get("not_executed", 0) > 0)]
+                recent = [entry for entry in ledger.get("recent", [])
+                          if isinstance(entry, dict)
+                          and entry.get("effect") in ("write", "finish", "unknown")
+                          and entry.get("status") in ("unknown", "not_executed")]
+                return {
+                    "unresolvedActionIds": [entry.get("actionId") for entry in recent
+                                            if isinstance(entry.get("actionId"), str)][-64:],
+                    "unresolvedGroupCount": sum(
+                        int(group.get("counts", {}).get("unknown", 0))
+                        + int(group.get("counts", {}).get("not_executed", 0))
+                        for group in unresolved),
+                    "unresolvedGroups": [{key: group.get(key) for key in ("canonicalName", "resourceKey", "effect", "counts")}
+                                         for group in unresolved[:64]],
+                    "ledgerIncomplete": (ledger.get("omittedGroups", 0) > 0
+                                          or ledger.get("omittedScopes", 0) > 0),
+                }
+        return empty
 
     def _entity_prepare(native, action):
         if entity_tracker is None:
@@ -2096,9 +2268,45 @@ def _native_run_with_agent(
                                 "minCalls": minimum, "maxCalls": maximum})
         return {"schemaVersion": "gaia2-task-reconciliation-request-v1", "mode": arguments["mode"],
                 "source": {"userRef": user["id"], "sourceHash": source_text_hash(content), "quote": quote,
-                           **({"scopeAnchor": {"members": scope_members}} if scope_anchor is not None else {}),
+                           **({"scopeAnchor": {"members": scope_members}} if scope_anchor is not None and len(scope_members) > 1 else {}),
                            **({"replacement": {"mode": "supersede", "quote": supersede_quote}} if supersede_quote is not None else {})},
                 "obligations": obligations}
+
+    def _task_reconciliation_feedback(reason):
+        """Return bounded repair guidance without exposing task expectations.
+
+        The reason is a trusted protocol code produced by the visible-user
+        scope/shape validator.  Required fields describe the declaration
+        schema only; they never contain expected actions, hidden answers or
+        evaluator state.
+        """
+        field_hints = {
+            "task_reconciliation_quote": ["quote"],
+            "task_reconciliation_scope_quote": ["scopeAnchor.continuationQuotes"],
+            "task_reconciliation_scope_anchor": ["scopeAnchor.continuationQuotes"],
+            "task_reconciliation_scope_schema": ["scopeAnchor.continuationQuotes"],
+            "task_reconciliation_scope_member": ["scopeAnchor.continuationQuotes[]"],
+            "task_reconciliation_scope_binding": ["scopeAnchor.continuationQuotes[]"],
+            "task_reconciliation_source_binding": ["quote"],
+            "task_reconciliation_source_hash": ["quote"],
+            "task_reconciliation_quote_binding": ["quote"],
+            "task_reconciliation_obligation": [
+                "obligations[].id", "obligations[].canonicalName",
+                "obligations[].minCalls", "obligations[].maxCalls"],
+            "task_reconciliation_argument_hash": ["obligations[].argumentChecks"],
+            "task_reconciliation_argument_check": ["obligations[].argumentChecks"],
+            "task_reconciliation_effect": ["obligations[].effect"],
+            "task_reconciliation_resource": ["obligations[].resourceKey"],
+            "task_reconciliation_mode": ["mode"],
+        }
+        code = reason if isinstance(reason, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,100}", reason) else "task_reconciliation_invalid"
+        fields = field_hints.get(code, ["mode", "quote", "obligations"])
+        feedback = (
+            "No reconciliation was committed. Correct the visible-user-bound declaration "
+            f"({code}) and retry as one control call. Required declaration fields: "
+            + ", ".join(fields) + ". Do not infer expected actions or use hidden evaluator information."
+        )
+        return {"errorCode": code, "requiredFields": fields[:8], "feedback": feedback}
 
     def _temporal_commit(snapshot):
         nonlocal revision
@@ -2378,7 +2586,11 @@ def _native_run_with_agent(
                             actorSchemaHash=_stable_hash(openai_tools), standardOnly=True)
 
     if temporal_enabled:
-        if retrieval_enabled or a2a_transport_enabled or any(_canonical(tool)[0] == "AppAgent" for tool in app_tools):
+        # Retrieval is a standard-only, read-oriented controller and must be
+        # able to coexist with the standard temporal/evidence stack.  The
+        # isolation boundary is for enhanced A2A/Noise execution, not for a
+        # second standard controller in the same task.
+        if a2a_transport_enabled or any(_canonical(tool)[0] == "AppAgent" for tool in app_tools):
             raise HookProtocolError("temporal_standard_isolated_profile_required")
         workspace = os.environ.get("GAIA2_TEMPORAL_WORKSPACE")
         if not workspace:
@@ -2415,7 +2627,7 @@ def _native_run_with_agent(
                             automaticReadRecovery=False, automaticWriteReplay=False)
 
     if entity_enabled:
-        if retrieval_enabled or a2a_transport_enabled or any(_canonical(tool)[0] == "AppAgent" for tool in app_tools):
+        if a2a_transport_enabled or any(_canonical(tool)[0] == "AppAgent" for tool in app_tools):
             raise HookProtocolError("entity_standard_profile_required")
         workspace = os.environ.get("GAIA2_ENTITY_SEMANTICS_WORKSPACE")
         if not workspace or not Path(workspace).is_dir():
@@ -2431,7 +2643,7 @@ def _native_run_with_agent(
                             rawNativeResultsPreserved=True, automaticWriteReplay=False)
 
     if mutation_enabled:
-        if retrieval_enabled or a2a_transport_enabled or any(_canonical(tool)[0] == "AppAgent" for tool in app_tools):
+        if a2a_transport_enabled or any(_canonical(tool)[0] == "AppAgent" for tool in app_tools):
             raise HookProtocolError("mutation_standard_profile_required")
         workspace = os.environ.get("GAIA2_MUTATION_RECEIPTS_WORKSPACE")
         if not workspace or not Path(workspace).is_dir():
@@ -2579,6 +2791,21 @@ def _native_run_with_agent(
                 # state. Do not carry a prior finish-loop counter across it.
                 finish_block_signature = None
                 finish_block_repetitions = 0
+            # A result may be published after the previous parent response.
+            # If the environment is still live, grant one bounded parent
+            # model opportunity so the result can enter the next model input.
+            # Hard STOP remains terminal and is handled by the final audit
+            # event below; it must never be bypassed by a synthetic request.
+            if (a2a_pending_results and not active_turn
+                    and not a2a_stop_observed
+                    and env.state not in (EnvironmentState.STOPPED, EnvironmentState.FAILED)
+                    and a2a_terminal_drain_attempts < a2a_terminal_drain_limit):
+                a2a_terminal_drain_attempts += 1
+                active_turn = True
+                _emit_runtime_event("a2a_terminal_drain_requested", turn=iteration,
+                                    pendingResults=len(a2a_pending_results),
+                                    attempt=a2a_terminal_drain_attempts,
+                                    maxAttempts=a2a_terminal_drain_limit)
             if not active_turn:
                 # Like ARE's outer agent loop, a completed turn waits for a new
                 # arrived message. Do not inspect future events or advance time.
@@ -2694,6 +2921,24 @@ def _native_run_with_agent(
                                                           protected_user_messages=protected_users)
             actor_input = _actor_messages(actor_input)
             _validate_provider_tool_pairs(actor_input)
+            if a2a_pending_results:
+                drain_was_requested = a2a_terminal_drain_attempts > 0
+                # This is an observable visibility acknowledgement only: it
+                # proves the parent request contained the child result, not
+                # that hidden model reasoning accepted it.
+                for pending_call_id, pending in list(a2a_pending_results.items()):
+                    _emit_runtime_event("a2a_parent_result_consumed", turn=iteration,
+                                        callId=pending_call_id,
+                                        resultHash=pending["resultHash"],
+                                        resultStatus=pending["status"],
+                                        consumedInModelRequest=True)
+                    a2a_pending_results.pop(pending_call_id, None)
+                    a2a_consumed_results += 1
+                if not a2a_pending_results:
+                    if drain_was_requested:
+                        _emit_runtime_event("a2a_terminal_drain_completed", turn=iteration,
+                                            consumedResults=a2a_consumed_results)
+                    a2a_terminal_drain_attempts = 0
             changed_observation_views = _mark_compacted_observation_views(messages, compaction)
             if compaction["compacted"]:
                 _emit_runtime_event("model_context_compacted", turn=iteration,
@@ -2859,6 +3104,11 @@ def _native_run_with_agent(
                     arguments = {}
                     argument_error = True
                     argument_reason = "unsafe_json_argument"
+                if not argument_error:
+                    arguments, normalized_fields = _normalize_native_arguments(arguments)
+                    if normalized_fields:
+                        _emit_runtime_event("native_arguments_normalized", turn=iteration,
+                                            callId=call_id, fields=normalized_fields)
                 if task_reconciliation_enabled and name == "capybara_task_reconcile":
                     action = _task_reconcile_action(call_id)
                     blocked = argument_error or len(calls) != 1 or generation_changed
@@ -2874,8 +3124,9 @@ def _native_run_with_agent(
                         except HookProtocolError as error:
                             blocked, reason = True, error.code
                     if blocked:
+                        diagnostic = _task_reconciliation_feedback(reason)
                         result = {"status": "failed_before_execution", "executed": False, "reason": reason,
-                                  "feedback": "No reconciliation was committed. Repair the exact visible-user quote, canonical tool name, bounds or single-call requirement and retry."}
+                                  **diagnostic}
                         usage["blockedTools"] += 1
                     else:
                         outcome = {"status": "succeeded", "executed": True, "complete": True,
@@ -3166,6 +3417,11 @@ def _native_run_with_agent(
                         _emit_runtime_event("delegation_failed", turn=iteration, callId=call_id,
                                             canonicalName=action["canonicalName"], errorCode=error_code,
                                             childDiagnostic=child_diagnostic)
+                        _emit_runtime_event("a2a_child_result_published", turn=iteration,
+                                            callId=call_id, resultStatus="failed",
+                                            resultHash=_stable_hash(result), visibleToParent=True,
+                                            failureCode=error_code)
+                        a2a_pending_results[call_id] = {"resultHash": _stable_hash(result), "status": "failed"}
                     else:
                         result = {"status": "succeeded", "childResult": child_result,
                                   "delegated": True}
@@ -3188,6 +3444,10 @@ def _native_run_with_agent(
                         _emit_runtime_event("delegation_completed", turn=iteration, callId=call_id,
                                             canonicalName=action["canonicalName"],
                                             resultHash=result_hash)
+                        _emit_runtime_event("a2a_child_result_published", turn=iteration,
+                                            callId=call_id, resultStatus="succeeded",
+                                            resultHash=result_hash, visibleToParent=True)
+                        a2a_pending_results[call_id] = {"resultHash": result_hash, "status": "succeeded"}
                 elif invalid or stale or permission != "allow":
                     reason = ("stale_dynamic_context" if stale
                               else "authoritative_read_required" if permission == "read_back"
@@ -3204,6 +3464,7 @@ def _native_run_with_agent(
                                               "Provide valid explicit parameters; do not assume a default empty string executed.")
                     if action["effect"] == "finish" and permission != "allow":
                         gate = before_tool.get("decision", {})
+                        gate_diagnostics = _finish_gate_diagnostics(before_tool)
                         # The Host context hash includes the newly appended
                         # blocked tool message and therefore changes on every
                         # retry.  It is evidence, not loop identity.  Loop
@@ -3211,7 +3472,11 @@ def _native_run_with_agent(
                         # gate reason; a real user/environment signal changes
                         # the reason or starts a new attempt.
                         gate_context = {"reason": reason,
-                                        "pendingWindowIds": gate.get("pendingWindowIds", [])}
+                                        "pendingWindowIds": gate.get("pendingWindowIds", []),
+                                        "unresolvedActionIds": gate_diagnostics["unresolvedActionIds"],
+                                        "unresolvedGroupCount": gate_diagnostics["unresolvedGroupCount"],
+                                        "unresolvedGroups": gate_diagnostics["unresolvedGroups"],
+                                        "ledgerIncomplete": gate_diagnostics["ledgerIncomplete"]}
                         signature = _stable_hash({"mutationKey": action.get("mutationKey"),
                                                   "canonicalName": action.get("canonicalName"),
                                                   "gate": gate_context})
@@ -3221,8 +3486,22 @@ def _native_run_with_agent(
                             finish_block_signature = signature
                             finish_block_repetitions = 1
                         waiting_gate = reason in ("window_obligation_pending", "temporal_watch_running")
-                        result["requiredAction"] = "continue_wait" if waiting_gate else "replan"
-                        result["feedback"] = (
+                        result["requiredAction"] = "continue_wait" if waiting_gate else (
+                            "authoritative_read_or_clarify" if reason == "action_ledger_unresolved" else "replan")
+                        if reason == "action_ledger_unresolved":
+                            groups = gate_diagnostics["unresolvedGroups"]
+                            group_text = "; ".join(
+                                f"{item.get('canonicalName', 'unknown')} on {item.get('resourceKey', 'unknown')}"
+                                for item in groups
+                            ) or "the exact unresolved write"
+                            result["feedback"] = (
+                                "This final reply was not executed because " + group_text +
+                                " still has an unknown or unexecuted outcome. Do not repeat the final call. "
+                                "Read the authoritative state for that exact operation, or report the unresolved "
+                                "branch to the user; never replay an unknown write."
+                            )
+                        else:
+                            result["feedback"] = (
                             "This final reply was not executed because a trusted runtime obligation is still active. "
                             "Do not retry the final reply while the gate state is unchanged. Continue the existing "
                             "read-only wait/controller and return only after an official signal or the declared "
@@ -3230,7 +3509,7 @@ def _native_run_with_agent(
                             if waiting_gate else
                             "This final reply was not executed by the runtime gate. Reconcile the latest trusted "
                             "evidence and choose a safe next action; do not repeat the identical final call."
-                        )
+                            )
                         result["finishGate"] = {"state": "blocked", "repetition": finish_block_repetitions,
                                                 "maxRepetitions": max_finish_block_repetitions,
                                                 "stateChanged": finish_block_repetitions == 1,
@@ -3338,6 +3617,13 @@ def _native_run_with_agent(
                 active_tool_round = None
             if termination_reason in ("conversation_turn_limit", "environment_stop"):
                 break
+    except FinishGateLoopExceeded:
+        # A bounded, repeated finish refusal is a safe business-boundary
+        # outcome, not a broken Host/ARE execution.  Preserve the original
+        # ledger and the finish_gate_loop_stopped event, then let the normal
+        # attempt_end/evaluation path emit an explicit incomplete result.
+        failure = None
+        termination_reason = "finish_gate_loop"
     except BaseException as error:
         failure = error
         if termination_reason not in ("action_budget_exhausted", "finish_gate_loop"):
@@ -3386,6 +3672,17 @@ def _native_run_with_agent(
                     failure = HookProtocolError("delegation_close_failed")
                     termination_reason = "live_hook_failure"
                 _emit_runtime_event("delegation_close_failed")
+        _emit_runtime_event("a2a_parent_convergence_checked",
+                            pendingResults=len(a2a_pending_results),
+                            consumedResults=a2a_consumed_results,
+                            converged=not a2a_pending_results)
+        if a2a_pending_results:
+            _emit_runtime_event("a2a_terminal_drain_blocked",
+                                pendingResults=len(a2a_pending_results),
+                                attempts=a2a_terminal_drain_attempts,
+                                reason=("stop_observed" if a2a_stop_observed
+                                        or env.state in (EnvironmentState.STOPPED, EnvironmentState.FAILED)
+                                        else "drain_limit_reached"))
         _emit_runtime_event("attempt_execution_ended", terminationReason=termination_reason,
                             actionBudget=max_actions, usage=usage, evaluationAttempted=failure is None)
         iteration = usage["modelRequests"]

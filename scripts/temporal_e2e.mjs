@@ -11,6 +11,7 @@ import { writeOfficialEntryManifest } from '../src/phase1_official_entry.mjs'
 import { runChildProcess } from '../src/phase1_process.mjs'
 import { startRuntimeHookService } from '../src/phase3_hook_service.mjs'
 import { temporalDigest, validateTemporalState } from '../src/temporal_receipt.mjs'
+import { hostInvocationDigest } from '../src/host_invocation_digest.mjs'
 
 export const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 export const portable = value => value.replaceAll('\\', '/')
@@ -43,7 +44,7 @@ export function verifyTemporalReceipts({ root, workspace, executionId, sessionId
     const source = readJson(target)
     assert.equal(source.executionId, executionId); assert.equal(source.sessionId, sessionId)
     for (const key of ['sequence', 'revision', 'contextHash', 'variablesHash']) assert.equal(source[key], receipt[key])
-    assert.deepEqual(source.input, { ...item.request, checkpoint: item.checkpoint })
+    assert.equal(hostInvocationDigest(source.input), hostInvocationDigest({ ...item.request, checkpoint: item.checkpoint }))
     assert.deepEqual(source.variables.gaia2_temporal_state, receipt.state)
     validateTemporalState(receipt.state, { executionId, sessionId })
     assert.equal(temporalDigest(receipt.state), receipt.stateHash)

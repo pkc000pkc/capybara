@@ -11,6 +11,7 @@ import { writeOfficialEntryManifest } from '../src/phase1_official_entry.mjs'
 import { runChildProcess } from '../src/phase1_process.mjs'
 import { startRuntimeHookService } from '../src/phase3_hook_service.mjs'
 import { portable, processClean, save, verifyTemporalReceipts } from '../scripts/temporal_e2e.mjs'
+import { hostInvocationDigest } from '../src/host_invocation_digest.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const cases = ['calendar_batch', 'contacts_batch', 'unknown_batch', 'success_batch', 'silent_stop', 'notify_allowed']
@@ -68,7 +69,10 @@ test('precise feedback and real batch summaries cross production Bridge/Host/ARE
         assert.equal(fileDigest(sourcePath), receipt.sourceReceiptRef.sha256)
         const source = readJson(sourcePath)
         assert.equal(source.executionId, task.executionId); assert.equal(source.sessionId, session.sessionId)
-        assert.deepEqual(source.input, { ...capture.request, checkpoint: capture.checkpoint })
+        // Host appends derived argument evidence to the trusted receipt; the
+        // verifier compares the semantic invocation projection, not those
+        // Host-only fields.
+        assert.equal(hostInvocationDigest(source.input), hostInvocationDigest({ ...capture.request, checkpoint: capture.checkpoint }))
         assert.deepEqual(source.variables.gaia2_write_state, receipt.writeState)
         verifiedReceipts++
       }

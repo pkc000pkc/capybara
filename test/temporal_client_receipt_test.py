@@ -85,6 +85,20 @@ class TemporalClientReceiptTests(unittest.TestCase):
     def test_valid_initial_state(self):
         self.assertEqual(self.validate()["state"], self.state)
 
+    def test_host_derived_argument_metadata_is_ignored_for_input_binding(self):
+        action = {"id": "call-1", "name": "RentAFlat__list_all_apartments",
+                  "canonicalName": "RentAFlat__list_all_apartments", "effect": "read",
+                  "arguments": {}, "resourceKey": "RentAFlat", "authoritativeRead": True}
+        self.payload = {"messages": [], "clock": {"now": 10, "revision": 2},
+                        "loop": {"iteration": 2}, "action": copy.deepcopy(action)}
+        host_action = {**action, "argumentHash": "a" * 64,
+                       "argumentFieldHashes": {"": "a" * 64},
+                       "argumentFieldNumbers": {}, "argumentMetadataComplete": True}
+        self.report["input"] = {**copy.deepcopy(self.payload), "checkpoint": "before_model"}
+        self.report["input"]["action"] = host_action
+        self.write_report()
+        self.assertEqual(self.validate()["state"], self.state)
+
     def test_valid_active_state_and_unicode_hash(self):
         self.activate()
         receipt = self.validate()

@@ -15,9 +15,11 @@ from typing import Any
 
 _APPS = Path(__file__).resolve().parents[1] / ".official-python/are/simulation/apps"
 _PINS = {
+    "apartment_listing.py": "41c7a5ed39f12556621ab3aaa199b30396a57d35c0f204c90d16953ebd4b12a3",
     "calendar.py": "62ffa557068dd1e5983758f8f25423cb6e81a48f4191edace98a2e0173881c7c",
     "contacts.py": "188862e4ba05bf06895321399c2dd1e54ef9a29fe9dc2573679abb98e5bcf47f",
     "email_client.py": "0da4b444925cef30e6945bff6c0d135d23fddc1c9c54c208acf889d606f24a57",
+    "shopping.py": "7436b99640628ef737418396287fe8b7fb4912bd81bfee72e251a748aaeae205",
     "sandbox_file_system.py": "c0c39d09c4d67c3875d978558cc79a5bbe9aeb0611917afa09f9d64115ea7ae4",
     # Pagination and message-validation diagnostics are source-pinned just
     # like the existing resource-not-found diagnostics.  A matching exception
@@ -26,6 +28,12 @@ _PINS = {
     "messaging.py": "e384b05c23b9303a08e0099bd62949fe30230c5aca5e921971f38063bdbc10fd",
     "messaging_v2.py": "e28b815b4b5f61d786b610d962158d4928fff6fa4e9be3897167855be8b63b34",
 }
+
+# ARE's optional failure injection is performed by AppTool.__call__ before
+# the wrapped application function is entered.  Keep this source-pinned: a
+# generic Exception from an application remains unknown and continues to
+# block unsafe completion.
+_TOOL_UTILS_PIN = "dfbbe5bbfebd79b9aad214843e652600a4b7604d21a73b28d82bf9686d575f7f"
 
 
 def _pinned_frames(error: BaseException, filename: str, method: str) -> list:
@@ -46,6 +54,49 @@ def _pinned_frames(error: BaseException, filename: str, method: str) -> list:
         return frames if any(frame.f_code.co_name == method for frame in frames) else []
     except (OSError, ValueError, RuntimeError):
         return []
+
+
+def _pinned_tool_failure(error: BaseException) -> bool:
+    """Prove ARE's injected failure happened before the app function call."""
+    path = _APPS.parent / "tool_utils.py"
+    try:
+        if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != _TOOL_UTILS_PIN:
+            return False
+        expected = path.resolve()
+        cursor = error.__traceback__
+        while cursor is not None:
+            frame = cursor.tb_frame
+            if (Path(frame.f_code.co_filename).resolve() == expected
+                    and frame.f_globals.get("__name__") == "are.simulation.tool_utils"
+                    and frame.f_code.co_name == "__call__"):
+                tool = frame.f_locals.get("self")
+                # The default ARE failure template is intentionally stable;
+                # bind both the AppTool class and its configured RNG path.
+                template = getattr(tool, "failure_message_template", None) if tool is not None else None
+                tool_name = getattr(tool, "name", None) if tool is not None else None
+                expected_message = None
+                if isinstance(template, str) and isinstance(tool_name, str):
+                    try:
+                        expected_message = template.format(name=tool_name)
+                    except (IndexError, KeyError, ValueError):
+                        expected_message = None
+                if (tool is not None and getattr(tool.__class__, "__name__", None) == "AppTool"
+                        and getattr(tool, "failure_probability", None) not in (None, 0.0)
+                        and getattr(tool, "rng", None) is not None
+                        # Source pin makes this line binding: line 152 is the
+                        # pre-dispatch failure-injection branch, while a
+                        # function-raised exception returns through line 156+
+                        # and must remain unknown.
+                        and cursor.tb_lineno == 152
+                        and type(error) is Exception
+                        and expected_message is not None
+                        and type(error.args) is tuple and len(error.args) == 1
+                        and error.args[0] == expected_message):
+                    return True
+            cursor = cursor.tb_next
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return False
 
 
 def _identifier(value: Any, pattern: str) -> str | None:
@@ -69,6 +120,15 @@ def native_error_feedback(action: dict, error: BaseException, *, status: str,
     result = {"errorType": exception_type, "error_code": "native_error", "tool": canonical,
               "resource": resource, "argument_name": None, "effectApplied": "unknown",
               "feedback": "The native call failed. Its effect is not established by the exception type. Inspect the actual result and authoritative state as needed; do not blindly replay an unknown write."}
+    if _pinned_tool_failure(error):
+        result.update(
+            error_code="injected_native_failure",
+            effectApplied=False,
+            feedback=("The ARE failure injector rejected this call before the application function ran; "
+                      "no business mutation was executed. Re-evaluate the current obligation and retry "
+                      "the same call only when it is still required."),
+        )
+        return result
     if canonical is None or type(error.args) is not tuple or len(error.args) != 1 or type(error.args[0]) is not str:
         return result
     owner, method = canonical.split("__", 1)
@@ -83,6 +143,42 @@ def native_error_feedback(action: dict, error: BaseException, *, status: str,
                 and _pinned_frames(error, "calendar.py", method)):
             code, argument = "calendar_event_not_found", "event_id"
             hint = "The supplied event_id does not exist in this Calendar. No calendar event was deleted or changed by this call. Check the exact identifier from a native Calendar result; do not guess a replacement ID."
+
+    elif owner in {"Calendar", "CalendarApp"} and method == "add_calendar_event":
+        frames = _pinned_frames(error, "calendar.py", method)
+        if (type(error) is ValueError and frames
+                and message in {"Invalid datetime format. Please use YYYY-MM-DD HH:MM:SS",
+                                 "Start time cannot be after end time."}):
+            code = "calendar_event_validation"
+            hint = ("The calendar event was rejected before it was added because its datetime fields are invalid. "
+                    "Correct the datetime values and retry; no calendar event was created.")
+
+    elif owner in {"RentAFlat", "ApartmentListing"} and method in {"save_apartment", "remove_saved_apartment"}:
+        frames = _pinned_frames(error, "apartment_listing.py", method)
+        expected = {"save_apartment": "Apartment does not exist",
+                    "remove_saved_apartment": "Apartment not in saved list"}[method]
+        if type(error) is ValueError and message == expected and frames:
+            code = "apartment_precondition_failed"
+            argument = "apartment_id"
+            hint = ("The apartment operation was rejected before the favorites list changed. "
+                    "Use an exact apartment_id from a native result; do not replay a confirmed mutation.")
+
+    elif owner == "Shopping" and method in {"add_to_cart", "checkout"}:
+        frames = _pinned_frames(error, "shopping.py", method)
+        if frames and method == "add_to_cart" and type(error) is ValueError and message in {
+                "Quantity cannot be negative or zero", "Product does not exist", "Product is not available"}:
+            code = "shopping_add_precondition_failed"
+            argument = "quantity" if message.startswith("Quantity") else "item_id"
+            hint = ("The cart operation was rejected before the cart changed. "
+                    "Correct the quantity or use an available item_id from a native result; no item was added.")
+        elif frames and method == "checkout" and (
+                (type(error) is Exception and message == "Cart is empty")
+                or (type(error) is ValueError and (
+                    message.startswith("There is no valid discount codes for the item with id - ")
+                    or message.startswith("The provided discount code is not valid for the item with id - ")))):
+            code = "shopping_checkout_precondition_failed"
+            hint = ("Checkout was rejected before an order was created because the cart or discount code "
+                    "was invalid. Correct the cart state or discount code; no order was finalized.")
 
     elif owner in {"Contacts", "ContactsApp", "InternalContacts"} and method in {"get_contact", "edit_contact", "delete_contact"}:
         contact_id = arguments.get("contact_id")

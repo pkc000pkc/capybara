@@ -37,8 +37,17 @@ STATUSES = {
     "cancelled",
 }
 MODES = {"monitor_until", "condition_once"}
+LIFECYCLE_STATES = {
+    "registered",
+    "watching",
+    "signal_received",
+    "model_resumed",
+    "candidate_processed",
+    "deadline_reached",
+    "window_closed",
+    "obligations_verified",
+}
 TECHNICAL_SIGNALS = {
-    "scan_budget",
     "native_error",
     "incomplete_observation",
     "clock_error",
@@ -107,6 +116,16 @@ class WindowObligationLedger:
 
     def _touch(self) -> None:
         self._revision += 1
+
+    def _transition(self, item: dict[str, Any], lifecycle: str) -> None:
+        if lifecycle not in LIFECYCLE_STATES:
+            raise WindowObligationError("lifecycle", "unknown window lifecycle state")
+        if item.get("lifecycle") == lifecycle:
+            return
+        item["lifecycle"] = lifecycle
+        history = item.setdefault("lifecycleHistory", [])
+        history.append({"state": lifecycle, "areNow": self._now})
+        item["lifecycleHistory"] = history[-32:]
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -187,6 +206,8 @@ class WindowObligationLedger:
             "sceneStart": float(scene_start),
             "deadline": float(deadline),
             "status": "pending",
+            "lifecycle": "registered",
+            "lifecycleHistory": [{"state": "registered", "areNow": float(scene_start)}],
             "candidateEvidence": None,
             "lastReviewedActionId": None,
             "completionReason": None,
@@ -212,6 +233,7 @@ class WindowObligationLedger:
             if item["status"] == "pending" and now >= item["deadline"]:
                 item["status"] = "window_expired_unreviewed"
                 item["lastSignal"] = "deadline"
+                self._transition(item, "deadline_reached")
         self._touch()
         return self.snapshot()
 
@@ -228,9 +250,16 @@ class WindowObligationLedger:
         item["waitCount"] += waits
         item["scanCount"] += scans
         item["lastSignal"] = signal
+        self._transition(item, "watching")
         if signal in TECHNICAL_SIGNALS:
             item["status"] = "technical_termination"
             item["terminationSignal"] = signal
+        elif signal == "scan_budget":
+            # A controller scan budget ends one polling invocation, not the
+            # user-declared business window. Keep the obligation pending so a
+            # subsequent watch can continue until the real deadline.
+            item["status"] = "window_expired_unreviewed" if self._now is not None and self._now >= item["deadline"] else "pending"
+            item["terminationSignal"] = None
         elif item["status"] == "pending" and self._now is not None and self._now >= item["deadline"]:
             item["status"] = "window_expired_unreviewed"
         self._touch()
@@ -250,6 +279,7 @@ class WindowObligationLedger:
         item["candidateEvidence"] = {key: _clone(evidence[key]) for key in ("actionId", "observedAt", "complete", "viewComplete")}
         item["status"] = "candidate_pending_review"
         item["lastSignal"] = "candidate_changed"
+        self._transition(item, "signal_received")
         self._touch()
         return self.snapshot()
 
@@ -265,19 +295,27 @@ class WindowObligationLedger:
         observed = evidence["observedAt"] if observed_at is None else observed_at
         if not _finite(observed) or observed > now:
             raise WindowObligationError("review_time", "review evidence timestamp is invalid")
+        self._transition(item, "model_resumed")
         if decision == "condition_satisfied":
             if item["mode"] != "condition_once":
                 raise WindowObligationError("monitor_early_completion", "monitor-until cannot complete on a candidate")
             item["status"] = "window_completed"
             item["completionReason"] = "condition_satisfied"
+            self._transition(item, "window_closed")
+            self._transition(item, "obligations_verified")
         elif decision == "deadline_reviewed":
             if now < item["deadline"] or observed < item["deadline"]:
                 raise WindowObligationError("deadline_evidence", "final review requires ARE time and evidence at deadline")
             item["status"] = "window_completed"
             item["completionReason"] = "deadline_reviewed"
+            self._transition(item, "window_closed")
+            self._transition(item, "obligations_verified")
         else:
             item["status"] = "window_expired_unreviewed" if now >= item["deadline"] else "pending"
             item["completionReason"] = None
+            self._transition(item, "candidate_processed")
+            if item["status"] == "pending":
+                self._transition(item, "watching")
         item["lastReviewedActionId"] = action_id
         item["candidateEvidence"] = None
         item["lastSignal"] = decision
@@ -292,6 +330,7 @@ class WindowObligationLedger:
             item["status"] = "user_interrupted" if reason == "user_update" else "cancelled"
             item["terminationSignal"] = reason
             item["lastSignal"] = reason
+            self._transition(item, "window_closed")
             self._touch()
         return self.snapshot()
 
@@ -320,9 +359,11 @@ class WindowObligationLedger:
                 item["status"] = "window_expired_unreviewed"
             if item["status"] != "window_completed":
                 pending.append(item["id"])
+            else:
+                self._transition(item, "obligations_verified")
         self._touch()
         return {"allowed": not pending, "reason": "ready" if not pending else "obligations_pending",
                 "pendingObligationIds": pending, "state": self.snapshot()}
 
 
-__all__ = ["SCHEMA", "STATUSES", "WindowObligationError", "WindowObligationLedger"]
+__all__ = ["SCHEMA", "STATUSES", "LIFECYCLE_STATES", "WindowObligationError", "WindowObligationLedger"]

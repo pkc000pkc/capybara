@@ -13,6 +13,7 @@ import { startRuntimeHookService } from '../src/phase3_hook_service.mjs'
 import { ROOT, filesBelow, portable, processClean, save, verifyTemporalReceipts } from './temporal_e2e.mjs'
 import { collectTemporalFrozenSources, supervisionSafety } from './temporal_official_ten.mjs'
 import { verifyConflictPluginSnapshots, verifyConflictReceipts } from './conflict_recovery_e2e.mjs'
+import { hostInvocationDigest } from '../src/host_invocation_digest.mjs'
 
 export const DELETE_CASES = Object.freeze(['calendar_absent', 'contacts_absent', 'calendar_permission_error', 'contacts_unsupported_error', 'unknown_write_no_replay'])
 export const WAIT_CASES = Object.freeze(['wait_monitor_contacts', 'wait_condition_calendar', 'wait_condition_timeout_calendar', 'wait_text_finish_contacts',
@@ -39,7 +40,7 @@ export async function verifyRuntimeSemanticReceipts({ root, workspace, execution
     const source = readJson(target)
     assert.equal(source.executionId, executionId); assert.equal(source.sessionId, sessionId)
     for (const key of ['sequence', 'revision', 'contextHash', 'variablesHash']) assert.equal(source[key], receipt[key])
-    assert.deepEqual(source.input, { ...item.request, checkpoint: item.checkpoint })
+    assert.equal(hostInvocationDigest(source.input), hostInvocationDigest({ ...item.request, checkpoint: item.checkpoint }))
     assert.deepEqual(source.variables.gaia2_entity_state, receipt.entityState)
     validateEntityState(receipt.entityState, { executionId, sessionId })
     assert.equal(semanticDigest(receipt.entityState), receipt.entityStateHash)

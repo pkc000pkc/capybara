@@ -40,6 +40,24 @@ def _object_pairs(pairs):
     return result
 
 
+# RuntimePluginHost adds these fields after admission. They are trusted Host
+# projections, not Actor-authored input; receipt binding must compare the
+# caller-visible action while retaining all identity and argument evidence in
+# the Host report itself. Keep this list identical to src/host_invocation_digest.mjs.
+_DERIVED_ACTION_FIELDS = frozenset((
+    "argumentHash", "argumentFieldHashes", "argumentFieldNumbers", "argumentMetadataComplete",
+))
+
+
+def _host_input_projection(value: Any) -> Any:
+    if not isinstance(value, dict) or not isinstance(value.get("action"), dict):
+        return value
+    projected = dict(value)
+    projected["action"] = {key: item for key, item in value["action"].items()
+                            if key not in _DERIVED_ACTION_FIELDS}
+    return projected
+
+
 class RuntimeHookClient:
     def __init__(self, *, url: str | None = None, token: str | None = None,
                  execution_id: str | None = None, session_id: str | None = None,
@@ -211,7 +229,7 @@ class RuntimeHookClient:
                                 parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
             if (not isinstance(report, dict) or report.get("schemaVersion") != "capybara-runtime-plugin-invocation-v1"
                     or report.get("executionId") != self.execution_id or report.get("sessionId") != self.session_id
-                    or report.get("input") != {**payload, "checkpoint": checkpoint}
+                    or _host_input_projection(report.get("input")) != _host_input_projection({**payload, "checkpoint": checkpoint})
                     or report.get("sequence") != receipt.get("sequence")):
                 raise ValueError()
             for field in ("revision", "variablesHash", "contextHash"):
@@ -386,7 +404,7 @@ class RuntimeHookClient:
                                 parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
             if (not isinstance(report, dict) or report.get("schemaVersion") != "capybara-runtime-plugin-invocation-v1"
                     or report.get("executionId") != self.execution_id or report.get("sessionId") != self.session_id
-                    or report.get("input") != {**payload, "checkpoint": checkpoint}
+                    or _host_input_projection(report.get("input")) != _host_input_projection({**payload, "checkpoint": checkpoint})
                     or report.get("sequence") != receipt.get("sequence")):
                 raise ValueError()
             for field in ("revision", "variablesHash", "contextHash"):
@@ -442,7 +460,7 @@ class RuntimeHookClient:
             report = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_pairs)
             if (report.get("schemaVersion") != "capybara-runtime-plugin-invocation-v1"
                     or report.get("executionId") != self.execution_id or report.get("sessionId") != self.session_id
-                    or report.get("input") != {**payload, "checkpoint": checkpoint}
+                    or _host_input_projection(report.get("input")) != _host_input_projection({**payload, "checkpoint": checkpoint})
                     or report.get("sequence") != receipt.get("sequence")):
                 raise ValueError()
             for field in ("revision", "variablesHash", "contextHash"):
@@ -494,7 +512,8 @@ class RuntimeHookClient:
             expected = {**payload, "checkpoint": checkpoint}
             if (report.get("schemaVersion") != "capybara-runtime-plugin-invocation-v1"
                     or report.get("executionId") != self.execution_id or report.get("sessionId") != self.session_id
-                    or report.get("input") != expected or report.get("sequence") != receipt.get("sequence")):
+                    or _host_input_projection(report.get("input")) != _host_input_projection(expected)
+                    or report.get("sequence") != receipt.get("sequence")):
                 raise ValueError()
             for field in ("revision", "variablesHash", "contextHash"):
                 if report.get(field) != receipt.get(field) or result.get(field) != receipt.get(field):

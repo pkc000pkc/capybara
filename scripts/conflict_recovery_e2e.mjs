@@ -12,6 +12,7 @@ import { runChildProcess } from '../src/phase1_process.mjs'
 import { startRuntimeHookService } from '../src/phase3_hook_service.mjs'
 import { ROOT, portable, processClean, save } from './temporal_e2e.mjs'
 import { collectTemporalFrozenSources, supervisionSafety } from './temporal_official_ten.mjs'
+import { hostInvocationDigest } from '../src/host_invocation_digest.mjs'
 
 export const CONFLICT_CASES = Object.freeze(['confirmed', 'changed_budget', 'user_before_read', 'user_after_read', 'stop_before_read', 'unknown_write'])
 const VISIBLE_BASE = 'runs/temporal-official-ten-20261019T154626382Z-7082b888/task-02/output/temporal-evidence'
@@ -45,7 +46,7 @@ export async function verifyConflictReceipts({ root, workspace, executionId, ses
     const source = readJson(target)
     assert.equal(source.executionId, executionId); assert.equal(source.sessionId, sessionId)
     for (const key of ['sequence', 'revision', 'contextHash', 'variablesHash']) assert.equal(source[key], receipt[key])
-    assert.deepEqual(source.input, { ...item.request, checkpoint: item.checkpoint })
+    assert.equal(hostInvocationDigest(source.input), hostInvocationDigest({ ...item.request, checkpoint: item.checkpoint }))
     assert.deepEqual(source.variables.gaia2_conflict_state, receipt.state)
     validateConflictState(receipt.state)
     assert.equal(conflictDigest(receipt.state), receipt.stateHash)

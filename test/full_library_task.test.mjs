@@ -10,7 +10,7 @@ function fixture(phase = 'standard') {
     runNumber: 1, attemptIndex: 0, correctionOrdinal: 0 }
   const manifest = { mode: 'full_library_once', dataset: { kind: 'submission', split: 'validation' },
     executionBinding: 'phase3_live_plugin_host_required', syntheticFixtureOnly: false, officialSubmissionReady: false, correctionEnabled: false,
-    temporal: { enabled: true }, conflictRecovery: { enabled: true }, entitySemantics: { enabled: true }, mutationReceipts: { enabled: true },
+    temporal: { enabled: true }, conflictRecovery: { enabled: true }, entitySemantics: { enabled: true }, mutationReceipts: { enabled: true }, retrieval: { enabled: true, profile: 'standard-search' },
     models: { actor: { model: 'gpt-6-luna', provider: 'local' }, judge: { model: 'gpt-6-luna', provider: 'local' } },
     settings: { minimal: false, concurrency: 1, maxActions: 300, processTimeoutMs: 480000000,
       scenarioTimeoutSeconds: 480000, modelRequestTimeoutSeconds: 60, heartbeatIntervalMs: 1000,
@@ -27,6 +27,15 @@ test('Standard enables the latest four runtime capabilities; enhanced profiles e
   assert.deepEqual(fullLibraryProfileOptions(fixture()), { temporal: { enabled: true }, conflictRecovery: { enabled: true },
     entitySemantics: { enabled: true }, mutationReceipts: { enabled: true } })
   for (const phase of ['agent2agent', 'noise']) assert.deepEqual(fullLibraryProfileOptions(fixture(phase)), {})
+})
+
+test('Search standard profile enables the bounded retrieval controller only', () => {
+  const f = fixture()
+  f.task.config = 'search'
+  assert.deepEqual(fullLibraryProfileOptions(f), { temporal: { enabled: true }, conflictRecovery: { enabled: true },
+    entitySemantics: { enabled: true }, mutationReceipts: { enabled: true }, retrieval: { enabled: true, profile: 'standard-search' } })
+  assert.equal(buildFullLibraryLaunch(f).env.GAIA2_RETRIEVAL_ENABLED, '1')
+  assert.equal(buildFullLibraryLaunch(fixture()).env.GAIA2_RETRIEVAL_ENABLED, '0')
 })
 
 test('phase envelope rejects source/test, retired profiles, corrections, reruns, minimal and wrong configs', () => {
@@ -52,6 +61,7 @@ test('all phases launch the original official entry exactly once with the frozen
     assert.equal(value.env.GAIA2_TASK_RECONCILIATION_ENABLED, '1')
     assert.equal(value.env.GAIA2_TOOL_ROUND_WORKSPACE, value.cwd)
     assert.equal(value.env.GAIA2_MODEL_HTTP_GUARD_REQUIRED, '1')
+    assert.equal(value.env.GAIA2_RETRIEVAL_ENABLED, '0')
     assert.equal(value.env.GAIA2_EXECUTION_ID, f.task.executionId)
     assert.equal(value.env.GAIA2_SESSION_ID, f.session.sessionId)
   }
@@ -109,7 +119,8 @@ test('inherited capabilities, diagnostics, credential and Python overrides canno
     assert.equal(value.env.PYTHONPATH, resolve(f.root, '.official-python'))
     assert.equal(value.env.GAIA2_E2E_TOOL_ALLOWLIST, '')
     assert.equal(value.env.GAIA2_MODEL_MAX_ATTEMPTS, '6')
-    for (const name of ['GAIA2_TASK_CONTRACT_ENABLED', 'GAIA2_RETRIEVAL_ENABLED', 'GAIA2_TOOL_SCHEMA_DIAGNOSTIC', 'PYTHONHOME', 'OTHER_ACCESS_TOKEN', 'NODE_OPTIONS']) assert.equal(Object.hasOwn(value.env, name), false)
+    for (const name of ['GAIA2_TASK_CONTRACT_ENABLED', 'GAIA2_TOOL_SCHEMA_DIAGNOSTIC', 'PYTHONHOME', 'OTHER_ACCESS_TOKEN', 'NODE_OPTIONS']) assert.equal(Object.hasOwn(value.env, name), false)
+    assert.equal(value.env.GAIA2_RETRIEVAL_ENABLED, '0')
     if (phase !== 'standard') for (const name of ['TEMPORAL', 'CONFLICT_RECOVERY', 'ENTITY_SEMANTICS', 'MUTATION_RECEIPTS']) assert.equal(Object.hasOwn(value.env, `GAIA2_${name}_ENABLED`), false)
   }
 })

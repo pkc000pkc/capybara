@@ -7,13 +7,45 @@ import { safeEvidenceGateCode } from './phase1_diagnostics.mjs'
 import { isProcessIdentityAlive, readProcessIdentity } from './phase1_process.mjs'
 import { runtimeEvidenceRequired, validateRuntimeEvidence } from './phase3_runtime_evidence.mjs'
 
-export function atomicJson(path, value) {
+const TRANSIENT_RENAME_CODES = new Set(['EACCES', 'EBUSY', 'ENOTEMPTY', 'EPERM'])
+
+function sleepSync(milliseconds) {
+  if (!(milliseconds > 0)) return
+  const signal = new Int32Array(new SharedArrayBuffer(4))
+  Atomics.wait(signal, 0, 0, milliseconds)
+}
+
+export function renameWithRetry(source, target, { atomicRename = renameSync, attempts = 5, delayMs = 25, platform = process.platform } = {}) {
+  let lastError = null
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      atomicRename(source, target)
+      return { attempts: attempt }
+    } catch (error) {
+      lastError = error
+      const transient = platform === 'win32' && TRANSIENT_RENAME_CODES.has(error?.code)
+      if (!transient || attempt === attempts) throw error
+      sleepSync(delayMs * attempt)
+    }
+  }
+  throw lastError ?? new Error('atomic rename failed')
+}
+
+export function atomicJson(path, value, { atomicRename = renameSync, renameAttempts = 5, renameDelayMs = 25, platform = process.platform } = {}) {
   mkdirSync(dirname(path), { recursive: true })
   const temporary = `${path}.${randomUUID()}.tmp`
   const fd = openSync(temporary, 'wx', 0o600)
   try { writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`); fsyncSync(fd) }
   finally { closeSync(fd) }
-  renameSync(temporary, path)
+  let renamed = false
+  try {
+    renameWithRetry(temporary, path, { atomicRename, attempts: renameAttempts, delayMs: renameDelayMs, platform })
+    renamed = true
+  } finally {
+    if (!renamed && existsSync(temporary)) {
+      try { unlinkSync(temporary) } catch { /* preserve the original rename error */ }
+    }
+  }
 }
 
 function assert(condition, message) { if (!condition) throw new Error(`Phase 1: ${message}`) }

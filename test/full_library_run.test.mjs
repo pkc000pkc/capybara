@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, existsSync } from 'node:fs'
+import { mkdtempSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -76,4 +76,28 @@ test('source drift is fenced before any next question', async () => {
   const result = await runFullLibrary({ root: f.root, path: 'ignored' }, f.dependencies)
   assert.equal(result.status, 'stopped_for_safety'); assert.equal(f.calls(), 1)
   assert.equal(result.frozenSourcesVerified, false)
+})
+
+test('bounded scope stops after the requested task count and records a task-list hash', async () => {
+  const f = fixture(6), result = await runFullLibrary({ root: f.root, path: 'ignored', maxTasks: 3, checkpointEvery: 3 }, f.dependencies)
+  assert.equal(result.status, 'completed_scope')
+  assert.equal(result.totals.attempted, 3)
+  assert.equal(result.requestedTaskLimit, 3)
+  assert.equal(result.scope.taskLimit, 3)
+  assert.equal(result.scope.executionIds.length, 3)
+  assert.match(result.scope.taskListHash, /^[a-f0-9]{64}$/)
+  assert.equal(result.checkpoint.ordinal, 3)
+  assert.ok(existsSync(join(f.root, 'runs/test/checkpoint-0003.json')))
+})
+
+test('checkpoint pause waits for an explicit continuation marker', async () => {
+  const f = fixture(4)
+  const result = await runFullLibrary({ root: f.root, path: 'ignored', maxTasks: 4, checkpointEvery: 2, pauseAtCheckpoint: true,
+    onProgress: value => { if (value.status === 'checkpoint_waiting') writeFileSync(join(f.root, 'runs/test/CHECKPOINT_CONTINUE_0002.json'), JSON.stringify({
+      schemaVersion: 'gaia2-checkpoint-gate-v1', manifestHash: 'a'.repeat(64), scopeHash: value.scope.taskListHash,
+      ordinal: 2, decision: 'continue', principal: 'test', createdAt: new Date().toISOString() })) } }, f.dependencies)
+  assert.equal(result.status, 'completed')
+  assert.equal(f.calls(), 4)
+  assert.equal(result.checkpoint.ordinal, 4)
+  assert.equal(existsSync(join(f.root, 'runs/test/checkpoint-0002.json')), true)
 })

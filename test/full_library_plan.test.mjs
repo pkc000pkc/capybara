@@ -7,8 +7,8 @@ import { scenarioIdSetSha256 } from '../src/phase0_dataset.mjs'
 import { digest, fileDigest } from '../src/phase0_run.mjs'
 import { resolveRuntimeSettings } from '../src/phase1_config.mjs'
 import { resolveModelRetrySettings } from '../src/phase1_official.mjs'
-import { FULL_LIBRARY_CAPABILITIES, FULL_LIBRARY_SCHEMA, FULL_LIBRARY_SELECTION_RULE, FULL_LIBRARY_STOP_POLICY,
-  assertFullLibraryFrozen, loadFullLibraryPlan, orderFullLibraryTasks, validateFullLibraryPlanIdentity } from '../scripts/full_library_plan.mjs'
+import { FULL_LIBRARY_CAPABILITIES, FULL_LIBRARY_SCHEMA, FULL_LIBRARY_SCOPE_POLICY, FULL_LIBRARY_SELECTION_RULE, FULL_LIBRARY_STOP_POLICY,
+  assertFullLibraryFrozen, fullLibraryScope, loadFullLibraryPlan, orderFullLibraryTasks, taskSlotIdentity, validateFullLibraryPlanIdentity } from '../scripts/full_library_plan.mjs'
 
 function fixture() {
   const index = [], files = []
@@ -42,9 +42,9 @@ function fixture() {
     phaseCounts: { standard: 800, agent2agent: 160, noise: 160 }, syntheticFixtureOnly: false,
     officialSubmissionReady: false, originalCampaignModified: false, selectionRule: FULL_LIBRARY_SELECTION_RULE,
     executionBinding: 'phase3_live_plugin_host_required', correctionEnabled: false, resumeEnabled: false, reusePriorResults: false,
-    temporal: { enabled: true }, conflictRecovery: { enabled: true }, entitySemantics: { enabled: true }, mutationReceipts: { enabled: true },
-    capabilityScope: { temporal: 'standard', conflictRecovery: 'standard', entitySemantics: 'standard', mutationReceipts: 'standard' },
-    stopPolicy: { ...FULL_LIBRARY_STOP_POLICY }, models: structuredClone(protocol.models), settings: structuredClone(settings),
+    temporal: { enabled: true }, conflictRecovery: { enabled: true }, entitySemantics: { enabled: true }, mutationReceipts: { enabled: true }, retrieval: { enabled: true, profile: 'standard-search' },
+    capabilityScope: { temporal: 'standard', conflictRecovery: 'standard', entitySemantics: 'standard', mutationReceipts: 'standard', retrieval: 'standard-search' },
+    stopPolicy: { ...FULL_LIBRARY_STOP_POLICY }, scopePolicy: { ...FULL_LIBRARY_SCOPE_POLICY }, models: structuredClone(protocol.models), settings: structuredClone(settings),
     dataset: { kind: 'submission', id: dataset.id, revision: dataset.revision, split: 'validation', standardCount: 800, miniCount: 160, files: structuredClone(files) },
     lockRefs: { scenarioIndex: structuredClone(datasetLock.scenarioIndex) }, tasks,
     modelConfigurationRef: { path: 'public-model.json', sha256: digest('public config'), contentNotCopied: true, credentialFileNotHashed: true },
@@ -62,6 +62,7 @@ test('complete once-only manifest covers 800 Standard and 160 each enhanced phas
   assert.equal(manifest.tasks.length, 1120)
   assert.equal(new Set(manifest.tasks.map(task => task.scenarioId)).size, 800)
   assert.equal(new Set(manifest.tasks.map(task => task.executionId)).size, 1120)
+  assert.deepEqual(manifest.scopePolicy, FULL_LIBRARY_SCOPE_POLICY)
   assert.equal(new Set(manifest.tasks.map(task => `${task.phase}/${task.sourcePath}/${task.rowIndex}`)).size, 1120)
   for (const [phase, count] of Object.entries(manifest.phaseCounts)) assert.equal(manifest.tasks.filter(task => task.phase === phase).length, count)
   assert.ok(manifest.tasks.every(task => task.runNumber === 1 && task.attemptIndex === 0 && task.correctionOrdinal === 0))
@@ -80,6 +81,24 @@ test('pure ordering exercises all seven streams immediately while first40 questi
   assert.deepEqual(orderFullLibraryTasks([...candidates].reverse()), tasks, 'native source/row identity, not input order, controls each stream')
   assert.ok(tasks.slice(0, 40).filter(task => task.phase === 'agent2agent').length >= 5)
   assert.ok(tasks.slice(0, 40).filter(task => task.phase === 'noise').length >= 5)
+})
+
+test('bounded scope uses slot identity, enforces first-window coverage, and permits enhanced question reuse later', () => {
+  const { candidates } = fixture()
+  const tasks = orderFullLibraryTasks(candidates).map((task, index) => ({ ...task, executionId: `slot-${index}` }))
+  const scope = fullLibraryScope(tasks, { taskLimit: 200 })
+  assert.equal(scope.taskLimit, 200)
+  assert.equal(scope.executionIds.length, 200)
+  assert.equal(scope.taskSlotIds.length, 200)
+  assert.equal(new Set(scope.taskSlotIds).size, 200)
+  assert.equal(new Set(scope.scenarioIds.slice(0, FULL_LIBRARY_SCOPE_POLICY.firstWindowDistinctScenarioIds)).size, 40)
+  assert.ok(new Set(scope.scenarioIds).size < 200, 'enhanced scenario IDs should be allowed to repeat after the first window')
+  assert.throws(() => fullLibraryScope(tasks, { taskLimit: FULL_LIBRARY_SCOPE_POLICY.maxExecutions + 1 }), /1\.\.200 executions/)
+  const duplicateSlots = tasks.slice(0, 40).map((task, index) => ({ ...task, executionId: `duplicate-${index}` }))
+  duplicateSlots[1] = { ...duplicateSlots[0], executionId: 'duplicate-reused-slot' }
+  assert.throws(() => fullLibraryScope(duplicateSlots, { taskLimit: 40 }), /duplicate task slots/)
+  assert.equal(taskSlotIdentity(tasks[0]), taskSlotIdentity({ ...tasks[0], executionId: 'different-ordinal' }))
+  assert.notEqual(taskSlotIdentity(tasks[0]), taskSlotIdentity({ ...tasks[0], phase: 'noise' }))
 })
 
 test('small ordering fixtures retain duplicate question IDs without losing any execution', () => {
@@ -122,6 +141,7 @@ test('stop rule and thin current runtime are frozen; technical/unscored outcomes
   assert.deepEqual(manifest.stopPolicy, { firstScoredOutcomes: 40, stopIfAllScoresZero: true, technicalAndUnscoredExcluded: true })
   const changes = [m => { m.stopPolicy.firstScoredOutcomes = 10 }, m => { m.stopPolicy.stopIfAllScoresZero = false },
     m => { m.stopPolicy.technicalAndUnscoredExcluded = false }, m => { m.taskContract = { enabled: true } },
+    m => { m.scopePolicy.maxExecutions = 201 }, m => { m.scopePolicy.checkpointEvery = 20 },
     m => { m.entitySemantics.enabled = false }, m => { m.mutationReceipts.enabled = false },
     m => { m.settings.minimal = true }, m => { m.settings.maxActions = 1 }, m => { m.settings.concurrency = 2 },
     m => { m.settings.modelRetry.maxAttempts = 1 }, m => { m.models.actor.model = 'other' },

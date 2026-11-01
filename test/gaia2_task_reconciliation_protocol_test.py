@@ -35,9 +35,10 @@ class ReconciliationProtocolTests(unittest.TestCase):
         duplicate = [user("u1", "Same phrase."), user("u2", "Same phrase."), user("u3", "Later phrase.")]
         with self.assertRaisesRegex(ReconciliationProtocolError, "scope_quote"):
             resolve_scope_anchor(quote="Same phrase.", users=duplicate, continuation_quotes=["Later phrase."])
-        with self.assertRaisesRegex(ReconciliationProtocolError, "scope_duplicate"):
-            resolve_scope_anchor(quote="Book the first appointment.", users=self.users,
-                                 continuation_quotes=["Book the first appointment."])
+        root, members = resolve_scope_anchor(quote="Book the first appointment.", users=self.users,
+                                             continuation_quotes=["Book the first appointment."])
+        self.assertEqual(root["id"], "u1")
+        self.assertEqual([item["userRef"] for item in members], ["u1"])
         with self.assertRaisesRegex(ReconciliationProtocolError, "scope_order"):
             resolve_scope_anchor(quote="Continue the first appointment.", users=self.users,
                                  continuation_quotes=["Book the first appointment."])

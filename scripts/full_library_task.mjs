@@ -6,6 +6,7 @@ import { dirname, join, relative, resolve } from 'node:path'
 import { asyncBufferFromFile, parquetReadObjects } from 'hyparquet'
 import { compressors } from 'hyparquet-compressors'
 import { digest, fileDigest, readJson, within } from '../src/phase0_run.mjs'
+import { hostInvocationDigest } from '../src/host_invocation_digest.mjs'
 import { fixtureFromScenario, modelRuntimeEnvironment, readNativeResult, resolveTransportProvider, taskReconciliationEnvironment } from '../src/phase1_official.mjs'
 import { writeOfficialEntryManifest } from '../src/phase1_official_entry.mjs'
 import { runChildProcess } from '../src/phase1_process.mjs'
@@ -42,9 +43,11 @@ export function fullLibraryProfileOptions({ manifest, task }) {
   assert.equal(manifest.settings.minimal, false)
   assert.equal(manifest.settings.concurrency, 1)
   for (const name of ['temporal', 'conflictRecovery', 'entitySemantics', 'mutationReceipts']) assert.deepEqual(manifest[name], { enabled: true })
+  assert.deepEqual(manifest.retrieval, { enabled: true, profile: 'standard-search' })
   return task.phase === 'standard' ? {
     temporal: { enabled: true }, conflictRecovery: { enabled: true },
     entitySemantics: { enabled: true }, mutationReceipts: { enabled: true },
+    ...(task.config === 'search' ? { retrieval: { enabled: true, profile: 'standard-search' } } : {}),
   } : {}
 }
 
@@ -65,6 +68,7 @@ export function buildFullLibraryLaunch({ root, protocol, manifest, task, session
   // Remove inherited run/profile/diagnostic authority, credentials and Python import overrides.
   const inherited = Object.fromEntries(Object.entries(env).filter(([key]) => !/^(?:GAIA2_|PYTHONPATH$|PYTHONHOME$|PYTHONSTARTUP$|PYTHONINSPECT$|NODE_OPTIONS$)/i.test(key)
     && !/(?:API_KEY|ACCESS_TOKEN|AUTHORIZATION|HF_TOKEN|HUGGINGFACE_TOKEN)/i.test(key)))
+  const retrievalEnabled = manifest.retrieval?.enabled === true && task.phase === 'standard' && task.config === 'search'
   const childEnv = { ...inherited, ...modelRuntimeEnvironment(settings),
     PYTHONPATH: resolve(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', OPENAI_API_KEY: connection.apiKey,
     GAIA2_E2E_MINIMAL: '0', GAIA2_E2E_MAX_ACTIONS: String(settings.maxActions), GAIA2_E2E_TOOL_ALLOWLIST: '',
@@ -76,6 +80,8 @@ export function buildFullLibraryLaunch({ root, protocol, manifest, task, session
     GAIA2_MODEL_HTTP_GUARD_REQUIRED: '1', GAIA2_TOOL_ROUND_WORKSPACE: workspace, GAIA2_HOOK_TIMEOUT_SECONDS: '900',
     ...(windowObligationSource !== null ? { GAIA2_WINDOW_OBLIGATION_SOURCE_JSON: JSON.stringify(windowObligationSource) } : {}),
     ...(windowPipelineEnabled ? { GAIA2_WINDOW_PIPELINE_ENABLED: '1', GAIA2_WINDOW_EVIDENCE_DIR: join(workspace, 'window-registration-evidence') } : {}),
+    GAIA2_RETRIEVAL_ENABLED: retrievalEnabled ? '1' : '0', GAIA2_RETRIEVAL_WORKSPACE: workspace,
+    GAIA2_NOISE_ENABLED: task.phase === 'noise' ? '1' : '0',
     ...(profile.temporal ? { GAIA2_TEMPORAL_ENABLED: '1', GAIA2_TEMPORAL_WORKSPACE: workspace,
       GAIA2_CONFLICT_RECOVERY_ENABLED: '1', GAIA2_CONFLICT_RECOVERY_WORKSPACE: workspace,
       GAIA2_ENTITY_SEMANTICS_ENABLED: '1', GAIA2_ENTITY_SEMANTICS_WORKSPACE: workspace,
@@ -183,7 +189,11 @@ export function verifyFullLibraryBaseReceipts({ root, workspace, task, session, 
     assert.equal(source.schemaVersion, 'capybara-runtime-plugin-invocation-v1')
     assert.equal(source.executionId, task.executionId); assert.equal(source.sessionId, session.sessionId)
     assert.equal(source.scenarioId, task.scenarioId); assert.equal(source.sequence, ++sequence)
-    assert.deepEqual(source.input, { ...item.request, checkpoint: item.checkpoint })
+    // RuntimePluginHost appends trusted argument hashes after admission. They
+    // remain in the immutable Host report and are validated by the dedicated
+    // argument-evidence checks; the base receipt identity compares the same
+    // caller-visible invocation projection as the Python bridge.
+    assert.equal(hostInvocationDigest(source.input), hostInvocationDigest({ ...item.request, checkpoint: item.checkpoint }))
     for (const key of ['decision', 'context', 'contextHash', 'hookReceipts', 'variablesHash', 'revision']) assert.deepEqual(response[key], source[key])
     assert.equal(createHash('sha256').update(source.context).digest('hex'), source.contextHash)
     assert.equal(jsonHash(source.variables), source.variablesHash)

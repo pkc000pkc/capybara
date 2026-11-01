@@ -44,6 +44,26 @@ function fallbackState(prior, request) {
   };
 }
 
+function boundedEvidenceSummary(obligations) {
+  return (Array.isArray(obligations) ? obligations : []).slice(0, 64).map(item => ({
+    id: item.id,
+    canonicalName: item.canonicalName,
+    resourceKey: item.resourceKey ?? null,
+    effect: item.effect ?? null,
+    minCalls: item.minCalls,
+    maxCalls: item.maxCalls,
+    actualCalls: item.actualCalls ?? 0,
+    attemptedCalls: item.attemptedCalls ?? 0,
+    failedCalls: item.failedCalls ?? 0,
+    unknownCalls: item.unknownCalls ?? 0,
+    notExecutedCalls: item.notExecutedCalls ?? 0,
+    argumentMatchedCalls: item.argumentMatchedCalls ?? null,
+    argumentMismatchCalls: item.argumentMismatchCalls ?? null,
+    fieldMismatchIds: Array.isArray(item.fieldMismatchIds) ? item.fieldMismatchIds.slice(0, 16) : [],
+    status: item.status,
+  }));
+}
+
 export default defineHook({
   name: "gaia2-task-reconciliation",
   description: "Reconciles an Actor-declared, visible-user-bound action/count plan with actual successful calls; never infers Oracle actions.",
@@ -238,7 +258,8 @@ export default defineHook({
         { op: "replace", path: "/builtin/variables/gaia2_task_reconciliation_context", value: context },
       ], artifacts: [{ title: "GAIA2 Actor-owned task reconciliation", value: { revision: next.revision, status: next.status,
         obligationCount: next.obligations.length, mismatchIds: next.mismatches.map(item => item.id), oracleConsulted: false,
-        retainedEnforce: retained, supersedeRequired } }] };
+        retainedEnforce: retained, supersedeRequired,
+        evidenceSummary: boundedEvidenceSummary(next.obligations) } }] };
     } catch (error) {
       if (!error?.actorDeclaration) throw error;
       const next = fallbackState(prior, request);
@@ -262,7 +283,7 @@ export default defineHook({
         { op: "replace", path: "/builtin/variables/gaia2_task_reconciliation_context", value: context },
       ], artifacts: [{ title: "GAIA2 Actor-owned task reconciliation", value: { revision: next.revision, status: next.status,
         obligationCount: next.obligations.length, mismatchIds: next.mismatches.map(item => item.id), oracleConsulted: false,
-        retainedEnforce: retained } }] };
+        retainedEnforce: retained, evidenceSummary: boundedEvidenceSummary(next.obligations) } }] };
     }
   },
 });

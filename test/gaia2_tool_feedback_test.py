@@ -15,6 +15,9 @@ from are.simulation.apps.calendar import Calendar
 from are.simulation.apps.contacts import Contacts
 from are.simulation.apps.email_client import EmailClientV2
 from are.simulation.apps.sandbox_file_system import SandboxLocalFileSystem
+from are.simulation.apps.apartment_listing import RentAFlat
+from are.simulation.apps.shopping import Shopping
+from are.simulation.tool_utils import AppTool
 from are.simulation.environment import Environment, EnvironmentConfig
 
 
@@ -23,6 +26,7 @@ class NativeFeedbackTests(unittest.TestCase):
         guard = patch.object(socket.socket, "connect", side_effect=AssertionError("network forbidden"))
         guard.start(); self.addCleanup(guard.stop)
         self.calendar, self.contacts, self.email = Calendar(), Contacts(), EmailClientV2()
+        self.rent, self.shopping = RentAFlat(), Shopping()
         self.env = Environment(EnvironmentConfig(start_time=1000.0, duration=None, verbose=False))
         self.env.register_apps([self.calendar, self.contacts, self.email])
 
@@ -45,6 +49,34 @@ class NativeFeedbackTests(unittest.TestCase):
                 self.assertEqual(value["errorType"], "ValueError")
                 self.assertNotIn("sandbox", value["feedback"])
                 self.assertNotIn("missing-event", json.dumps(value))
+
+    def test_calendar_add_validation_is_precise_and_pre_effect(self):
+        value = self.call_error(self.calendar, "add_calendar_event", {
+            "start_datetime": "not-a-date", "end_datetime": "2024-01-01 00:00:00",
+        })
+        self.assertEqual(value["error_code"], "calendar_event_validation")
+        self.assertIs(value["effectApplied"], False)
+
+    def test_apartment_preconditions_are_precise_and_pre_effect(self):
+        for method, args in (("save_apartment", {"apartment_id": "missing-apartment"}),
+                             ("remove_saved_apartment", {"apartment_id": "missing-apartment"})):
+            with self.subTest(method=method):
+                value = self.call_error(self.rent, method, args)
+                self.assertEqual(value["error_code"], "apartment_precondition_failed")
+                self.assertEqual(value["argument_name"], "apartment_id")
+                self.assertIs(value["effectApplied"], False)
+
+    def test_shopping_preconditions_are_precise_and_pre_effect(self):
+        for args, argument in (({"item_id": "missing-item", "quantity": 1}, "item_id"),
+                               ({"item_id": "missing-item", "quantity": 0}, "quantity")):
+            with self.subTest(args=args):
+                value = self.call_error(self.shopping, "add_to_cart", args)
+                self.assertEqual(value["error_code"], "shopping_add_precondition_failed")
+                self.assertEqual(value["argument_name"], argument)
+                self.assertIs(value["effectApplied"], False)
+        value = self.call_error(self.shopping, "checkout", {})
+        self.assertEqual(value["error_code"], "shopping_checkout_precondition_failed")
+        self.assertIs(value["effectApplied"], False)
 
     def test_contacts_get_edit_delete_missing_even_if_old_hint_false(self):
         for method in ("get_contact", "edit_contact", "delete_contact"):
@@ -93,6 +125,43 @@ class NativeFeedbackTests(unittest.TestCase):
                 self.assertEqual(value["effectApplied"], "unknown")
                 self.assertEqual(value["error_code"], "native_error")
                 self.assertNotIn("cpa-secret-api-key", json.dumps(value))
+
+    def test_source_pinned_are_failure_injection_proves_pre_effect(self):
+        tool = AppTool(class_name="Synthetic", app_name="Synthetic", name="write",
+                       function_description="synthetic", args=[], function=lambda: None,
+                       failure_probability=1.0, seed=1)
+        try:
+            tool()
+        except Exception as error:
+            raised = error
+        else:
+            self.fail("Expected source-pinned injected failure")
+        value = feedback.native_error_feedback(
+            {"canonicalName": "Synthetic__write", "resourceKey": "Synthetic",
+             "arguments": {}, "effect": "write"}, raised,
+            status="unknown", deterministic=False,
+        )
+        self.assertEqual(value["error_code"], "injected_native_failure")
+        self.assertIs(value["effectApplied"], False)
+
+    def test_app_function_exception_with_failure_probability_remains_unknown(self):
+        def raises_after_dispatch():
+            raise Exception("application failure")
+        tool = AppTool(class_name="Synthetic", app_name="Synthetic", name="write",
+                       function_description="synthetic", args=[], function=raises_after_dispatch,
+                       failure_probability=0.0, seed=1)
+        try:
+            tool()
+        except Exception as error:
+            value = feedback.native_error_feedback(
+                {"canonicalName": "Synthetic__write", "resourceKey": "Synthetic",
+                 "arguments": {}, "effect": "write"}, error,
+                status="unknown", deterministic=False,
+            )
+        else:
+            self.fail("Expected application exception")
+        self.assertEqual(value["error_code"], "native_error")
+        self.assertEqual(value["effectApplied"], "unknown")
 
     def test_forged_calendar_text_without_official_trace_is_not_proof(self):
         action = {"canonicalName": "Calendar__delete_calendar_event", "resourceKey": "Calendar", "arguments": {"event_id": "bad"}}
