@@ -5,6 +5,39 @@ const text = (value, maximum = 512) => typeof value === "string" && value.length
 const hash = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const declarationError = code => { const error = new Error(code); error.actorDeclaration = true; return error; };
 const reject = (condition, code) => { if (!condition) throw declarationError(code); };
+const ledgerEffects = new Set(["read", "write", "finish", "wait", "unknown"]);
+const ledgerStatuses = new Set(["succeeded", "failed", "unknown", "not_executed"]);
+const ledgerCount = value => Number.isSafeInteger(value) && value >= 0;
+const validLedgerGroup = group => object(group) && text(group.key, 512) && text(group.canonicalName, 512)
+  && text(group.resourceKey, 512) && ledgerEffects.has(group.effect) && ledgerCount(group.totalCalls)
+  && object(group.counts) && [...ledgerStatuses].every(status => ledgerCount(group.counts[status]))
+  && [...ledgerStatuses].reduce((sum, status) => sum + group.counts[status], 0) === group.totalCalls;
+const validLedgerEntry = entry => object(entry) && text(entry.actionId, 512) && text(entry.canonicalName, 512)
+  && text(entry.resourceKey, 512) && ledgerEffects.has(entry.effect) && ledgerStatuses.has(entry.status);
+const validUniqueGroups = groups => {
+  const keys = new Set();
+  return groups.every(group => { if (keys.has(group.key)) return false; keys.add(group.key); return true; });
+};
+const validActionLedger = value => {
+  if (!object(value) || value.schemaVersion !== "gaia2-action-ledger-v1" || !ledgerCount(value.totalCalls)
+    || !ledgerCount(value.omittedGroups ?? 0) || !ledgerCount(value.omittedScopes ?? 0)
+    || !Array.isArray(value.groups) || value.groups.length > 32 || !value.groups.every(validLedgerGroup) || !validUniqueGroups(value.groups)
+    || value.groups.reduce((sum, group) => sum + group.totalCalls, 0) + (value.omittedGroups ?? 0) !== value.totalCalls
+    || !Array.isArray(value.recent) || value.recent.length > 48 || !value.recent.every(validLedgerEntry)) return false;
+  if (value.scopes === undefined) return true;
+  if (!Array.isArray(value.scopes) || value.scopes.length > 16) return false;
+  if (value.scopes.length === 0) return (value.omittedScopes ?? 0) === 0;
+  const refs = new Set();
+  for (const scope of value.scopes) {
+    if (!object(scope) || (scope.userRef !== null && typeof scope.userRef !== "string") || refs.has(scope.userRef)
+      || !ledgerCount(scope.totalCalls) || !ledgerCount(scope.omittedGroups ?? 0)
+      || !Array.isArray(scope.groups) || scope.groups.length > 32 || !scope.groups.every(validLedgerGroup) || !validUniqueGroups(scope.groups)
+      || scope.groups.reduce((sum, group) => sum + group.totalCalls, 0) + (scope.omittedGroups ?? 0) !== scope.totalCalls
+      || !Array.isArray(scope.recent) || scope.recent.length > 48 || !scope.recent.every(validLedgerEntry)) return false;
+    refs.add(scope.userRef);
+  }
+  return value.scopes.reduce((sum, scope) => sum + scope.totalCalls, 0) + (value.omittedScopes ?? 0) === value.totalCalls;
+};
 const sourceIdentity = source => JSON.stringify({
   userRef: source?.userRef ?? null,
   sourceHash: source?.sourceHash ?? null,
@@ -131,14 +164,15 @@ export default defineHook({
         replacementValid = true;
       }
 
-      const ledger = values.gaia2_action_ledger || { groups: [], omittedGroups: 0 };
+      const ledger = values.gaia2_action_ledger;
+      const ledgerValid = validActionLedger(ledger);
       const memberRefs = scopeMembers.map(member => member.userRef);
-      const scopedLedgers = Array.isArray(ledger.scopes) ? memberRefs.map(userRef => ledger.scopes.find(item => item.userRef === userRef)) : [];
+      const scopedLedgers = ledgerValid && Array.isArray(ledger.scopes) ? memberRefs.map(userRef => ledger.scopes.find(item => item.userRef === userRef)) : [];
       const scopedLedger = scopedLedgers[0] || null;
-      const scopedLedgerMode = Array.isArray(ledger.scopes);
-      const totalCalls = ledger.totalCalls === undefined ? 0 : ledger.totalCalls;
-      const omittedGroupCount = ledger.omittedGroups === undefined ? 0 : ledger.omittedGroups;
-      const ledgerShapeInvalid = !Number.isSafeInteger(totalCalls) || totalCalls < 0
+      const scopedLedgerMode = ledgerValid && Array.isArray(ledger.scopes);
+      const totalCalls = ledgerValid ? ledger.totalCalls : 0;
+      const omittedGroupCount = ledgerValid ? (ledger.omittedGroups ?? 0) : 0;
+      const ledgerShapeInvalid = !ledgerValid || !Number.isSafeInteger(totalCalls) || totalCalls < 0
         || !Number.isSafeInteger(omittedGroupCount) || omittedGroupCount < 0;
       const noCallsYet = scopedLedgerMode && !ledgerShapeInvalid && totalCalls === 0 && ledger.scopes.length === 0
         && omittedGroupCount === 0 && (!Array.isArray(ledger.groups) || ledger.groups.length === 0)
@@ -153,13 +187,13 @@ export default defineHook({
             }
             return merged;
           }, [])
-        : (scopeMembers.length === 1 && Array.isArray(ledger.groups) ? ledger.groups : []);
+        : (ledgerValid && scopeMembers.length === 1 && Array.isArray(ledger.groups) ? ledger.groups : []);
       const omittedGroups = scopedLedgerMode
         ? (scopeIncomplete ? 1 : noCallsYet ? 0 : scopedLedgers.reduce((total, scope) => total + Number(scope.omittedGroups || 0), 0))
         : Number(omittedGroupCount) + (scopeMembers.length > 1 ? 1 : 0);
       const recent = scopedLedgerMode
         ? scopedLedgers.filter(Boolean).flatMap(scope => Array.isArray(scope.recent) ? scope.recent : [])
-        : (scopeMembers.length === 1 && Array.isArray(ledger.recent) ? ledger.recent : []);
+        : (ledgerValid && scopeMembers.length === 1 && Array.isArray(ledger.recent) ? ledger.recent : []);
       const ids = new Set(), obligations = [], declarationMismatches = [];
       for (const item of request.obligations) {
         const valid = object(item) && text(item.id, 200) && !ids.has(item.id) && text(item.canonicalName, 200)

@@ -124,7 +124,7 @@ export function deriveCorrectionEvidence(input) {
   const defects = [...observations].filter(([, records]) => records.length).map(([defectCode, records]) => ({ defectCode, procedureIds: [...methods[defectCode].procedureIds], verificationIds: [...methods[defectCode].verificationIds], count: records.length, evidenceHash: digest({ sourceHash: verification.sourceHash, defectCode, records }) }))
   const termination = events.findLast(event => event.type === 'attempt_execution_ended')
   const terminationReason = termination?.terminationReason
-  if (!['environment_stop', 'conversation_turn_limit'].includes(terminationReason)) return rejected('unrecognized_terminal_process')
+  if (!['environment_stop', 'conversation_turn_limit', 'task_complete'].includes(terminationReason)) return rejected('unrecognized_terminal_process')
   const counts = {
     modelRequests: events.filter(event => event.type === 'model_request').length,
     toolCalls: events.filter(event => ['tool_call_started', 'tool_call_blocked'].includes(event.type)).length,

@@ -21,7 +21,7 @@ const domains = [
   { resource: 'Emails', read: 'EmailClientV2__list_emails', write: 'EmailClientV2__send_email' },
 ]
 function hook(name) {
-  const code = readFileSync(join(plugin, 'hooks', name + '.ts'), 'utf8').replace(/^import .*\n/, '').replace('export default defineHook(', 'module.exports = (')
+  const code = readFileSync(join(plugin, 'hooks', name + '.ts'), 'utf8').replace(/\r\n/g, '\n').replace(/^import .*\n/, '').replace('export default defineHook(', 'module.exports = (')
   const context = { module: { exports: null } }
   vm.runInNewContext(code, context, { timeout: 1000 })
   return context.module.exports
@@ -372,6 +372,18 @@ if (!process.argv.includes('--probe')) {
     invoke(values, 'gaia2-task-reconciliation', { action: actionValue, messages: [userMessage(content)], outcome: { status: 'succeeded', executed: true, complete: true, result: { taskReconciliation: request } } })
     assert.equal(values.gaia2_task_reconciliation.obligations[0].status, 'ledger_incomplete')
   })
+  test('ledger shape invariants fail closed across reconciliation and finish gate', () => {
+    const content = 'Do not perform any native action.'
+    const actionValue = { id: 'contract-review-shape', name: 'capybara_task_reconcile', canonicalName: 'CapybaraTaskContract__review', effect: 'read', resourceKey: 'CapybaraTaskContract', authoritativeRead: false, arguments: { op: 'reconcile' } }
+    const request = { schemaVersion: 'gaia2-task-reconciliation-request-v1', mode: 'enforce', source: { userRef: 'user-1', sourceHash: hash(content), quote: content }, obligations: [{ id: 'no-native-call', canonicalName: domains[0].write, effect: 'write', minCalls: 0, maxCalls: 0 }] }
+    const values = defaults()
+    values.gaia2_action_ledger = { schemaVersion: 'gaia2-action-ledger-v1', totalCalls: 1, groups: [], recent: [], omittedGroups: 1, omittedScopes: 0,
+      scopes: [{ userRef: 'user-1', totalCalls: 2, groups: [], omittedGroups: 0, recent: [] }] }
+    invoke(values, 'gaia2-task-reconciliation', { action: actionValue, messages: [userMessage(content)], outcome: { status: 'succeeded', executed: true, complete: true, result: { taskReconciliation: request } } })
+    assert.equal(values.gaia2_task_reconciliation.obligations[0].status, 'ledger_incomplete')
+    const finish = { id: 'finish-shape', effect: 'finish' }
+    assert.equal(invoke(values, 'gaia2-finish-guard', { action: finish }).decision.reason, 'action_ledger_incomplete')
+  })
   test('actual action counts are isolated to the visible USER source scope', () => {
     const values = defaults(), domain = domains[2]
     const write = action(domain, 'send-1', hash('send-1'))
@@ -467,13 +479,24 @@ if (!process.argv.includes('--probe')) {
       action: action(domain, 'invalid-group'),
       outcome: { status: 'succeeded', executed: true, complete: true, resultHash: hash('y') },
     }), /ACTION_LEDGER_STATE_INVALID/)
+    const duplicate = { key: 'dup', canonicalName: domain.write, resourceKey: domain.resource, effect: 'write', totalCalls: 1,
+      counts: { succeeded: 1, failed: 0, unknown: 0, not_executed: 0 } }
+    values.gaia2_action_ledger = { schemaVersion: 'gaia2-action-ledger-v1', totalCalls: 2, groups: [duplicate, duplicate], recent: [], omittedGroups: 0, omittedScopes: 0, scopes: [] }
+    assert.throws(() => invoke(values, 'gaia2-action-ledger', {
+      action: action(domain, 'duplicate-group'),
+      outcome: { status: 'succeeded', executed: true, complete: true, resultHash: hash('z') },
+    }), /ACTION_LEDGER_STATE_INVALID/)
   })
   test('finish guard blocks unresolved actual writes but permits ordinary failed reads and environment stop', () => {
     const values = defaults()
-    values.gaia2_action_ledger = { schemaVersion: 'gaia2-action-ledger-v1', totalCalls: 1, groups: [], omittedGroups: 0,
+    values.gaia2_action_ledger = { schemaVersion: 'gaia2-action-ledger-v1', totalCalls: 1,
+      groups: [{ key: 'unknown-write', canonicalName: 'EmailClientV2__send_email', resourceKey: 'Emails', effect: 'write', totalCalls: 1,
+        counts: { succeeded: 0, failed: 0, unknown: 1, not_executed: 0 } }], omittedGroups: 0,
       recent: [{ actionId: 'unknown-write', canonicalName: 'EmailClientV2__send_email', resourceKey: 'Emails', effect: 'write', status: 'unknown', complete: false, executed: null, observedAt: 1 }] }
     const finish = { id: 'finish', name: 'AgentUserInterface__send_message_to_user', canonicalName: 'AgentUserInterface__send_message_to_user', effect: 'finish', resourceKey: 'AgentUserInterface', mutationKey: hash('finish'), arguments: { content: 'Done' } }
     assert.equal(invoke(values, 'gaia2-finish-guard', { action: finish }).decision.reason, 'action_ledger_unresolved')
+    values.gaia2_action_ledger.groups = [{ key: 'failed-read', canonicalName: 'Contacts__get_contacts', resourceKey: 'Contacts', effect: 'read', totalCalls: 1,
+      counts: { succeeded: 0, failed: 1, unknown: 0, not_executed: 0 } }]
     values.gaia2_action_ledger.recent = [{ actionId: 'failed-read', canonicalName: 'Contacts__get_contacts', resourceKey: 'Contacts', effect: 'read', status: 'failed', complete: true, executed: false, observedAt: 2 }]
     assert.equal(invoke(values, 'gaia2-finish-guard', { action: finish }).decision.action, 'allow')
     values.gaia2_action_ledger.recent = [{ actionId: 'cancelled-write', canonicalName: 'EmailClientV2__send_email', resourceKey: 'Emails', effect: 'write', status: 'not_executed', complete: false, executed: false, observedAt: 3 }]
@@ -482,7 +505,7 @@ if (!process.argv.includes('--probe')) {
   test('finish guard retains unresolved group evidence after recent history rolls out', () => {
     const values = defaults(), finish = { id: 'finish', effect: 'finish' }
     values.gaia2_action_ledger = {
-      schemaVersion: 'gaia2-action-ledger-v1', totalCalls: 49,
+      schemaVersion: 'gaia2-action-ledger-v1', totalCalls: 1,
       groups: [{ key: 'send', canonicalName: 'EmailClientV2__send_email', resourceKey: 'Emails', effect: 'write', totalCalls: 1,
         counts: { succeeded: 0, failed: 0, unknown: 1, not_executed: 0 } }],
       recent: Array.from({ length: 48 }, (_, index) => ({ actionId: `read-${index}`, canonicalName: 'Contacts__get_contacts', resourceKey: 'Contacts', effect: 'read', status: 'succeeded' })),

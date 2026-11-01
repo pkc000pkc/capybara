@@ -24,6 +24,42 @@ const validReconciliationState = value => object(value) && value.schemaVersion =
   && Array.isArray(value.obligations) && Array.isArray(value.mismatches)
   && (value.status !== "enforce" || (object(value.source) && text(value.source.userRef)
     && hash(value.source.sourceHash) && text(value.source.quote, 4096)));
+const ledgerEffects = new Set(["read", "write", "finish", "wait", "unknown"]);
+const ledgerStatuses = new Set(["succeeded", "failed", "unknown", "not_executed"]);
+const count = value => Number.isSafeInteger(value) && value >= 0;
+const validGroup = group => object(group) && text(group.key, 512) && text(group.canonicalName, 512)
+  && text(group.resourceKey, 512) && ledgerEffects.has(group.effect) && count(group.totalCalls)
+  && object(group.counts) && [...ledgerStatuses].every(status => count(group.counts[status]))
+  && [...ledgerStatuses].reduce((sum, status) => sum + group.counts[status], 0) === group.totalCalls;
+const validRecent = entry => object(entry) && text(entry.actionId, 512) && text(entry.canonicalName, 512)
+  && text(entry.resourceKey, 512) && ledgerEffects.has(entry.effect) && ledgerStatuses.has(entry.status);
+const validUniqueGroups = groups => {
+  const keys = new Set();
+  return groups.every(group => { if (keys.has(group.key)) return false; keys.add(group.key); return true; });
+};
+const validActionLedger = value => {
+  if (!object(value) || value.schemaVersion !== "gaia2-action-ledger-v1"
+    || !count(value.totalCalls) || !count(value.omittedGroups ?? 0) || !count(value.omittedScopes ?? 0)
+    || !Array.isArray(value.groups) || value.groups.length > 32 || !value.groups.every(validGroup) || !validUniqueGroups(value.groups)
+    || !Array.isArray(value.recent) || value.recent.length > 48 || !value.recent.every(validRecent)) return false;
+  if (value.scopes === undefined) return true;
+  if (!Array.isArray(value.scopes) || value.scopes.length > 16) return false;
+  if (value.scopes.length === 0) return (value.omittedScopes ?? 0) === 0;
+  const refs = new Set();
+  for (const scope of value.scopes) {
+    if (!object(scope) || (scope.userRef !== null && typeof scope.userRef !== "string") || refs.has(scope.userRef)
+      || !count(scope.totalCalls) || !count(scope.omittedGroups ?? 0)
+      || !Array.isArray(scope.groups) || scope.groups.length > 32 || !scope.groups.every(validGroup) || !validUniqueGroups(scope.groups)
+      || !Array.isArray(scope.recent) || scope.recent.length > 48 || !scope.recent.every(validRecent)) return false;
+    refs.add(scope.userRef);
+  }
+  return true;
+};
+const ledgerTotalsValid = value => object(value) && count(value.totalCalls) && count(value.omittedGroups ?? 0)
+  && count(value.omittedScopes ?? 0) && Array.isArray(value.groups)
+  && value.groups.reduce((sum, group) => sum + group.totalCalls, 0) + (value.omittedGroups ?? 0) === value.totalCalls
+  && (value.scopes === undefined || Array.isArray(value.scopes)
+    && value.scopes.reduce((sum, scope) => sum + scope.totalCalls, 0) + (value.omittedScopes ?? 0) === value.totalCalls);
 
 export default defineHook({
   name: "gaia2-finish-guard", description: "Prevents closing a live controller operation; business completion and notification interpretation belong to the Actor.",
@@ -48,12 +84,7 @@ export default defineHook({
       ? (window.obligations || []).filter(item => activeWindowStatuses.includes(item?.status)) : [];
     const windowBlocked = pendingWindows.length > 0 && !stopped;
     const ledger = variables.builtin.variables.gaia2_action_ledger;
-    const ledgerValid = ledger?.schemaVersion === "gaia2-action-ledger-v1"
-      && Number.isSafeInteger(ledger.totalCalls) && ledger.totalCalls >= 0
-      && Number.isSafeInteger(ledger.omittedGroups ?? 0) && (ledger.omittedGroups ?? 0) >= 0
-      && Number.isSafeInteger(ledger.omittedScopes ?? 0) && (ledger.omittedScopes ?? 0) >= 0
-      && Array.isArray(ledger.groups) && Array.isArray(ledger.recent)
-      && (ledger.scopes === undefined || Array.isArray(ledger.scopes));
+    const ledgerValid = validActionLedger(ledger);
     const unresolvedActions = ledgerValid
       ? ledger.recent.filter(item => ["write", "finish", "unknown"].includes(item?.effect) && ["unknown", "not_executed"].includes(item?.status)) : [];
     const scopeEntries = ledgerValid && Array.isArray(ledger.scopes) ? ledger.scopes : [];
@@ -72,13 +103,13 @@ export default defineHook({
       const notExecuted = Number.isSafeInteger(counts?.not_executed) && counts.not_executed >= 0 ? counts.not_executed : 0;
       return total + unknown + notExecuted;
     }, 0);
-    const ledgerIncomplete = !ledgerValid || (ledgerValid && ((ledger.omittedGroups ?? 0) > 0 || (ledger.omittedScopes ?? 0) > 0));
+    const ledgerIncomplete = !ledgerValid || !ledgerTotalsValid(ledger) || (ledgerValid && ((ledger.omittedGroups ?? 0) > 0 || (ledger.omittedScopes ?? 0) > 0));
     const actionBlocked = !stopped && (unresolvedActions.length > 0 || unresolvedGroupCounts > 0 || ledgerIncomplete);
     const reconciliationBlocked = reconciliation?.schemaVersion === "gaia2-task-reconciliation-v1"
       && reconciliation.status === "enforce" && Array.isArray(reconciliation.mismatches)
       && reconciliation.mismatches.length > 0 && !stopped;
     const decision = { action: (runtimeStateInvalid && !stopped || running && !stopped || windowBlocked || actionBlocked || reconciliationBlocked) ? "block" : "allow",
-      reason: runtimeStateInvalid && !stopped ? "runtime_state_invalid" : running && !stopped ? "temporal_watch_running" : windowBlocked ? "window_obligation_pending" : ledgerIncomplete && !stopped ? "action_ledger_incomplete" : actionBlocked ? "action_ledger_unresolved" : reconciliationBlocked ? "task_reconciliation_unresolved" : "business_completion_actor_owned" };
+      reason: runtimeStateInvalid && !stopped ? "runtime_state_invalid" : running && !stopped ? "temporal_watch_running" : windowBlocked ? "window_obligation_pending" : ledgerIncomplete && !stopped && unresolvedGroupCounts === 0 ? "action_ledger_incomplete" : actionBlocked ? "action_ledger_unresolved" : reconciliationBlocked ? "task_reconciliation_unresolved" : "business_completion_actor_owned" };
     const unresolvedGroups = groups.filter(group => {
       if (!["write", "finish", "unknown"].includes(group?.effect)) return false;
       const counts = group?.counts || {};

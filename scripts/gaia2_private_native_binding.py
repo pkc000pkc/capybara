@@ -499,6 +499,19 @@ class NativeAppBinding:
 
     def __add_source_path(self, path: Path) -> None:
         path = Path(os.path.abspath(path))
+        # Test/packaging worktrees may expose the frozen official ARE runtime
+        # through a junction (``.official-python``).  Pin the resolved file
+        # bytes for that one immutable dependency root; arbitrary links in
+        # project source remain rejected by _no_links.
+        linked_roots = {".official-python", ".runtime-python"}
+        linked = [item for item in (path, *path.parents) if _linked(item)]
+        if linked:
+            if not any(root.name in linked_roots for root in path.parents):
+                _fail("NATIVE_EVIDENCE_PATH_INVALID")
+            try:
+                path = path.resolve(strict=True)
+            except (OSError, RuntimeError):
+                _fail("NATIVE_SOURCE_UNAVAILABLE")
         _no_links(path)
         try:
             data = path.read_bytes()
@@ -550,7 +563,16 @@ class NativeAppBinding:
                 path = inspect.getsourcefile(cls)
             except TypeError:
                 path = None
-            if path is None or str(Path(os.path.abspath(path))) not in self.__sources:
+            if path is not None:
+                path_obj = Path(os.path.abspath(path))
+                if any(_linked(item) for item in (path_obj, *path_obj.parents)) \
+                        and any(root.name in {".official-python", ".runtime-python"} for root in path_obj.parents):
+                    try:
+                        path_obj = path_obj.resolve(strict=True)
+                    except (OSError, RuntimeError):
+                        path_obj = None
+                path = str(path_obj) if path_obj is not None else None
+            if path is None or path not in self.__sources:
                 _fail("NATIVE_RESULT_TYPE_UNBOUND")
             return cls.__module__ + "." + cls.__qualname__
 

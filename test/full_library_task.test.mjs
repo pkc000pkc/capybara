@@ -59,6 +59,7 @@ test('all phases launch the original official entry exactly once with the frozen
     for (const name of ['--provider', '--judge_provider']) assert.equal(value.args[value.args.indexOf(name) + 1], 'openai')
     assert.equal(value.env.GAIA2_E2E_ATTEMPT_INDEX, '0'); assert.equal(value.env.GAIA2_E2E_CORRECTION_ORDINAL, '0')
     assert.equal(value.env.GAIA2_TASK_RECONCILIATION_ENABLED, '1')
+    assert.equal(value.env.GAIA2_E2E_TURN_LIMIT_MODE, 'time_only')
     assert.equal(value.env.GAIA2_TOOL_ROUND_WORKSPACE, value.cwd)
     assert.equal(value.env.GAIA2_MODEL_HTTP_GUARD_REQUIRED, '1')
     assert.equal(value.env.GAIA2_RETRIEVAL_ENABLED, '0')

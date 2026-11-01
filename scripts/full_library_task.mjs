@@ -72,6 +72,7 @@ export function buildFullLibraryLaunch({ root, protocol, manifest, task, session
   const childEnv = { ...inherited, ...modelRuntimeEnvironment(settings),
     PYTHONPATH: resolve(root, protocol.runtime.officialPythonPath), PYTHONUTF8: '1', OPENAI_API_KEY: connection.apiKey,
     GAIA2_E2E_MINIMAL: '0', GAIA2_E2E_MAX_ACTIONS: String(settings.maxActions), GAIA2_E2E_TOOL_ALLOWLIST: '',
+    GAIA2_E2E_TURN_LIMIT_MODE: 'time_only',
     ...taskReconciliationEnvironment(),
     GAIA2_E2E_ATTEMPT_INDEX: '0', GAIA2_E2E_CORRECTION_ORDINAL: '0',
     GAIA2_EXECUTION_ID: task.executionId, GAIA2_SESSION_ID: session.sessionId,

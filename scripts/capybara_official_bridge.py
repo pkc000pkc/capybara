@@ -42,6 +42,7 @@ from gaia2_tool_feedback import native_error_feedback
 from gaia2_execution_facts import build_execution_facts
 from gaia2_task_reconciliation_protocol import (ReconciliationProtocolError, argument_digest, normalize_argument_checks,
                                                  normalize_supersede_quote, resolve_scope_anchor, source_text_hash)
+from gaia2_parent_a2a_integration import A2AIntegrationError, ParentA2AInbox
 
 from are.simulation.environment import Environment
 from are.simulation.notification_system import MessageType
@@ -1746,7 +1747,17 @@ def _native_run_with_agent(
         raise HookProtocolError("invalid_action_budget") from None
     if max_actions < 1:
         raise HookProtocolError("invalid_action_budget")
-    turn_limit = scenario.nb_turns if scenario.nb_turns is not None else max_turns
+    # ARE's scenario.nb_turns is the official DAG/validation turn structure.
+    # It is not a safe execution stop for GAIA2's long-lived virtual-time
+    # tasks: a successful final-reply tool call may be followed by a future
+    # notification, A2A result, or an unresolved obligation.  The official
+    # full-library profile opts into time/environment/action termination while
+    # controlled legacy fixtures can retain the historical scenario bound.
+    turn_limit_mode = os.environ.get("GAIA2_E2E_TURN_LIMIT_MODE", "scenario")
+    if turn_limit_mode not in ("scenario", "time_only"):
+        raise HookProtocolError("invalid_turn_limit_mode")
+    turn_limit = None if turn_limit_mode == "time_only" else (
+        scenario.nb_turns if scenario.nb_turns is not None else max_turns)
     if turn_limit is not None and (isinstance(turn_limit, bool) or not isinstance(turn_limit, int) or turn_limit < 1):
         raise HookProtocolError("invalid_turn_limit")
     notification_binding = _notification_binding_for_run(env, scenario_id)
@@ -1852,6 +1863,11 @@ def _native_run_with_agent(
     # result has been included in a subsequent parent model request.
     a2a_pending_results = {}
     a2a_consumed_results = 0
+    # The inbox is separate from the bounded loop-control map above.  A
+    # published child result is not marked integrated until a real parent
+    # model response has returned; terminal cleanup must therefore never
+    # synthesize consumption.
+    a2a_parent_inbox = ParentA2AInbox()
     # A child result published after the last parent turn needs one bounded
     # parent opportunity to become visible.  This is deliberately local
     # control state: it never replays a child/native write and never marks a
@@ -2220,6 +2236,13 @@ def _native_run_with_agent(
         requested_ref = arguments.get("userRef")
         scope_anchor = arguments.get("scopeAnchor")
         continuation_quotes = None if scope_anchor is None else scope_anchor.get("continuationQuotes") if isinstance(scope_anchor, dict) and set(scope_anchor) == {"continuationQuotes"} else scope_anchor
+        # At the public reconciliation entry, repeating the root quote as the
+        # sole continuation is a duplicate scope declaration.  The lower
+        # protocol helper still accepts this shape when used directly for
+        # backward-compatible quote binding, but the Actor-facing control
+        # call must not silently widen a scope with the same visible quote.
+        if isinstance(continuation_quotes, list) and continuation_quotes == [quote]:
+            raise HookProtocolError("task_reconciliation_scope_duplicate")
         try:
             user, scope_members = resolve_scope_anchor(quote=quote, users=users, requested_ref=requested_ref,
                                                        continuation_quotes=continuation_quotes)
@@ -2724,6 +2747,38 @@ def _native_run_with_agent(
                 a2a_notification_pump = None
                 if notification_binding is not None and notification_binding.lifecycle is lifecycle:
                     notification_binding = base_notification_binding
+
+    def _can_complete_after_finish() -> bool:
+        """End a normal task after a trusted final reply without a turn cap.
+
+        ``time_only`` removes the ARE DAG turn bound, but must not create a
+        model-request spin loop after the actor has completed the task.  A
+        finish call is terminal only when no A2A result is pending and no
+        controller has reported an interruption. Active windows are already
+        represented by a Finish Gate block, so an allowed finish is the
+        trusted completion boundary for this task.
+        """
+        return (turn_limit_mode == "time_only" and not a2a_pending_results
+                and not a2a_stop_observed and not temporal_stopped and not conflict_stopped)
+    def _publish_parent_child_result(call_id: str, action: dict[str, Any],
+                                     result: dict[str, Any], status: str) -> None:
+        """Record ChildResult in the parent inbox; no native success proof."""
+        canonical = json.dumps(result, sort_keys=True, ensure_ascii=False,
+                               separators=(",", ":"), allow_nan=False).encode("utf-8")
+        payload = {"resultId": "a2a-result:" + call_id, "callId": call_id,
+                   "parentActionId": action.get("id") or call_id,
+                   "childExecutionId": "a2a-child:" + call_id,
+                   "childSessionId": "a2a-session:" + call_id, "status": status,
+                   "effect": action.get("effect", "unknown"),
+                   "canonicalName": action.get("canonicalName"),
+                   "resourceKey": action.get("resourceKey"),
+                   "resultHash": hashlib.sha256(canonical).hexdigest(), "result": result,
+                   "executed": status == "succeeded", "complete": True}
+        try:
+            a2a_parent_inbox.publish(payload)
+        except A2AIntegrationError as error:
+            raise HookProtocolError("a2a_parent_inbox_" + error.code) from None
+
     # Controls (task reconciliation/retrieval/temporal) are appended above;
     # seal the final actor registry only after every profile has contributed
     # its schema, not the earlier native-only provisional list.
@@ -2733,6 +2788,7 @@ def _native_run_with_agent(
                         executionMode="live_plugin_host", generationTimeMode=simulated_generation_time_mode,
                         generationMeasurement="unavailable_official_litellm_metadata" if simulated_generation_time_mode == "measured" else "fixed_one_second",
                         maxActions=max_actions, turnLimit=turn_limit,
+                        turnLimitMode=turn_limit_mode,
                         officialEntryVerified=entry_handshake is not None,
                         officialEntryHash=entry_handshake["entrySha256"] if entry_handshake is not None else None)
     _emit_runtime_event("official_tool_inventory", **inventory)
@@ -2751,7 +2807,7 @@ def _native_run_with_agent(
             # Prepare the complete, authoritative ARE wrapper inventory before
             # the Actor runs. App selection is not a model-provided capability,
             # and the parent registry is configured only once for this run.
-            from gaia2_official_a2a import connect_official_a2a_pool
+            from gaia2_official_a2a import OfficialA2AError, connect_official_a2a_pool
             wrapped_apps = {}
             for native_tool in app_tools:
                 if _canonical(native_tool) != ("AppAgent", "expert_agent"):
@@ -2762,20 +2818,26 @@ def _native_run_with_agent(
                         or env.apps.get(app_name) is not app or app_name in wrapped_apps):
                     raise HookProtocolError("a2a_app_inventory_invalid")
                 wrapped_apps[app_name] = app
-            a2a_pool = connect_official_a2a_pool(
-                env=env, apps=[wrapped_apps[name] for name in sorted(wrapped_apps)],
-                scenario_id=scenario_id, workspace=os.environ["GAIA2_A2A_WORKSPACE"],
-                model=os.environ.get("GAIA2_A2A_MODEL", model),
-                provider=os.environ.get("GAIA2_A2A_PROVIDER") or provider or "openai",
-                endpoint=os.environ.get("GAIA2_A2A_ENDPOINT") or endpoint or "",
-                api_key=os.environ.get("OPENAI_API_KEY", ""),
-                notification_reader_factory=_a2a_notification_reader_factory,
-                notification_pump_factory=_a2a_notification_pump_factory,
-                require_notification_pump=True,
-                require_generation_time=True,
-                deadline_factory=_a2a_deadline_factory,
-                model_event_emitter=_emit_runtime_event,
-            )
+            try:
+                a2a_pool = connect_official_a2a_pool(
+                    env=env, apps=[wrapped_apps[name] for name in sorted(wrapped_apps)],
+                    scenario_id=scenario_id, workspace=os.environ["GAIA2_A2A_WORKSPACE"],
+                    model=os.environ.get("GAIA2_A2A_MODEL", model),
+                    provider=os.environ.get("GAIA2_A2A_PROVIDER") or provider or "openai",
+                    endpoint=os.environ.get("GAIA2_A2A_ENDPOINT") or endpoint or "",
+                    api_key=os.environ.get("OPENAI_API_KEY", ""),
+                    notification_reader_factory=_a2a_notification_reader_factory,
+                    notification_pump_factory=_a2a_notification_pump_factory,
+                    require_notification_pump=True,
+                    require_generation_time=True,
+                    deadline_factory=_a2a_deadline_factory,
+                    model_event_emitter=_emit_runtime_event,
+                )
+            except OfficialA2AError as error:
+                _emit_runtime_event("a2a_pool_initialization_failed",
+                                    errorCode=error.code,
+                                    causeCode=getattr(error, "causeCode", "unknown"))
+                raise HookProtocolError("a2a_pool_initialization_failed") from None
         while True:
             if a2a_stop_observed or conflict_stopped or temporal_stopped:
                 termination_reason = "environment_stop"
@@ -2922,23 +2984,12 @@ def _native_run_with_agent(
             actor_input = _actor_messages(actor_input)
             _validate_provider_tool_pairs(actor_input)
             if a2a_pending_results:
-                drain_was_requested = a2a_terminal_drain_attempts > 0
-                # This is an observable visibility acknowledgement only: it
-                # proves the parent request contained the child result, not
-                # that hidden model reasoning accepted it.
-                for pending_call_id, pending in list(a2a_pending_results.items()):
-                    _emit_runtime_event("a2a_parent_result_consumed", turn=iteration,
-                                        callId=pending_call_id,
-                                        resultHash=pending["resultHash"],
-                                        resultStatus=pending["status"],
-                                        consumedInModelRequest=True)
-                    a2a_pending_results.pop(pending_call_id, None)
-                    a2a_consumed_results += 1
-                if not a2a_pending_results:
-                    if drain_was_requested:
-                        _emit_runtime_event("a2a_terminal_drain_completed", turn=iteration,
-                                            consumedResults=a2a_consumed_results)
-                    a2a_terminal_drain_attempts = 0
+                # The inbox is visible in the parent actor history through the
+                # ordinary tool result.  Do not mark it integrated here: the
+                # provider request can still fail before a model response.
+                _emit_runtime_event("a2a_parent_result_inbox_ready", turn=iteration,
+                                    pendingResults=len(a2a_pending_results),
+                                    pendingResultIds=list(a2a_pending_results))
             changed_observation_views = _mark_compacted_observation_views(messages, compaction)
             if compaction["compacted"]:
                 _emit_runtime_event("model_context_compacted", turn=iteration,
@@ -2996,6 +3047,46 @@ def _native_run_with_agent(
             except (AttributeError, IndexError, TypeError):
                 raise HookProtocolError("invalid_model_response") from None
             _emit_runtime_event("model_response", turn=iteration, toolCallCount=len(raw_calls), hasContent=bool(content))
+            if a2a_pending_results:
+                # A provider response is the first point at which the parent
+                # request is known to have returned.  Only now ACK the inbox;
+                # failed model calls or compaction that hid a child result
+                # leave that result published and pending.
+                model_request_id = f"{scenario_id}:parent-model:{usage['modelRequests']}"
+                visible_call_ids = {item.get("tool_call_id") for item in actor_input
+                                    if item.get("role") == "tool" and isinstance(item.get("tool_call_id"), str)}
+                visible_result_ids = ["a2a-result:" + call_id for call_id in a2a_pending_results
+                                      if call_id in visible_call_ids]
+                if not visible_result_ids:
+                    _emit_runtime_event("a2a_parent_result_not_visible", turn=iteration,
+                                        pendingResults=len(a2a_pending_results),
+                                        reason="provider_input_compacted_or_unbound")
+                try:
+                    integrated = a2a_parent_inbox.integrate(model_request_id=model_request_id,
+                                                            result_ids=visible_result_ids)
+                except A2AIntegrationError as error:
+                    raise HookProtocolError("a2a_parent_inbox_" + error.code) from None
+                integrated_call_ids = {result_id.removeprefix("a2a-result:")
+                                       for result_id in integrated["integratedResultIds"]}
+                for pending_call_id, pending in list(a2a_pending_results.items()):
+                    if pending_call_id not in integrated_call_ids:
+                        continue
+                    _emit_runtime_event("a2a_parent_result_consumed", turn=iteration,
+                                        callId=pending_call_id,
+                                        resultHash=pending["resultHash"],
+                                        resultStatus=pending["status"],
+                                        consumedInModelRequest=True,
+                                        integrationStatus="integrated",
+                                        modelRequestId=model_request_id)
+                    a2a_pending_results.pop(pending_call_id, None)
+                    a2a_consumed_results += 1
+                if not a2a_pending_results:
+                    if a2a_terminal_drain_attempts > 0:
+                        _emit_runtime_event("a2a_terminal_drain_completed", turn=iteration,
+                                            consumedResults=a2a_consumed_results,
+                                            modelRequestId=model_request_id,
+                                            evidence=integrated)
+                    a2a_terminal_drain_attempts = 0
             if not raw_calls and isinstance(content, str) and content.strip() and finish_tool is not None:
                 # Text-only final answers use the exact same synchronous hook
                 # gate as native AUI calls; they cannot bypass authorization.
@@ -3420,8 +3511,10 @@ def _native_run_with_agent(
                         _emit_runtime_event("a2a_child_result_published", turn=iteration,
                                             callId=call_id, resultStatus="failed",
                                             resultHash=_stable_hash(result), visibleToParent=True,
-                                            failureCode=error_code)
+                                            failureCode=error_code,
+                                            integrationStatus="published")
                         a2a_pending_results[call_id] = {"resultHash": _stable_hash(result), "status": "failed"}
+                        _publish_parent_child_result(call_id, action, result, "failed")
                     else:
                         result = {"status": "succeeded", "childResult": child_result,
                                   "delegated": True}
@@ -3446,8 +3539,10 @@ def _native_run_with_agent(
                                             resultHash=result_hash)
                         _emit_runtime_event("a2a_child_result_published", turn=iteration,
                                             callId=call_id, resultStatus="succeeded",
-                                            resultHash=result_hash, visibleToParent=True)
+                                            resultHash=result_hash, visibleToParent=True,
+                                            integrationStatus="published")
                         a2a_pending_results[call_id] = {"resultHash": result_hash, "status": "succeeded"}
+                        _publish_parent_child_result(call_id, action, result, "succeeded")
                 elif invalid or stale or permission != "allow":
                     reason = ("stale_dynamic_context" if stale
                               else "authoritative_read_required" if permission == "read_back"
@@ -3612,10 +3707,15 @@ def _native_run_with_agent(
                     if turn_limit is not None and usage["completedTurns"] >= turn_limit:
                         termination_reason = "conversation_turn_limit"
                         break
+                    if _can_complete_after_finish():
+                        termination_reason = "task_complete"
+                        _emit_runtime_event("task_execution_completed", turn=iteration,
+                                            completionMode="time_only_finish")
+                        break
             if active_tool_round is not None:
                 _close_tool_round(termination_reason or "round_finished")
                 active_tool_round = None
-            if termination_reason in ("conversation_turn_limit", "environment_stop"):
+            if termination_reason in ("conversation_turn_limit", "environment_stop", "task_complete"):
                 break
     except FinishGateLoopExceeded:
         # A bounded, repeated finish refusal is a safe business-boundary
@@ -3675,14 +3775,32 @@ def _native_run_with_agent(
         _emit_runtime_event("a2a_parent_convergence_checked",
                             pendingResults=len(a2a_pending_results),
                             consumedResults=a2a_consumed_results,
-                            converged=not a2a_pending_results)
+                            converged=not a2a_pending_results,
+                            inbox=a2a_parent_inbox.snapshot())
         if a2a_pending_results:
             _emit_runtime_event("a2a_terminal_drain_blocked",
                                 pendingResults=len(a2a_pending_results),
                                 attempts=a2a_terminal_drain_attempts,
                                 reason=("stop_observed" if a2a_stop_observed
                                         or env.state in (EnvironmentState.STOPPED, EnvironmentState.FAILED)
-                                        else "drain_limit_reached"))
+                                        else "drain_limit_reached"),
+                                evidence={"schemaVersion": "gaia2-a2a-terminal-drain-v1",
+                                          "success": False,
+                                          "status": "failed",
+                                          "attempts": a2a_terminal_drain_attempts,
+                                          "maxAttempts": a2a_terminal_drain_limit,
+                                          "pendingResultIds": list(a2a_pending_results),
+                                          "inbox": a2a_parent_inbox.snapshot()})
+        elif a2a_terminal_drain_attempts > 0:
+            _emit_runtime_event("a2a_terminal_drain_completed",
+                                consumedResults=a2a_consumed_results,
+                                evidence={"schemaVersion": "gaia2-a2a-terminal-drain-v1",
+                                          "success": True,
+                                          "status": "succeeded",
+                                          "attempts": a2a_terminal_drain_attempts,
+                                          "maxAttempts": a2a_terminal_drain_limit,
+                                          "pendingResultIds": [],
+                                          "inbox": a2a_parent_inbox.snapshot()})
         _emit_runtime_event("attempt_execution_ended", terminationReason=termination_reason,
                             actionBudget=max_actions, usage=usage, evaluationAttempted=failure is None)
         iteration = usage["modelRequests"]

@@ -183,12 +183,23 @@ def _callable_identity(value: Any) -> tuple:
 def _regular(path: Path) -> Path:
     if not path.is_absolute():
         _fatal("SCOPED_AGENT_EVIDENCE_INVALID")
+    linked = []
     for item in (path, *path.parents):
         try:
             info = item.lstat()
         except OSError:
             _fatal("SCOPED_AGENT_EVIDENCE_INVALID")
         if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            linked.append(item)
+    # Worktree packaging exposes frozen official/runtime Python through a
+    # junction. Pin the resolved bytes for those two dependency roots only;
+    # arbitrary project/evidence links remain rejected.
+    if linked:
+        if not any(root.name in {".official-python", ".runtime-python"} for root in path.parents):
+            _fatal("SCOPED_AGENT_EVIDENCE_INVALID")
+        try:
+            path = path.resolve(strict=True)
+        except (OSError, RuntimeError):
             _fatal("SCOPED_AGENT_EVIDENCE_INVALID")
     if not path.is_file() or os.path.normcase(str(path.resolve())) != os.path.normcase(str(path)):
         _fatal("SCOPED_AGENT_EVIDENCE_INVALID")

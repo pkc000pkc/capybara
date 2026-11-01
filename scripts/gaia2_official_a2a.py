@@ -337,7 +337,7 @@ class OfficialA2AClient:
                     raise OfficialA2AError("A2A_OWNER_PREPARE_INVALID")
                 self.__owner_prepared = True
             self.sync_clock()
-        except BaseException:
+        except BaseException as error:
             self.__closed = True
             try:
                 self.__owner.close()
@@ -348,7 +348,10 @@ class OfficialA2AClient:
             except BaseException:
                 pass
             self.__close_transport()
-            raise OfficialA2AError("A2A_PIPE_HANDSHAKE_FAILED") from None
+            failure = OfficialA2AError("A2A_PIPE_HANDSHAKE_FAILED")
+            failure.causeCode = (getattr(error, "code", None) if _safe_text(getattr(error, "code", None))
+                                 else "native_handshake_" + type(error).__name__.lower())
+            raise failure from None
 
     @property
     def app_name(self) -> str:
@@ -904,17 +907,26 @@ class OfficialA2AClientPool:
         self.__status = "preparing"
         self.__router_failed = False
         self.__shutdown_complete = False
+        failure_code = "unknown"
         try:
             for name, app in self.__apps.items():
-                self.__clients[name] = connect_official_a2a(
-                    env=env, app=app, scenario_id=scenario_id, workspace=workspace,
-                    model=model, provider=provider, endpoint=endpoint, api_key=api_key,
-                    notification_reader_factory=notification_reader_factory,
-                    notification_pump_factory=notification_pump_factory,
-                    require_notification_pump=require_notification_pump,
-                    require_generation_time=require_generation_time,
-                    deadline_factory=deadline_factory, model_event_emitter=model_event_emitter,
-                    expected_app_ids=self.__app_ids)
+                try:
+                    self.__clients[name] = connect_official_a2a(
+                        env=env, app=app, scenario_id=scenario_id, workspace=workspace,
+                        model=model, provider=provider, endpoint=endpoint, api_key=api_key,
+                        notification_reader_factory=notification_reader_factory,
+                        notification_pump_factory=notification_pump_factory,
+                        require_notification_pump=require_notification_pump,
+                        require_generation_time=require_generation_time,
+                        deadline_factory=deadline_factory, model_event_emitter=model_event_emitter,
+                        expected_app_ids=self.__app_ids)
+                except OfficialA2AError as error:
+                    failure_code = (getattr(error, "causeCode", None) if _safe_text(getattr(error, "causeCode", None))
+                                    else error.code if _safe_text(error.code) else "child_initialization_failed")
+                    raise
+                except BaseException:
+                    failure_code = "child_initialization_failed"
+                    raise
                 self.__clients[name]._install_failure_callback(self.__client_failed)
             self.__install_router()
             first = self.__clients[self.__app_ids[0]]
@@ -926,7 +938,9 @@ class OfficialA2AClientPool:
             self.__status = "failed"
             self.__close_clients()
             self.__shutdown_complete = True
-            raise OfficialA2AError("A2A_POOL_INITIALIZATION_FAILED") from None
+            failure = OfficialA2AError("A2A_POOL_INITIALIZATION_FAILED")
+            failure.causeCode = failure_code
+            raise failure from None
 
     def __install_router(self) -> None:
         # Install one callback only after every peer's prepare call completed:

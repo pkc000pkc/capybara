@@ -397,7 +397,7 @@ class TaskContractRuntime:
             # Resolver adapters expose only bounded public diagnostic codes;
             # never copy arbitrary provider exception strings into context.
             code = getattr(error, "code", None)
-            record["reason"] = code if type(code) is str and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) else "resolver_callback_error"
+            record["reason"] = code if type(code) is str and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) else "trusted_resolver_failed"
             record["errorCategory"] = ("semantic_ambiguous" if record["reason"] in {"ambiguous", "review_rejected"}
                 else "transport_error" if record["reason"] in {"model_transport_error", "resolver_callback_error"}
                 else "quote_error" if record["reason"] in {"quote_not_found", "quote_not_unique"}

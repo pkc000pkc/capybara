@@ -24,6 +24,14 @@ function assertGroup(group) {
   if (counted !== total) throw new Error("ACTION_LEDGER_STATE_INVALID");
 }
 
+function assertUniqueGroups(groups) {
+  const keys = new Set();
+  for (const group of groups) {
+    if (keys.has(group.key)) throw new Error("ACTION_LEDGER_STATE_INVALID");
+    keys.add(group.key);
+  }
+}
+
 function assertLedger(value) {
   if (!record(value) || value.schemaVersion !== "gaia2-action-ledger-v1"
     || !Array.isArray(value.groups) || value.groups.length > MAX_GROUPS
@@ -33,6 +41,7 @@ function assertLedger(value) {
   }
   const total = count(value.totalCalls), omittedGroups = count(value.omittedGroups ?? 0), omittedScopes = count(value.omittedScopes ?? 0);
   value.groups.forEach(assertGroup);
+  assertUniqueGroups(value.groups);
   if (value.groups.reduce((sum, group) => sum + group.totalCalls, 0) + omittedGroups !== total) {
     throw new Error("ACTION_LEDGER_STATE_INVALID");
   }
@@ -43,12 +52,22 @@ function assertLedger(value) {
     }
   }
   if (Array.isArray(value.scopes)) {
+    // An empty scopes array is the normal global-only ledger shape. Scoped
+    // totals are authoritative only once at least one USER scope exists.
+    if (value.scopes.length === 0) {
+      if (omittedScopes !== 0) throw new Error("ACTION_LEDGER_STATE_INVALID");
+      return;
+    }
     for (const scope of value.scopes) {
       if (!record(scope) || (scope.userRef !== null && typeof scope.userRef !== "string")
         || !Array.isArray(scope.groups) || scope.groups.length > MAX_GROUPS
         || !Array.isArray(scope.recent) || scope.recent.length > MAX_RECENT) throw new Error("ACTION_LEDGER_STATE_INVALID");
       count(scope.totalCalls); count(scope.omittedGroups ?? 0);
       scope.groups.forEach(assertGroup);
+      assertUniqueGroups(scope.groups);
+      if (scope.groups.reduce((sum, group) => sum + group.totalCalls, 0) + (scope.omittedGroups ?? 0) !== scope.totalCalls) {
+        throw new Error("ACTION_LEDGER_STATE_INVALID");
+      }
       for (const entry of scope.recent) {
         if (!record(entry) || typeof entry.actionId !== "string" || typeof entry.canonicalName !== "string"
           || typeof entry.resourceKey !== "string" || !effects.has(entry.effect) || !statuses.has(entry.status)) {

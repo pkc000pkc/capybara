@@ -24,7 +24,7 @@ export function buildCorrectionAttribution({ manifest, parents }) {
     check(evidence?.eligible === true && evidence.valid?.runtimeProof === true && evidence.valid?.evaluationComplete === true, 'parent_not_verified')
     check(typeof evidence.reason === 'string' && ['observable_defects', 'no_observable_defect'].includes(evidence.reason), 'unsupported_attribution_reason')
     const summary = evidence.sealed?.observableSummary
-    check(summary && ['environment_stop', 'conversation_turn_limit'].includes(summary.terminationReason), 'unsupported_termination')
+  check(summary && ['environment_stop', 'conversation_turn_limit', 'task_complete'].includes(summary.terminationReason), 'unsupported_termination')
     const defects = (summary.defects ?? []).map(defect => {
       check(DEFECTS.has(defect.defectCode) && Number.isSafeInteger(defect.count) && defect.count > 0, 'invalid_defect')
       check(HASH.test(defect.evidenceHash ?? '') && Array.isArray(defect.procedureIds) && Array.isArray(defect.verificationIds), 'invalid_defect_evidence')

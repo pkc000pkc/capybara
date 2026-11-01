@@ -185,10 +185,9 @@ def resolve_scope_anchor(*, quote: str, users: list[dict[str, Any]], requested_r
         continuation = _unique_user_for_quote(continuation_quote, users)
         continuation_index = users.index(continuation)
         if continuation["id"] in seen:
-            # Multiple continuation quotes can refer to clauses in the same
-            # visible USER message. They do not create a second task scope;
-            # collapse the duplicate root member while still rejecting a
-            # genuinely repeated later USER identity.
+            # Multiple continuation quotes may refer to clauses in the same
+            # visible root USER message. They do not create a second member;
+            # genuinely repeated later USER identities remain invalid.
             if continuation["id"] == user["id"]:
                 continue
             raise ReconciliationProtocolError("task_reconciliation_scope_duplicate")
