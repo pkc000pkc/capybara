@@ -22,7 +22,12 @@ export const FULL_LIBRARY_STOP_POLICY = Object.freeze({ firstScoredOutcomes: 40,
  * from silently widening the campaign while still allowing the runner to
  * execute a prefix for controlled validation.
  */
-export const FULL_LIBRARY_SCOPE_POLICY = Object.freeze({ maxExecutions: 200, checkpointEvery: 40, firstWindowDistinctScenarioIds: 40 })
+// The frozen manifest contains the complete 1120-slot library: 800 Standard
+// rows plus 160 A2A and 160 Noise mini rows.  The first-40 all-zero stop rule
+// still limits a real campaign when the model produces no reliable success,
+// but the scope itself must not silently truncate the library at an arbitrary
+// smaller prefix.
+export const FULL_LIBRARY_SCOPE_POLICY = Object.freeze({ maxExecutions: 1120, checkpointEvery: 40, firstWindowDistinctScenarioIds: 40 })
 export const FULL_LIBRARY_SELECTION_RULE = 'All 800 original non-mini submission validation rows once in Standard, all 160 original mini validation rows once in agent2agent and once in noise; no oracle, prompt, historical score or success-based selection; seven-stream coverage-balanced ordering with distinct scenario IDs in the first 40 queued executions; run1, attempt0, correction0; no resume or prior result reuse'
 const BUCKETS = [...FULL_LIBRARY_CAPABILITIES.map(config => `standard/${config}`), 'agent2agent/mini', 'noise/mini']
 const SHA256 = /^[0-9a-f]{64}$/

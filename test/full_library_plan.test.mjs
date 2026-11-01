@@ -86,14 +86,14 @@ test('pure ordering exercises all seven streams immediately while first40 questi
 test('bounded scope uses slot identity, enforces first-window coverage, and permits enhanced question reuse later', () => {
   const { candidates } = fixture()
   const tasks = orderFullLibraryTasks(candidates).map((task, index) => ({ ...task, executionId: `slot-${index}` }))
-  const scope = fullLibraryScope(tasks, { taskLimit: 200 })
-  assert.equal(scope.taskLimit, 200)
-  assert.equal(scope.executionIds.length, 200)
-  assert.equal(scope.taskSlotIds.length, 200)
-  assert.equal(new Set(scope.taskSlotIds).size, 200)
+  const scope = fullLibraryScope(tasks, { taskLimit: 1120 })
+  assert.equal(scope.taskLimit, 1120)
+  assert.equal(scope.executionIds.length, 1120)
+  assert.equal(scope.taskSlotIds.length, 1120)
+  assert.equal(new Set(scope.taskSlotIds).size, 1120)
   assert.equal(new Set(scope.scenarioIds.slice(0, FULL_LIBRARY_SCOPE_POLICY.firstWindowDistinctScenarioIds)).size, 40)
-  assert.ok(new Set(scope.scenarioIds).size < 200, 'enhanced scenario IDs should be allowed to repeat after the first window')
-  assert.throws(() => fullLibraryScope(tasks, { taskLimit: FULL_LIBRARY_SCOPE_POLICY.maxExecutions + 1 }), /1\.\.200 executions/)
+  assert.ok(new Set(scope.scenarioIds).size < 1120, 'enhanced scenario IDs should be allowed to repeat after the first window')
+  assert.throws(() => fullLibraryScope(tasks, { taskLimit: FULL_LIBRARY_SCOPE_POLICY.maxExecutions + 1 }), /1\.\.1120 executions/)
   const duplicateSlots = tasks.slice(0, 40).map((task, index) => ({ ...task, executionId: `duplicate-${index}` }))
   duplicateSlots[1] = { ...duplicateSlots[0], executionId: 'duplicate-reused-slot' }
   assert.throws(() => fullLibraryScope(duplicateSlots, { taskLimit: 40 }), /duplicate task slots/)
@@ -141,7 +141,7 @@ test('stop rule and thin current runtime are frozen; technical/unscored outcomes
   assert.deepEqual(manifest.stopPolicy, { firstScoredOutcomes: 40, stopIfAllScoresZero: true, technicalAndUnscoredExcluded: true })
   const changes = [m => { m.stopPolicy.firstScoredOutcomes = 10 }, m => { m.stopPolicy.stopIfAllScoresZero = false },
     m => { m.stopPolicy.technicalAndUnscoredExcluded = false }, m => { m.taskContract = { enabled: true } },
-    m => { m.scopePolicy.maxExecutions = 201 }, m => { m.scopePolicy.checkpointEvery = 20 },
+    m => { m.scopePolicy.maxExecutions = 1121 }, m => { m.scopePolicy.checkpointEvery = 20 },
     m => { m.entitySemantics.enabled = false }, m => { m.mutationReceipts.enabled = false },
     m => { m.settings.minimal = true }, m => { m.settings.maxActions = 1 }, m => { m.settings.concurrency = 2 },
     m => { m.settings.modelRetry.maxAttempts = 1 }, m => { m.models.actor.model = 'other' },

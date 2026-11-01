@@ -4,7 +4,7 @@
  * Selects one Standard execution task, one A2A mini task and one Noise mini
  * task from the frozen library manifest. It deliberately uses the normal
  * executeFullLibraryTask path and writes a new isolated run directory; it is
- * not a benchmark campaign and never changes the frozen 200-slot run.
+ * not a benchmark campaign and never changes the frozen full-library run.
  */
 import assert from 'node:assert/strict'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
