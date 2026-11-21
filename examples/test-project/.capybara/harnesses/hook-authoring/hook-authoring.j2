@@ -1,6 +1,10 @@
 Hook authoring protocol:
 
-Use this protocol only when the user explicitly asks to create and install a project Hook. Put every complete Hook file in the completed response content using exactly this fence header:
+Use a project Hook only for durable recurring behavior that must inspect or transform runtime state on future Loop iterations. Prefer a system variable when static context is sufficient, and make no persistent change for one-time work.
+
+The user may authorize a Hook without naming the mechanism, for example by asking that something happen "from now on", "whenever" a condition occurs, or "after every Loop". The recurring behavior, trigger, and intended effect must be clear. Do not generate a Hook from an ordinary one-time request, a speculative improvement, or an explanation/example request. If the Hook needs a persistent variable, create that variable first through the system variable tools, then generate the Hook against the confirmed variable key.
+
+Ordinary project Hooks run after every internal Loop iteration. `loop.iteration` is the session iteration number and `loop.terminal` is true only for the final or failed iteration. Put every complete authorized Hook file in the completed response content using exactly this fence header:
 
 ```capybara-hook name=my-hook
 import { defineHook } from "@capybara-agent/sdk";
@@ -10,8 +14,8 @@ export default defineHook({
   description: "Describe the Hook behavior.",
   enabled: true,
   checkpoint: "after_loop",
-  trigger({ status, changed, messages, variables }) {
-    return status.run.status === "completed";
+  trigger({ loop, status, changed, messages, variables }) {
+    return loop.terminal && status.run.status === "completed";
   },
   schedule: { priority: 0, timeoutMs: 10000, onError: "continue" },
   permissions: {},
@@ -23,4 +27,4 @@ export default defineHook({
 
 The fence name and `defineHook().name` must be identical kebab-case names. Emit TypeScript only inside each fence. A Hook may import only `defineHook` from `@capybara-agent/sdk`; do not import filesystem, process, network, package, or project modules. Use only these permissions when required: `llm: "project"`, `variables: "patch"`, `messages: "replace"`, and `artifacts: "write"`. Generated user Hooks must not request `hooks: "write"`.
 
-Triggers are synchronous. Hook execution may return `patches`, `messages`, `artifacts`, `metadata`, or `experiences`, matching the permission granted in the definition. Do not emit this fenced format for explanations, examples, drafts, edits to an existing Hook, or unless the user asked to install a new Hook. Existing Hook files are create-only and will never be overwritten by this protocol.
+Triggers are synchronous. Hook execution may return `patches`, `messages`, `artifacts`, or `metadata`, matching the permission granted in the definition. Every variable patch must target a confirmed existing runtime path and should make the smallest deterministic change. Do not emit this fenced format for explanations, examples, drafts, edits to an existing Hook, or unless durable recurring intent authorizes a new Hook. Existing Hook files are create-only and will never be overwritten by this protocol.

@@ -1,6 +1,7 @@
 import { assertAssetWriteAllowed, auditedAssetWrite } from '#core/asset-write-policy'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import nunjucks from 'nunjucks'
 
@@ -87,23 +88,31 @@ function groupBy<T>(items: readonly T[], key: (item: T) => string): T[][] {
   return [...groups.values()]
 }
 
+function inside(root: string, target: string): boolean {
+  const relative = path.relative(root, target)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
 export class ResourceRevisionConflict extends Error {}
 
 export class ProjectResourceRegistry {
   private readonly projectDir: string
+  private readonly systemDir: string
   private readonly resources: ProjectResources
 
-  constructor(projectDir: string) {
+  constructor(projectDir: string, systemDir = path.join(os.homedir(), '.capybara')) {
     this.projectDir = path.resolve(projectDir)
+    this.systemDir = path.resolve(systemDir)
     this.resources = new ProjectResources(this.projectDir)
   }
 
   list(): ResourceCatalog {
     const settings = this.resources.readSettings()
-    const tools = new ToolRegistry(this.projectDir)
-    const skills = new SkillRegistry(this.projectDir)
+    const systemResourceDir = this.systemDir
+    const tools = new ToolRegistry(this.projectDir, systemResourceDir)
+    const skills = new SkillRegistry(this.projectDir, systemResourceDir)
     const hooks = new HookRegistry(this.projectDir)
-    const pluginRegistry = new PluginRegistry(this.projectDir)
+    const pluginRegistry = new PluginRegistry(this.projectDir, this.systemDir)
     tools.load(settings.tools)
     skills.load(settings.skills)
     const toolNames = new Set(tools.list().map((tool) => tool.name))
@@ -131,7 +140,7 @@ export class ProjectResourceRegistry {
       .flatMap((item) => item.files)
       .find((candidate) => candidate.path === relativeFile)
     if (!file) throw new Error('resource file was not found')
-    const absolute = path.join(this.projectDir, file.path)
+    const absolute = this.absoluteResourceFile(file.path)
     const buffer = fs.readFileSync(absolute)
     if (buffer.includes(0)) throw new Error('binary resource files cannot be displayed')
     return { ...file, content: buffer.toString('utf8'), revision: fileHash(absolute) }
@@ -139,7 +148,7 @@ export class ProjectResourceRegistry {
 
   async testTool(id: string, argumentsValue: unknown): Promise<ToolCallResult> {
     const settings = this.resources.readSettings()
-    const registry = new ToolRegistry(this.projectDir)
+    const registry = new ToolRegistry(this.projectDir, this.systemDir)
     registry.load(settings.tools)
     const tool = registry.list().find((item) => item.id === id)
     if (!tool) throw new Error('tool resource was not found')
@@ -153,7 +162,7 @@ export class ProjectResourceRegistry {
   testSkill(id: string, contextValue: unknown) {
     if (!isObject(contextValue)) throw new Error('skill test context must be an object')
     const settings = this.resources.readSettings()
-    const registry = new SkillRegistry(this.projectDir)
+    const registry = new SkillRegistry(this.projectDir, this.systemDir)
     registry.load(settings.skills)
     const skill = registry.get(id)
     if (!skill) throw new Error('skill resource was not found')
@@ -189,10 +198,10 @@ export class ProjectResourceRegistry {
   testHarness(id: string, contextValue: unknown) {
     if (!isObject(contextValue)) throw new Error('harness test context must be an object')
     const settings = this.resources.readSettings()
-    const registry = new HarnessRegistry(this.projectDir)
+    const registry = new HarnessRegistry(this.projectDir, this.systemDir)
     // Test the same effective Harness catalog that Runtime uses, including
     // enabled plugin resources and their persistent activation mode.
-    registry.load(new PluginRegistry(this.projectDir).effectiveHarnesses(settings))
+    registry.load(new PluginRegistry(this.projectDir, this.systemDir).effectiveHarnesses(settings))
     const harness = registry.get(id)
     if (!harness) throw new Error('harness resource was not found')
     const provider = typeof contextValue.provider === 'string' ? contextValue.provider : 'custom'
@@ -239,7 +248,7 @@ export class ProjectResourceRegistry {
       throw new Error('skill update requires string content and revision')
     }
     const settings = this.resources.readSettings()
-    const registry = new SkillRegistry(this.projectDir)
+    const registry = new SkillRegistry(this.projectDir, this.systemDir)
     registry.load(settings.skills)
     const skill = registry.get(id)
     if (!skill) throw new Error('skill resource was not found')
@@ -262,7 +271,7 @@ export class ProjectResourceRegistry {
       throw new Error('harness update requires string content and revision')
     }
     const settings = this.resources.readSettings()
-    const registry = new HarnessRegistry(this.projectDir)
+    const registry = new HarnessRegistry(this.projectDir, this.systemDir)
     registry.load(settings.harnesses)
     const harness = registry.get(id)
     if (!harness) throw new Error('harness resource was not found')
@@ -377,7 +386,7 @@ export class ProjectResourceRegistry {
       version: 1,
       source: this.relative(skill.entryFile),
       enabled: true,
-      revision: hash(...files.map((file) => fileHash(path.join(this.projectDir, file.path)))),
+      revision: hash(...files.map((file) => fileHash(this.absoluteResourceFile(file.path)))),
       diagnostics: definition.diagnostics,
       files,
       skills: [definition],
@@ -423,7 +432,7 @@ export class ProjectResourceRegistry {
       version: first.manifestVersion,
       source: this.relative(first.manifestFile),
       enabled: true,
-      revision: hash(...files.map((file) => fileHash(path.join(this.projectDir, file.path)))),
+      revision: hash(...files.map((file) => fileHash(this.absoluteResourceFile(file.path)))),
       diagnostics: definitions.flatMap((harness) => harness.diagnostics),
       files,
       harnesses: definitions,
@@ -435,7 +444,7 @@ export class ProjectResourceRegistry {
     toolNames: ReadonlySet<string>,
   ): HarnessResourceModule[] {
     const modules = manifestPaths.map((manifestPath) => {
-      const registry = new HarnessRegistry(this.projectDir)
+      const registry = new HarnessRegistry(this.projectDir, this.systemDir)
       try {
         registry.load([manifestPath])
         return this.harnessModule(registry.list(), toolNames)
@@ -610,6 +619,25 @@ export class ProjectResourceRegistry {
   }
 
   private relative(absoluteFile: string): string {
-    return path.relative(this.projectDir, absoluteFile).replaceAll('\\', '/')
+    const resolved = path.resolve(absoluteFile)
+    if (inside(this.projectDir, resolved)) {
+      return path.relative(this.projectDir, resolved).replaceAll('\\', '/')
+    }
+    if (inside(this.systemDir, resolved)) {
+      return `@system/${path.relative(this.systemDir, resolved).replaceAll('\\', '/')}`
+    }
+    throw new Error(`resource path leaves project and system roots: ${absoluteFile}`)
+  }
+
+  private absoluteResourceFile(resourcePath: string): string {
+    const normalized = resourcePath.replaceAll('\\', '/')
+    if (normalized.startsWith('@system/')) {
+      const candidate = path.resolve(this.systemDir, normalized.slice('@system/'.length))
+      if (!inside(this.systemDir, candidate)) throw new Error('system resource path leaves its root')
+      return candidate
+    }
+    const candidate = path.resolve(this.projectDir, resourcePath)
+    if (!inside(this.projectDir, candidate)) throw new Error('project resource path leaves its root')
+    return candidate
   }
 }

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { Ajv, type ValidateFunction } from 'ajv'
 
@@ -168,12 +169,14 @@ export function satisfiesToolVersion(installed: string, requested: string): bool
 
 export class PluginRegistry {
   readonly projectDir: string
+  readonly systemDir: string
   private readonly projectRealDir: string
   private readonly resources: ProjectResources
   private readonly validateManifest: ValidateFunction
 
-  constructor(projectDir: string) {
+  constructor(projectDir: string, systemDir = path.join(os.homedir(), '.capybara')) {
     this.projectDir = path.resolve(projectDir)
+    this.systemDir = path.resolve(systemDir)
     this.projectRealDir = fs.realpathSync(this.projectDir)
     this.resources = new ProjectResources(this.projectDir)
     this.validateManifest = new Ajv({ allErrors: true, strict: false }).compile(PLUGIN_MANIFEST_SCHEMA)
@@ -266,22 +269,21 @@ export class PluginRegistry {
   }
 
   private systemHarnesses(): string[] {
-    const root = path.join(this.projectDir, '.capybara', 'harnesses')
+    const systemRoot = this.systemDir
+    const root = path.join(systemRoot, 'harnesses')
     if (!fs.existsSync(root)) return []
     const manifests: string[] = []
     const visit = (directory: string) => {
       for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
         const absolute = path.join(directory, entry.name)
         if (entry.isDirectory()) visit(absolute)
-        else if (entry.isFile() && entry.name === 'manifest.json') manifests.push(this.relativePath(absolute))
+        else if (entry.isFile() && entry.name === 'manifest.json') {
+          manifests.push(`@system/${path.relative(systemRoot, absolute).replaceAll('\\', '/')}`)
+        }
       }
     }
     visit(root)
     return manifests.sort()
-  }
-
-  private relativePath(absolute: string): string {
-    return path.relative(this.projectDir, absolute).replace(/\\/g, '/')
   }
 
   hookSources(mode: 'runtime' | 'training', settings = this.resources.readSettings()): Array<{
@@ -627,7 +629,9 @@ export class PluginRegistry {
     for (const relativeFile of relativeFiles) {
       let absolute: string
       try {
-        absolute = this.resolveProjectFile(relativeFile, 'plugin variable dependency source')
+        absolute = relativeFile.startsWith('@system/')
+          ? this.resolveSystemFile(relativeFile.slice('@system/'.length), 'plugin variable dependency source')
+          : this.resolveProjectFile(relativeFile, 'plugin variable dependency source')
       } catch {
         continue
       }
@@ -657,7 +661,7 @@ export class PluginRegistry {
   }
 
   private ownsModule(record: ManifestRecord, item: ProjectResourceModule): boolean {
-    if (record.ownerKind === 'system') return item.source.startsWith('.capybara/')
+    if (record.ownerKind === 'system') return item.source.startsWith('@system/') || item.source.startsWith('.capybara/')
     if (record.ownerKind === 'installed') return item.source.startsWith(`${record.source}/`)
     return !item.source.startsWith('.capybara/') && !item.source.startsWith('plugins/')
   }
@@ -668,6 +672,18 @@ export class PluginRegistry {
     const realFile = fs.realpathSync(candidate)
     if (!inside(this.projectRealDir, realFile)) {
       throw new Error(`${label} symlink leaves the project workspace`)
+    }
+    if (!fs.statSync(realFile).isFile()) throw new Error(`${label} is not a file: ${relativeFile}`)
+    return realFile
+  }
+
+  private resolveSystemFile(relativeFile: string, label: string): string {
+    const candidate = path.resolve(this.systemDir, relativeFile)
+    if (!inside(this.systemDir, candidate)) throw new Error(`${label} leaves the system resource root`)
+    const realFile = fs.realpathSync(candidate)
+    const realSystemDir = fs.realpathSync(this.systemDir)
+    if (!inside(realSystemDir, realFile)) {
+      throw new Error(`${label} symlink leaves the system resource root`)
     }
     if (!fs.statSync(realFile).isFile()) throw new Error(`${label} is not a file: ${relativeFile}`)
     return realFile

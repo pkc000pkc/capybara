@@ -9,8 +9,10 @@ import { test } from 'node:test'
 import { buildApp } from '#app'
 import { DatasetStore } from '#core/datasets/dataset-store'
 import { ExperimentAdapterRunner } from '#core/experiments/experiment-adapter'
+import { ExperimentManager } from '#core/experiments/experiment-manager'
 import type { ExperimentRunDetail } from '#core/experiments/types'
-import type { RuntimeLlm } from '#core/runtime-loop'
+import { RuntimeLoop, type RuntimeLlm } from '#core/runtime-loop'
+import type { ClientCommand } from '#protocol/runtime-protocol'
 import type { LlmChatRequest, LlmChatResponse, LlmToolCall } from '#util/llm'
 
 function git(cwd: string, ...args: string[]): string {
@@ -518,6 +520,47 @@ test('experiment case timeout remains active through LLM scoring retries', async
     url: `/api/experiments/${run.id}/cases/${caseSummary.id}?${projectQuery}`,
   })
   assert.match(detailResponse.json().failure.message, /experiment case exceeded 1000 ms/)
+})
+
+test('experiment cancellation settles the case if the runtime rejects its cancel command', { timeout: 20_000 }, async context => {
+  const projectDir = temporaryExperimentProject()
+  const datasets = new DatasetStore(projectDir)
+  const dataset = datasets.create({ name: 'Cancellation', storage: 'jsonl', path: 'datasets/cancellation.jsonl', scoringPrompt: 'SCORER_REQUEST {{ actual_json }}' })
+  datasets.createRecord(dataset.id, { question: 'Wait for the model.', answer: 'unused' })
+  commitProject(projectDir, 'test: cancellation cleanup')
+  let entered!: () => void
+  const actorStarted = new Promise<void>(resolve => { entered = resolve })
+  const llm = experimentLlm([])
+  let actorAborted = false
+  llm.chat = async request => {
+    entered()
+    try { await delay(60_000, undefined, { signal: request.signal }) }
+    finally { actorAborted = request.signal?.aborted === true }
+    return response('{"status":"completed","content":"unused"}')
+  }
+  const validate = RuntimeLoop.prototype.validate
+  let rejected = 0
+  context.mock.method(RuntimeLoop.prototype, 'validate', function (this: RuntimeLoop, command: ClientCommand) {
+    if (command.type === 'run.cancel') {
+      rejected += 1
+      throw new Error('fixture: runtime cancellation rejected')
+    }
+    return validate.call(this, command)
+  })
+  const manager = new ExperimentManager(projectDir, { llm, runtimeLoop: { stepDelayMs: 0, streamDelayMs: 0 } })
+  context.after(async () => {
+    await manager.close()
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  })
+  const created = await manager.create({ datasetId: dataset.id, timeoutMs: 4_000 })
+  await actorStarted
+  manager.cancel(created.id)
+  assert.equal((await manager.waitForCompletion(created.id)).status, 'cancelled')
+  assert.deepEqual(manager.cases(created.id).items.map(item => item.status), ['cancelled'])
+  assert.equal(actorAborted, true)
+  assert.equal(rejected, 1)
+  await delay(4_000)
+  assert.equal(rejected, 1)
 })
 
 test('experiment start rejects incomplete datasets and dirty projects', async (context) => {

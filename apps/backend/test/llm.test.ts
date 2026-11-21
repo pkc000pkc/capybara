@@ -6,6 +6,7 @@ import {
   createFailoverLlmService,
   createLlmService,
   LlmRequestError,
+  LlmToolArgumentsError,
   type LlmRetryNotification,
 } from '#util/llm'
 import { retryDelayMs, retryableLlmStatus } from '#util/llm/openai-compatible'
@@ -15,6 +16,7 @@ test('LLM service accepts explicit OpenAI-compatible configuration', () => {
     provider: 'custom',
     baseUrl: 'http://127.0.0.1:1234/v1',
     model: 'test-model',
+    apiKey: 'explicit-test-key',
   })
 
   assert.deepEqual(service.getConfig(), {
@@ -22,7 +24,7 @@ test('LLM service accepts explicit OpenAI-compatible configuration', () => {
     protocol: 'chat-completions',
     baseUrl: 'http://127.0.0.1:1234/v1',
     model: 'test-model',
-    apiKey: undefined,
+    apiKey: 'explicit-test-key',
     timeoutMs: 60000,
     maxRetries: 3,
     headers: undefined,
@@ -32,6 +34,27 @@ test('LLM service accepts explicit OpenAI-compatible configuration', () => {
 test('LLM service rejects an empty message list before making a request', async () => {
   const service = createLlmService()
   await assert.rejects(() => service.chat({ messages: [] }), /at least one message/)
+})
+
+test('malformed tool arguments retain the call identity and batch size for host recovery', async () => {
+  let batchSize = 1
+  await withApi(() => ({ model: 'test-model', choices: [{ finish_reason: 'tool_calls', message: {
+    tool_calls: Array.from({ length: batchSize }, (_, index) => ({ id: `call-${index}`, type: 'function',
+      function: { name: index === 0 ? 'propose_diff' : 'read_file', arguments: index === 0 ? '{bad' : '{}' } })),
+  } }], usage: { prompt_tokens: 82, completion_tokens: 12, total_tokens: 94 } }), async baseUrl => {
+    const service = createLlmService({ provider: 'custom', protocol: 'chat-completions', baseUrl, model: 'test-model', maxRetries: 0 })
+    for (batchSize of [1, 2]) await assert.rejects(() => service.chat({ messages: [{ role: 'user', content: '提交文档编辑' }] }), error =>
+      error instanceof LlmToolArgumentsError && error.toolName === 'propose_diff' && error.callCount === batchSize
+      && error.argumentsText === '{bad' && error.usage?.totalTokens === 94)
+  })
+  await withApi(() => ({ model: 'test-model', output: [
+    { type: 'function_call', call_id: 'broken-control', name: 'propose_diff', arguments: '{bad' },
+    { type: 'function_call', call_id: 'unnamed', arguments: '{}' },
+  ] }), async baseUrl => {
+    const service = createLlmService({ provider: 'custom', protocol: 'responses', baseUrl, model: 'test-model', maxRetries: 0 })
+    await assert.rejects(() => service.chat({ messages: [{ role: 'user', content: '提交文档编辑' }] }), error =>
+      error instanceof LlmToolArgumentsError && error.toolName === 'propose_diff' && error.callCount === 2)
+  })
 })
 
 test('LLM failover rotates candidates and keeps the successful candidate sticky', async () => {
@@ -312,6 +335,28 @@ test('stream failover does not expose deltas from a semantically rejected candid
       assert.equal(response.text, validText)
       assert.deepEqual(deltas, [validText])
     })
+  })
+})
+
+test('stream failover hands a recoverable response to the runtime without publishing its deltas', async () => {
+  let requests = 0
+  const unusable = '{"decision":"finish","userMessage":"unverified","completionCheck":null}'
+  await withSseApi((_body, _path, response) => {
+    requests++
+    response.write(`data: ${JSON.stringify({ model: 'repair-model', choices: [{ delta: { content: unusable }, finish_reason: null }] })}\n\n`)
+    response.end('data: [DONE]\n\n')
+  }, async baseUrl => {
+    const service = createFailoverLlmService([
+      { id: 'repair', config: { provider: 'custom', protocol: 'chat-completions', baseUrl, model: 'repair-model' } },
+      { id: 'fallback', config: { provider: 'custom', protocol: 'chat-completions', baseUrl, model: 'fallback-model' } },
+    ], { retriesPerCandidate: 2, initialDelayMs: 1, maxDelayMs: 2 })
+    const deltas: string[] = []
+    const response = await service.stream({ messages: [{ role: 'user', content: 'answer' }],
+      validateResponse: () => ({ recovery: 'runtime' }),
+    }, delta => deltas.push(delta))
+    assert.equal(response.text, unusable)
+    assert.deepEqual(deltas, [])
+    assert.equal(requests, 1)
   })
 })
 
@@ -911,6 +956,46 @@ test('Chat Completions protocol maps tool calls and tool messages', async () => 
   })
   assert.equal(requestBody.messages[1].tool_call_id, 'previous-call')
   assert.equal(requestBody.tools[0].function.name, 'list_files')
+})
+
+test('Chat Completions uses the current completion-token field for gpt-6-luna', async () => {
+  let requestBody: any
+  await withApi((body, path) => {
+    assert.equal(path, '/v1/chat/completions')
+    requestBody = body
+    return { model: body.model, choices: [{ finish_reason: 'stop', message: { content: 'OK' } }] }
+  }, async (baseUrl) => {
+    await createLlmService({
+      provider: 'openai', protocol: 'chat-completions', baseUrl, model: 'gpt-6-luna', maxRetries: 0,
+    }).chat({ messages: [{ role: 'user', content: 'Reply with OK.' }], maxTokens: 8 })
+  })
+  assert.equal(requestBody.max_completion_tokens, 8)
+  assert.equal(requestBody.max_tokens, undefined)
+  assert.equal(requestBody.reasoning_effort, 'none')
+})
+
+test('Chat Completions normalizes root JSON-Schema combinators for gpt-6-luna tools', async () => {
+  let requestBody: any
+  await withApi((body, path) => {
+    assert.equal(path, '/v1/chat/completions')
+    requestBody = body
+    return { model: body.model, choices: [{ finish_reason: 'stop', message: { content: 'OK' } }] }
+  }, async (baseUrl) => {
+    await createLlmService({
+      provider: 'openai', protocol: 'chat-completions', baseUrl, model: 'gpt-6-luna', maxRetries: 0,
+    }).chat({
+      messages: [{ role: 'user', content: 'Use the tool if needed.' }],
+      tools: [{
+        name: 'write_file', description: 'Write a file.', parameters: {
+          type: 'object', properties: { file_name: { type: 'string' } },
+          required: ['file_name'], oneOf: [{ required: ['content'] }, { required: ['patch'] }],
+        },
+      }],
+    })
+  })
+  const parameters = requestBody.tools[0].function.parameters
+  assert.equal(parameters.type, 'object')
+  assert.equal(parameters.oneOf, undefined)
 })
 
 test('Responses protocol streams text and function arguments from SSE', async () => {

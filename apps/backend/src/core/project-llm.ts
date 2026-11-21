@@ -5,6 +5,7 @@ import {
   type LlmConfig,
   type LlmService,
 } from '#util/llm'
+import { isLoopbackModelHost } from '#util/llm/proxy'
 
 type ProjectLlmSettings = ProjectSettings['llm']
 
@@ -16,8 +17,12 @@ function profileConfig(
     model: profile.model,
     baseUrl: profile.base_url,
     protocol: profile.protocol,
-    apiKey: profile.api_key,
+    apiKey: profile.api_key ?? (isLoopbackModelHost(new URL(profile.base_url).hostname) ? '' : undefined),
     maxRetries: profile.max_retries,
+    ...(profile.chat_template_tokenizer ? { chatTemplateTokenizer: {
+      directory: profile.chat_template_tokenizer.directory,
+      contextWindowTokens: profile.chat_template_tokenizer.context_window_tokens,
+    } } : {}),
   }
 }
 

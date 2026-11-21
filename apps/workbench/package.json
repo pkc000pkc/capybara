@@ -1,0 +1,36 @@
+{
+  "name": "capybara-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Capybara V2 user workbench, implemented as a separate frontend.",
+  "scripts": {
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
+    "start": "npm run desktop:start",
+    "typecheck": "tsc --noEmit",
+    "desktop:build": "npm --prefix ../backend run build && next build --webpack",
+    "desktop:start": "electron electron/main.cjs",
+    "desktop:dev": "electron electron/main.cjs",
+    "verify:desktop-runtime": "node ../../scripts/verify-desktop-runtime.cjs"
+  },
+  "dependencies": {
+    "@capybara-agent/protocol": "^0.2.0",
+    "ajv": "^8.20.0",
+    "lucide-react": "^1.25.0",
+    "next": "^16.2.12",
+    "proxy-agent": "^8.0.2",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "electron": "^37.2.6",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

@@ -228,6 +228,65 @@
       "examples": [{ "file_name": "notes/example.txt", "content": "Example\n", "mode": "overwrite" }]
     },
     {
+      "name": "edit_file",
+      "description": "Replace one exact unique text match in an existing project file. Fails without modifying the file if the match is missing or ambiguous. Prefer this for targeted code changes.",
+      "permissions": [
+        "filesystem:write"
+      ],
+      "sideEffects": "workspace-write",
+      "replay": "confirm",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "old_text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "new_text": {
+            "type": "string"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "file_name",
+          "old_text",
+          "new_text"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "replacements": {
+            "const": 1
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "replacements",
+          "bytes",
+          "sha256"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "delete_file",
       "description": "Delete one file inside the project workspace.",
       "permissions": ["filesystem:delete"],

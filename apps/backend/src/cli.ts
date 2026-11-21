@@ -22,6 +22,7 @@ const HELP = `Capybara local Agent runner
 
 Usage:
   capybara serve [project-directory] [options]
+  capybara export-context-training <project-directory> --session <id> --output <file> [--data-dir <directory>]
 
 Options:
   --host <host>             Bind address (default: 127.0.0.1)
@@ -34,6 +35,11 @@ Options:
 
 Environment:
   CAPYBARA_RUNNER_TOKEN     Default access token
+
+Training export:
+  --session <id>           Select an existing session; may be repeated
+  --output <file>          New JSONL file, with an existing parent directory
+  --data-dir <directory>   Read sessions.sqlite here (default: project .capybara)
 `
 
 function optionValue(args: string[], index: number, option: string): string {
@@ -118,18 +124,41 @@ async function serve(args: string[]): Promise<void> {
   process.once('SIGTERM', () => void shutdown('SIGTERM'))
 }
 
+async function exportTraining(args: string[]): Promise<void> {
+  const invocationDir = path.resolve(process.env.INIT_CWD ?? process.cwd())
+  const sessionIds: string[] = []
+  let projectDir: string | undefined
+  let output: string | undefined
+  let dataDir: string | undefined
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]
+    if (argument === '--session') sessionIds.push(optionValue(args, index++, argument))
+    else if (argument === '--output') output = optionValue(args, index++, argument)
+    else if (argument === '--data-dir') dataDir = optionValue(args, index++, argument)
+    else if (argument?.startsWith('-')) throw new Error(`unknown option: ${argument}`)
+    else if (projectDir) throw new Error(`unexpected argument: ${argument}`)
+    else projectDir = argument
+  }
+  if (!projectDir || !output || !sessionIds.length) throw new Error('Export requires a project directory, --session and --output')
+  const { exportContextTraining } = await import('#core/context-training-export')
+  const report = exportContextTraining({ projectDir: path.resolve(invocationDir, projectDir), sessionIds,
+    output: path.resolve(invocationDir, output), ...(dataDir ? { dataDir: path.resolve(invocationDir, dataDir) } : {}) })
+  console.log(JSON.stringify(report))
+}
+
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2)
   if (!command || command === '-h' || command === '--help') {
     console.log(HELP)
     return
   }
-  if (command !== 'serve') throw new Error(`unknown command: ${command}\n\n${HELP}`)
+  if (command !== 'serve' && command !== 'export-context-training') throw new Error(`unknown command: ${command}\n\n${HELP}`)
   if (args.includes('-h') || args.includes('--help')) {
     console.log(HELP)
     return
   }
-  await serve(args)
+  if (command === 'serve') await serve(args)
+  else await exportTraining(args)
 }
 
 try {

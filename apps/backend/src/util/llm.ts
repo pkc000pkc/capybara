@@ -9,9 +9,11 @@ import type {
   LlmTextDeltaHandler,
 } from '#util/llm/types'
 
-export { LlmRequestError } from '#util/llm/openai-compatible'
+export { LlmRequestError, LlmToolArgumentsError } from '#util/llm/openai-compatible'
 
 export type {
+  LlmAttemptAdmission,
+  LlmAttemptInput,
   LlmChatRequest,
   LlmChatResponse,
   LlmConfig,
@@ -31,6 +33,8 @@ export type {
 
 export class LlmService {
   constructor(private readonly provider: LlmProvider) {}
+
+  get admitsTransportAttempts(): boolean { return this.provider.admitsTransportAttempts === true }
 
   async chat(request: LlmChatRequest): Promise<LlmChatResponse> {
     if (request.messages.length === 0) {
@@ -110,6 +114,7 @@ function abortReason(signal: AbortSignal | undefined): Error {
 function failoverAllowed(error: unknown, signal: AbortSignal | undefined): boolean {
   if (signal?.aborted) return false
   const message = error instanceof Error ? error.message : String(error)
+  if (error instanceof Error && error.name === 'RuntimeModelBudgetError') return false
   if (isLlmContextLimitError(error)) return false
   if (/tool messages require|requires request metadata|base URL is required|at least one message/i.test(message)) {
     return false
@@ -141,6 +146,7 @@ async function waitForFailover(delayMs: number, signal: AbortSignal | undefined)
 }
 
 class FailoverLlmProvider implements LlmProvider {
+  readonly admitsTransportAttempts = true
   private preferredIndex = 0
   private readonly candidates: Array<{ id: string; provider: OpenAiCompatibleProvider; config: LlmConfig }>
   private readonly retriesPerCandidate: number
@@ -175,10 +181,10 @@ class FailoverLlmProvider implements LlmProvider {
       const deltas: string[] = []
       const response = await provider.stream(candidateRequest, delta => deltas.push(delta))
       const validationFailure = request.validateResponse(response)
-      if (validationFailure) {
+      if (typeof validationFailure === 'string' && validationFailure) {
         throw new LlmResponseValidationError(`model response validation failed: ${validationFailure}`)
       }
-      for (const delta of deltas) onTextDelta(delta)
+      if (!validationFailure) for (const delta of deltas) onTextDelta(delta)
       return response
     })
   }
@@ -223,7 +229,7 @@ class FailoverLlmProvider implements LlmProvider {
       try {
         const response = await operation(candidate.provider, candidateRequest)
         const validationFailure = request.validateResponse?.(response)
-        if (validationFailure) {
+        if (typeof validationFailure === 'string' && validationFailure) {
           throw new LlmResponseValidationError(`model response validation failed: ${validationFailure}`)
         }
         this.preferredIndex = candidateIndex

@@ -6,7 +6,8 @@
   "workspaces": [
     "packages/*",
     "apps/backend",
-    "apps/frontend"
+    "apps/frontend",
+    "apps/workbench"
   ],
   "engines": {
     "node": ">=22"

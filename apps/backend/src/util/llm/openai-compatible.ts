@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { countTextChatTokens } from '#util/llm/chat-template-tokenizer'
 import http, { type IncomingHttpHeaders } from 'node:http'
 import https from 'node:https'
 import { modelProxyAgent } from './proxy.js'
 import { networkDiagnostic } from './diagnostic-log.js'
 
 import type {
+  LlmAttemptAdmission,
   LlmChatRequest,
   LlmChatResponse,
   LlmConfig,
@@ -14,6 +16,7 @@ import type {
   LlmTextDeltaHandler,
   LlmToolCall,
   LlmUsage,
+  LlmToolDefinition,
 } from '#util/llm/types'
 
 interface HttpResult {
@@ -109,6 +112,43 @@ function serializeRequest(body: unknown, counts?: RequestCounts): SerializedRequ
     messageCount: counts?.messageCount ?? messages.length,
     toolCount: counts?.toolCount ?? tools.length,
   }
+}
+
+function completionTokenParameter(model: string, maxTokens: number | undefined): Record<string, number> {
+  if (maxTokens === undefined) return {}
+  // New OpenAI reasoning families reject the legacy `max_tokens` field on
+  // Chat Completions. Keep the legacy field for compatible providers/models.
+  return /^(?:gpt-[56]|o\d)/i.test(model)
+    ? { max_completion_tokens: maxTokens }
+    : { max_tokens: maxTokens }
+}
+
+function chatModelCompatibilityParameters(model: string, maxTokens: number | undefined): Record<string, unknown> {
+  const parameters: Record<string, unknown> = completionTokenParameter(model, maxTokens)
+  if (/^(?:gpt-[56]|o\d)/i.test(model)) parameters.reasoning_effort = 'none'
+  return parameters
+}
+
+function chatToolParameters(model: string, parameters: Record<string, unknown>): Record<string, unknown> {
+  if (!/^(?:gpt-[56]|o\d)/i.test(model)) return parameters
+  // OpenAI reasoning models reject root-level JSON-Schema combinators for
+  // function tools. Runtime validation remains authoritative after the model
+  // proposes a call, so expose the common object shape and keep the stricter
+  // schema inside Capybara.
+  const { oneOf: _oneOf, anyOf: _anyOf, allOf: _allOf, not: _not, const: _const, ...normalized } = parameters
+  return normalized
+}
+
+function chatTools(model: string, tools: LlmToolDefinition[] | undefined): unknown[] | undefined {
+  return tools?.map((tool) => ({
+    type: 'function',
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: chatToolParameters(model, tool.parameters),
+      ...(tool.strict === undefined ? {} : { strict: tool.strict }),
+    },
+  }))
 }
 
 function requestDiagnostics(
@@ -347,6 +387,7 @@ async function postJsonWithRetry(
   onRetry?: LlmRetryHandler,
   retryableResponse?: (result: HttpResult) => string | undefined,
   counts?: RequestCounts,
+  admit?: (body: string) => ReturnType<LlmAttemptAdmission>,
 ): Promise<RetriedHttpResult> {
   const serialized = serializeRequest(body, counts)
   const startedAt = Date.now()
@@ -354,11 +395,14 @@ async function postJsonWithRetry(
     if (maxRetries === -1 && Date.now() - startedAt >= INFINITE_RETRY_WALL_TIME_MS) throw new Error("LLM retry wall-clock budget exhausted")
     const attemptStartedAt = Date.now()
     const failedAttempt = attempt + 1
+    signal?.throwIfAborted()
+    const settle = admit?.(serialized.json)
     let result: HttpResult
     try {
       signal?.throwIfAborted()
       result = await postJson(target, headers, serialized.json, timeoutMs, signal)
     } catch (error) {
+      settle?.({ status: 'unknown' })
       if (!retryableError(error) || !canRetry(failedAttempt, maxRetries)) {
         throw finalRequestError(error, serialized, failedAttempt, maxRetries, startedAt)
       }
@@ -376,6 +420,8 @@ async function postJsonWithRetry(
     const semanticRetryReason = successfulHttp
       ? (result.text.trim() ? retryableResponse?.(result) : 'empty_response_body')
       : undefined
+    settle?.({ status: successfulHttp && !semanticRetryReason ? 'returned' : 'failed',
+      statusCode: result.statusCode, usage: jsonAttemptUsage(result.text) })
     if (successfulHttp && !semanticRetryReason) {
       return {
         ...result,
@@ -526,6 +572,7 @@ function postSse(
 }
 
 interface SseRetryController {
+  usage?(): LlmUsage | undefined
   onAttemptStart(): void
   onEvent(event: string, data: string): void
   hasReceivedPayload(): boolean
@@ -543,6 +590,7 @@ async function postSseWithRetry(
   signal?: AbortSignal,
   onRetry?: LlmRetryHandler,
   counts?: RequestCounts,
+  admit?: (body: string) => ReturnType<LlmAttemptAdmission>,
 ): Promise<RetriedHttpResult> {
   const serialized = serializeRequest(body, counts)
   const startedAt = Date.now()
@@ -551,6 +599,8 @@ async function postSseWithRetry(
     const attemptStartedAt = Date.now()
     const failedAttempt = attempt + 1
     controller.onAttemptStart()
+    signal?.throwIfAborted()
+    const settle = admit?.(serialized.json)
     let result: HttpResult
     try {
       result = await postSse(
@@ -562,6 +612,7 @@ async function postSseWithRetry(
         signal,
       )
     } catch (error) {
+      settle?.({ status: 'unknown', usage: controller.usage?.() })
       if (
         controller.hasExposedOutput()
         || !retryableError(error)
@@ -582,8 +633,12 @@ async function postSseWithRetry(
       )
       continue
     }
-    if (result.statusCode >= 200 && result.statusCode < 300) {
-      if (!controller.hasReceivedPayload() || !controller.hasCompletedPayload()) {
+    const successfulHttp = result.statusCode >= 200 && result.statusCode < 300
+    const completedPayload = successfulHttp && controller.hasReceivedPayload() && controller.hasCompletedPayload()
+    settle?.({ status: completedPayload ? 'returned' : 'failed',
+      statusCode: result.statusCode, usage: controller.usage?.() })
+    if (successfulHttp) {
+      if (!completedPayload) {
         const error = new RetryableLlmStreamError('LLM stream ended before a completion event')
         if (controller.hasExposedOutput() || !canRetry(failedAttempt, maxRetries)) {
           throw finalRequestError(error, serialized, failedAttempt, maxRetries, startedAt)
@@ -716,6 +771,16 @@ function usageFromResponsesApi(usage: ResponsesApiResponse['usage']): LlmUsage |
   }
 }
 
+function jsonAttemptUsage(body: string): LlmUsage | undefined {
+  try {
+    const usage = JSON.parse(body)?.usage
+    if (!usage || typeof usage !== 'object') return undefined
+    return 'prompt_tokens' in usage ? usageFromResponse(usage) : usageFromResponsesApi(usage)
+  } catch {
+    return undefined
+  }
+}
+
 function textFromResponsesApi(payload: ResponsesApiResponse): string {
   if (payload.output_text) return payload.output_text
   return (payload.output ?? [])
@@ -743,22 +808,28 @@ function responsesFailure(payload: ResponsesApiResponse): { code: string; messag
   }
 }
 
-function parseArguments(value: string | undefined, toolName: string): unknown {
+export class LlmToolArgumentsError extends Error {
+  constructor(readonly toolName: string, readonly argumentsText: string, readonly callCount: number, readonly usage?: LlmUsage) {
+    super(`LLM returned invalid JSON arguments for tool ${toolName}`)
+  }
+}
+
+function parseArguments(value: string | undefined, toolName: string, callCount: number, usage?: LlmUsage): unknown {
   try {
     return JSON.parse(value || '{}')
   } catch {
-    throw new Error(`LLM returned invalid JSON arguments for tool ${toolName}`)
+    throw new LlmToolArgumentsError(toolName, value ?? '', callCount, usage)
   }
 }
 
 function toolCallsFromResponsesApi(payload: ResponsesApiResponse): LlmToolCall[] {
-  return (payload.output ?? [])
-    .filter((item) => item.type === 'function_call' && item.name)
-    .map((item) => ({
-      id: item.call_id ?? item.id ?? '',
-      name: item.name as string,
-      arguments: parseArguments(item.arguments, item.name as string),
-    }))
+  const calls = (payload.output ?? []).filter((item) => item.type === 'function_call')
+  const usage = usageFromResponsesApi(payload.usage)
+  return calls.flatMap(item => item.name ? [{
+    id: item.call_id ?? item.id ?? '',
+    name: item.name,
+    arguments: parseArguments(item.arguments, item.name, calls.length, usage),
+  }] : [])
 }
 
 function responsesInput(messages: LlmChatRequest['messages']): unknown[] {
@@ -821,8 +892,8 @@ function codexLikeResponsesInput(messages: LlmChatRequest['messages']): unknown[
   })
 }
 
-function chatMessages(messages: LlmChatRequest['messages']): unknown[] {
-  return messages.map((message) => {
+function chatMessages(messages: LlmChatRequest['messages'], ensureJsonInstruction = false): unknown[] {
+  const mapped = messages.map((message) => {
     if (message.role === 'tool') {
       if (!message.toolCallId) throw new Error('tool messages require toolCallId')
       return {
@@ -844,6 +915,13 @@ function chatMessages(messages: LlmChatRequest['messages']): unknown[] {
       } : {}),
     }
   })
+  if (!ensureJsonInstruction) return mapped
+  const instruction = 'Return exactly one valid JSON object when a structured response is requested.'
+  const systemIndex = mapped.findIndex((message) => (message as { role?: unknown }).role === 'system')
+  if (systemIndex < 0) return [{ role: 'system', content: instruction }, ...mapped]
+  const system = mapped[systemIndex] as { role: 'system'; content?: unknown }
+  mapped[systemIndex] = { ...system, content: `${typeof system.content === 'string' ? system.content : ''}\n${instruction}`.trim() }
+  return mapped
 }
 
 function requestTools(tools: LlmChatRequest['tools']) {
@@ -961,6 +1039,24 @@ function parseStreamData(data: string): Record<string, unknown> | undefined {
 }
 
 export class OpenAiCompatibleProvider implements LlmProvider {
+  readonly admitsTransportAttempts = true
+
+  private attemptAdmission(request: LlmChatRequest, model: string) {
+    const admit = request.admitAttempt
+    const tokenizer = this.config.chatTemplateTokenizer
+    return admit ? (serializedBody: string) => admit({
+      provider: this.config.provider, protocol: this.config.protocol, model, serializedBody, maxOutputTokens: request.maxTokens ?? 0,
+      ...(tokenizer ? { chatTemplateTokenizer: {
+        contextWindowTokens: tokenizer.contextWindowTokens,
+        measure: () => {
+          if (model !== this.config.model || this.config.protocol !== 'chat-completions') {
+            throw new Error('Chat template tokenizer binding does not match the current model and protocol')
+          }
+          return countTextChatTokens(tokenizer.directory, serializedBody)
+        },
+      } } : {}),
+    }) : undefined
+  }
   private readonly codexInstallationId = randomUUID()
   private readonly codexSessionId = randomUUID()
 
@@ -997,18 +1093,10 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       },
       {
         model,
-        messages: chatMessages(request.messages),
-        tools: request.tools?.map((tool) => ({
-          type: 'function',
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-            ...(tool.strict === undefined ? {} : { strict: tool.strict }),
-          },
-        })),
+        messages: chatMessages(request.messages, request.responseFormat === 'json'),
+        tools: chatTools(model, request.tools),
         temperature: request.temperature,
-        max_tokens: request.maxTokens,
+        ...chatModelCompatibilityParameters(model, request.maxTokens),
         response_format:
           request.responseFormat === 'json' ? { type: 'json_object' } : undefined,
         stream: false,
@@ -1026,16 +1114,19 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         }
       },
       { messageCount: request.messages.length, toolCount: request.tools?.length ?? 0 },
+      this.attemptAdmission(request, model),
     )
 
     const payload = JSON.parse(response.text) as OpenAiResponse
     const choice = payload.choices?.[0]
-    const toolCalls = (choice?.message?.tool_calls ?? []).map((call) => {
+    const calls = choice?.message?.tool_calls ?? []
+    const usage = usageFromResponse(payload.usage)
+    const toolCalls = calls.map((call) => {
       const name = call.function?.name ?? ''
       return {
         id: call.id ?? '',
         name,
-        arguments: parseArguments(call.function?.arguments, name),
+        arguments: parseArguments(call.function?.arguments, name, calls.length, usage),
       }
     })
     return {
@@ -1044,7 +1135,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       text: choice?.message?.content ?? '',
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       finishReason: choice?.finish_reason,
-      usage: usageFromResponse(payload.usage),
+      usage,
       raw: payload,
     }
   }
@@ -1077,18 +1168,10 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       requestHeaders(this.config),
       {
         model,
-        messages: chatMessages(request.messages),
-        tools: request.tools?.map((tool) => ({
-          type: 'function',
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-            ...(tool.strict === undefined ? {} : { strict: tool.strict }),
-          },
-        })),
+        messages: chatMessages(request.messages, request.responseFormat === 'json'),
+        tools: chatTools(model, request.tools),
         temperature: request.temperature,
-        max_tokens: request.maxTokens,
+        ...chatModelCompatibilityParameters(model, request.maxTokens),
         response_format:
           request.responseFormat === 'json' ? { type: 'json_object' } : undefined,
         stream: true,
@@ -1136,10 +1219,12 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         hasCompletedPayload() {
           return state.completed || state.finishReason !== undefined
         },
+        usage: () => state.usage,
       },
       request.signal,
       request.onRetry,
       { messageCount: request.messages.length, toolCount: request.tools?.length ?? 0 },
+      this.attemptAdmission(request, model),
     )
     if (!state.receivedPayload) {
       throw new LlmRequestError('LLM stream completed without SSE events', response.diagnostics)
@@ -1150,7 +1235,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       .map(([, call]) => ({
         id: call.id,
         name: call.name,
-        arguments: parseArguments(call.arguments, call.name),
+        arguments: parseArguments(call.arguments, call.name, state.calls.size, state.usage),
       }))
     return {
       provider: this.config.provider,
@@ -1198,6 +1283,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         }
       },
       { messageCount: request.messages.length, toolCount: request.tools?.length ?? 0 },
+      this.attemptAdmission(request, model),
     )
 
     const payload = JSON.parse(response.text) as ResponsesApiResponse
@@ -1299,6 +1385,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
             state.finishReason = event.response.status
             state.usage = usageFromResponsesApi(event.response.usage)
           } else if (type === 'response.failed' && event.response) {
+            state.usage = usageFromResponsesApi(event.response.usage)
             const failed = responsesFailure(event.response) ?? {
               code: 'response_failed',
               message: 'LLM response failed',
@@ -1319,10 +1406,12 @@ export class OpenAiCompatibleProvider implements LlmProvider {
           return state.completed !== undefined
             || (state.streamDone && (state.text.length > 0 || state.output.size > 0))
         },
+        usage: () => state.usage,
       },
       request.signal,
       request.onRetry,
       { messageCount: request.messages.length, toolCount: request.tools?.length ?? 0 },
+      this.attemptAdmission(request, model),
     )
     if (!state.receivedPayload) {
       throw new LlmRequestError('LLM stream completed without SSE events', response.diagnostics)

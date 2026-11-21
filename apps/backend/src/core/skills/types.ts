@@ -12,6 +12,8 @@ export interface RegisteredSkill extends AgentSkillDefinition {
   id: string
   rootDir: string
   entryFile: string
+  entryHash: string
+  sourceVersion: string
   scriptFiles: string[]
   referenceFiles: string[]
   assetFiles: string[]

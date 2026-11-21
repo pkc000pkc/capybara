@@ -82,7 +82,9 @@ function sharedCommand(
 
 async function runLoopOnce(loop: RuntimeLoop, id: string): Promise<void> {
   const completed = new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(`Runtime test timed out: ${id}`)), 5_000)
+    // Multiple model/tool rounds plus worker Hooks contend with the full suite
+    // on Windows. Keep the business assertions, with enough time for the run.
+    const timeout = setTimeout(() => reject(new Error(`Runtime test timed out: ${id}; state=${JSON.stringify(loop.getSnapshot(0).run)}`)), 15_000)
     const unsubscribe = loop.onEvent((event) => {
       if (event.type !== 'run.state.changed') return
       if (event.payload.status === 'completed') {

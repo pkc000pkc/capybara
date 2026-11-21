@@ -64,6 +64,7 @@ function log(level, message, data) {
       terminal: workerData.fixture.loopTerminal === true,
     },
     messages: workerData.fixture.messages,
+    ...(workerData.fixture.context ? { context: workerData.fixture.context } : {}),
     ...(workerData.fixture.training ? { training: workerData.fixture.training } : {}),
   };
   const matched = hook.enabled === true && hook.trigger(triggerContext);
@@ -284,10 +285,10 @@ export class HookRunner {
       armTimer()
       signal?.addEventListener('abort', abort, { once: true })
       worker.on('message', (message: unknown) => {
-        if (!isObject(message)) return
+        if (settled || attemptController.signal.aborted || !isObject(message)) return
         if (message.type === 'rpc') {
           void this.handleRpc(
-            message, attemptController.signal, usage, maxTotalTokens, hook.id, onLlmActivity, excludeRetryTime,
+            message, hook.permissions.llm === 'project', attemptController.signal, usage, maxTotalTokens, hook.id, onLlmActivity, excludeRetryTime,
           ).then(
             (result) => {
               if (!settled) worker.postMessage({ type: 'rpc-result', id: message.id, ok: true, result })
@@ -315,6 +316,7 @@ export class HookRunner {
 
   private async handleRpc(
     message: Record<string, unknown>,
+    llmAllowed: boolean,
     signal: AbortSignal | undefined,
     usage: LlmUsage,
     maxTotalTokens?: number,
@@ -322,6 +324,8 @@ export class HookRunner {
     onLlmActivity?: HookRunLimits['onLlmActivity'],
     onRetryExcluded?: (excludedMs: number) => void,
   ): Promise<JsonValue> {
+    if (!llmAllowed) throw new Error('Hook host LLM permission was not granted')
+    if (signal?.aborted) throw new Error('Hook execution was aborted')
     if (message.method !== 'llm.responses.create' || !isObject(message.params)) {
       throw new Error(`unsupported Hook RPC method: ${String(message.method)}`)
     }

@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdir, open, opendir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdir, open, opendir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -195,7 +196,9 @@ function runtimeInvocation(runtime, target, args) {
     return { command: process.execPath, args: [...(typeScript ? ['--experimental-strip-types'] : []), target, ...args] }
   }
   if (runtime === 'python') {
-    return { command: process.platform === 'win32' ? 'python' : 'python3', args: [target, ...args] }
+    return process.platform === 'win32'
+      ? { command: 'py', args: ['-3', target, ...args] }
+      : { command: 'python3', args: [target, ...args] }
   }
   if (runtime === 'powershell') {
     return { command: 'pwsh', args: ['-NoLogo', '-NoProfile', '-File', target, ...args] }
@@ -410,6 +413,26 @@ async function deleteFileTool(args) {
   return { path: relativePath(target), deleted: true }
 }
 
+async function editFileTool(args) {
+  const target = await safePath(args.file_name)
+  if (typeof args.old_text !== 'string' || !args.old_text) throw new Error('old_text must not be empty')
+  if (typeof args.new_text !== 'string') throw new Error('new_text must be a string')
+  const metadata = await stat(target)
+  if (!metadata.isFile() || metadata.size > MAX_FILE_BYTES) throw new Error('edit requires a text file under the file size limit')
+  const current = await readFile(target, 'utf8')
+  const hash = createHash('sha256').update(current).digest('hex')
+  if (args.expected_sha256 && args.expected_sha256 !== hash) throw new Error('file changed since it was read; read it again before editing')
+  const count = current.split(args.old_text).length - 1
+  if (count !== 1) throw new Error(`old_text must match exactly once; found ${count} matches. No changes applied.`)
+  const content = current.replace(args.old_text, () => args.new_text)
+  const temporary = `${target}.capybara-edit-${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' })
+    await rename(temporary, target)
+  } catch (error) { await unlink(temporary).catch(() => {}); throw error }
+  return { path: relativePath(target), replacements: 1, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') }
+}
+
 async function runCodeTool(args) {
   const target = await safePath(args.file_name)
   const metadata = await stat(target)
@@ -417,14 +440,19 @@ async function runCodeTool(args) {
   const cwd = await safeDirectory(args.cwd ?? '.')
   const runtime = inferredRuntime(target, args.runtime ?? 'auto')
   const invocation = runtimeInvocation(runtime, target, args.args ?? [])
+  const options = { cwd, timeoutMs: args.timeout_ms }
+  let execution
+  try {
+    execution = await runProcess(invocation.command, invocation.args, options)
+  } catch (error) {
+    if (runtime !== 'python' || process.platform !== 'win32' || error.code !== 'ENOENT') throw error
+    execution = await runProcess('python', [target, ...(args.args ?? [])], options)
+  }
   return {
     path: relativePath(target),
     runtime,
     cwd: relativePath(cwd),
-    ...await runProcess(invocation.command, invocation.args, {
-      cwd,
-      timeoutMs: args.timeout_ms,
-    }),
+    ...execution,
   }
 }
 
@@ -448,6 +476,7 @@ const handlers = {
   search_file: searchFileTool,
   search_in_file: searchInFileTool,
   write_file: writeFileTool,
+  edit_file: editFileTool,
   delete_file: deleteFileTool,
   run_code: runCodeTool,
   run_command: runCommandTool,

@@ -101,6 +101,15 @@ export class ContextBuilder {
     return this.render('manual')
   }
 
+  preview(overrides: Record<string, unknown>): string {
+    try {
+      return this.environment.render(this.mainFile, { ...this.properties, ...this.normalizeProperties(overrides) })
+    } finally {
+      this.missingVariables.clear()
+      this.loadedTemplateFiles.clear()
+    }
+  }
+
   saveTemplate(file: string, content: string): string {
     assertAssetWriteAllowed(this.projectDir, 'template.save')
     const name = this.normalizeTemplateName(file)

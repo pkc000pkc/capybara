@@ -96,7 +96,7 @@ export default defineHook({
 `
 }
 
-async function runLoopOnce(loop: RuntimeLoop, id: string, sequence: number): Promise<void> {
+async function runLoopOnce(loop: RuntimeLoop, id: string, sequence: number, sessionId = 'hook-authoring-session'): Promise<void> {
   const completed = new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error(`Runtime test timed out: ${id}`)), 5000)
     const unsubscribe = loop.onEvent((event) => {
@@ -117,7 +117,7 @@ async function runLoopOnce(loop: RuntimeLoop, id: string, sequence: number): Pro
     kind: 'command',
     id,
     type: 'chat.message.send',
-    sessionId: 'hook-authoring-session',
+    sessionId,
     timestamp: new Date().toISOString(),
     payload: {
       clientMessageId: `${id}-message`,
@@ -132,7 +132,7 @@ async function runLoopOnce(loop: RuntimeLoop, id: string, sequence: number): Pro
 
 test('Hook registry scans single-file definitions and rejects name mismatches', () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hooks-'))
-  const directory = path.join(projectDir, '.capybara', 'hooks')
+  const directory = path.join(projectDir, 'hooks')
   fs.mkdirSync(directory, { recursive: true })
   fs.writeFileSync(path.join(directory, 'summary-hook.ts'), SOURCE)
   fs.writeFileSync(path.join(directory, 'wrong-name.ts'), SOURCE)
@@ -160,14 +160,15 @@ test('Hook registry scans single-file definitions and rejects name mismatches', 
 
 test('Hook registry separates read-only system Hooks from user Hooks', () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-levels-'))
-  const systemDirectory = path.join(projectDir, '.capybara', 'hooks')
+  const systemDirectory = path.join(projectDir, 'system-resources')
+  const systemHooksDirectory = path.join(systemDirectory, 'hooks')
   const projectDirectory = path.join(projectDir, 'hooks')
-  fs.mkdirSync(systemDirectory, { recursive: true })
+  fs.mkdirSync(systemHooksDirectory, { recursive: true })
   fs.mkdirSync(projectDirectory, { recursive: true })
-  fs.writeFileSync(path.join(systemDirectory, 'system-hook.ts'), SOURCE.replaceAll('summary-hook', 'system-hook'))
+  fs.writeFileSync(path.join(systemHooksDirectory, 'system-hook.ts'), SOURCE.replaceAll('summary-hook', 'system-hook'))
   fs.writeFileSync(path.join(projectDirectory, 'user-hook.ts'), SOURCE.replaceAll('summary-hook', 'user-hook'))
   try {
-    const registry = new HookRegistry(projectDir)
+    const registry = new HookRegistry(projectDir, systemDirectory)
     assert.deepEqual(registry.listSystem().map((hook) => hook.id), ['system-hook'])
     assert.deepEqual(registry.listProject().map((hook) => hook.id), ['user-hook'])
     assert.deepEqual(registry.list().map((hook) => hook.id), ['system-hook', 'user-hook'])
@@ -230,27 +231,40 @@ test('Hook registry validates an entire generated batch before creating files', 
 
 test('Runtime upgrades system Hook resources and keeps them outside the editable catalog', () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-upgrade-'))
+  const systemDirectory = path.join(projectDir, 'system-resources')
   initializeProjectDirectory(projectDir)
-  const authoringHook = path.join(projectDir, '.capybara', 'hooks', 'hook-authoring.ts')
+  const authoringHook = path.join(systemDirectory, 'hooks', 'hook-authoring.ts')
   const authoringManifest = path.join(
-    projectDir,
-    '.capybara',
+    systemDirectory,
     'harnesses',
     'hook-authoring',
     'manifest.json',
   )
-  fs.writeFileSync(authoringHook, 'outdated system Hook')
+  fs.mkdirSync(path.dirname(authoringHook), { recursive: true })
+  fs.mkdirSync(path.dirname(authoringManifest), { recursive: true })
+  fs.cpSync(path.join(os.homedir(), '.capybara', 'tools'), path.join(systemDirectory, 'tools'), { recursive: true })
+  fs.cpSync(path.join(os.homedir(), '.capybara', 'skills'), path.join(systemDirectory, 'skills'), { recursive: true })
+  fs.cpSync(
+    path.join(os.homedir(), '.capybara', 'hooks', 'hook-authoring.ts'),
+    authoringHook,
+    { recursive: true },
+  )
+  fs.cpSync(
+    path.join(os.homedir(), '.capybara', 'harnesses', 'hook-authoring'),
+    path.dirname(authoringManifest),
+    { recursive: true },
+  )
   fs.rmSync(authoringManifest)
-  const loop = new RuntimeLoop({ projectDir, stepDelayMs: 0, streamDelayMs: 0 })
+  const loop = new RuntimeLoop({ projectDir, systemDir: systemDirectory, stepDelayMs: 0, streamDelayMs: 0 })
   try {
-    assert.equal(new HookRegistry(projectDir).get('hook-authoring')?.loadable, true)
+    assert.equal(new HookRegistry(projectDir, systemDirectory).get('hook-authoring')?.loadable, true)
     assert.equal(fs.existsSync(authoringManifest), true)
     const snapshot = loop.getSnapshot(0)
     assert.ok(snapshot.harnesses.catalog.some((item) => item.id === 'capybara-system:hook-authoring'))
     assert.ok(snapshot.harnesses.items.some((item) => (
       item.id === 'capybara-system:hook-authoring' && item.status === 'active'
     )))
-    const editable = new ProjectResourceRegistry(projectDir).list().items
+    const editable = new ProjectResourceRegistry(projectDir, systemDirectory).list().items
     assert.equal(editable.some((item) => item.id.includes('capybara-system')), false)
     assert.equal(editable.some((item) => (
       item.kind === 'hook' && item.hooks.some((hook) => hook.id === 'hook-authoring')
@@ -353,8 +367,8 @@ test('parallel Runtime sessions serialize generated Hook writes in one project',
   })
   try {
     await Promise.all([
-      runLoopOnce(first, 'parallel-first-run', 1),
-      runLoopOnce(second, 'parallel-second-run', 1),
+      runLoopOnce(first, 'parallel-first-run', 1, 'parallel-first-session'),
+      runLoopOnce(second, 'parallel-second-run', 1, 'parallel-second-session'),
     ])
     const hooks = new HookRegistry(projectDir).listProject()
     assert.deepEqual(
@@ -400,6 +414,34 @@ test('Runtime rejects invalid generated Hook source without creating a file', as
     loop.close()
     fs.rmSync(projectDir, { recursive: true, force: true })
   }
+})
+
+test('Hook host rejects a forged worker LLM RPC when the registered permission is absent', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-forged-rpc-'))
+  const source = `import { defineHook } from '@capybara-agent/sdk';
+export default defineHook({ name: 'forged-rpc', description: 'Attempt the host bridge directly', enabled: true,
+  trigger() { return true; }, schedule: { priority: 1, timeoutMs: 2000, onError: 'continue' }, permissions: {},
+  async run() {
+    const { parentPort } = process.getBuiltinModule('node:worker_threads');
+    const response = await new Promise(resolve => {
+      parentPort.on('message', message => { if (message.type === 'rpc-result' && message.id === 'forged') resolve(message); });
+      parentPort.postMessage({ type: 'rpc', id: 'forged', method: 'llm.responses.create', params: { input: 'ungranted' } });
+    });
+    return { artifacts: [{ title: 'Host refusal', value: response }] };
+  }
+});`
+  let calls = 0
+  const llm: RuntimeLlm = {
+    getConfig: () => ({ provider: 'custom', protocol: 'responses', model: 'hook-model', baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0 }),
+    chat: async () => { calls++; return { provider: 'custom', model: 'hook-model', text: 'must not run', raw: {} } },
+  }
+  try {
+    const hook = new HookRegistry(projectDir).validateContent('forged-rpc', source)
+    const result = await new HookRunner(llm).run(hook, fixture())
+    assert.equal(calls, 0)
+    assert.match(JSON.stringify(result.result?.artifacts), /Hook host LLM permission was not granted/)
+    assert.match(JSON.stringify(result.result?.artifacts), /"ok":false/)
+  } finally { fs.rmSync(projectDir, { recursive: true, force: true }) }
 })
 
 test('Hook runner evaluates after-Loop triggers and proxies the project LLM', async () => {
@@ -660,7 +702,7 @@ test('Large tool results remain readable in bounded pages without exposing other
   }
 })
 
-test('Runtime compresses only Cache after a model iteration exceeds the context limit', async () => {
+test('legacy compatibility: Runtime compresses only Cache after a model iteration exceeds the context limit', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-runtime-'))
   initializeProjectDirectory(projectDir)
   const largeCacheMarker = `old-cache-content-${'x'.repeat(80_000)}`
@@ -669,7 +711,10 @@ test('Runtime compresses only Cache after a model iteration exceeds the context 
   const runtimeRequests: Parameters<RuntimeLlm['chat']>[0][] = []
   const llm: RuntimeLlm = {
     chat: async (request) => {
-      const hookCall = request.messages.some((message) => message.content.includes('Compress the runtime Cache'))
+      const hookCall = request.messages.some((message) => (
+        message.content.includes('Compress the runtime Cache')
+        || message.content.includes('You are the system context organization stage.')
+      ))
       if (hookCall) hookCalls += 1
       else {
         runtimeCalls += 1
@@ -692,7 +737,7 @@ test('Runtime compresses only Cache after a model iteration exceeds the context 
       baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
     }),
   }
-  const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
+  const loop = new RuntimeLoop({ projectDir, llm, contextOrganization: { enabled: false }, stepDelayMs: 0, streamDelayMs: 0 })
   const command: ClientCommand = {
     version: 1,
     kind: 'command',
@@ -746,6 +791,7 @@ test('Runtime compresses only Cache after a model iteration exceeds the context 
     const restored = new RuntimeLoop({
       projectDir,
       llm,
+      contextOrganization: { enabled: false },
       initialState: loop.exportState(),
       stepDelayMs: 0,
       streamDelayMs: 0,
@@ -767,7 +813,7 @@ test('Runtime compresses only Cache after a model iteration exceeds the context 
   }
 })
 
-test('Runtime invokes the same Cache compression Hook before a model request after its limit is lowered', async () => {
+test('legacy compatibility: Runtime invokes the same Cache compression Hook before a model request after its limit is lowered', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-hook-preflight-cache-'))
   initializeProjectDirectory(projectDir)
   const resources = new ProjectResources(projectDir)
@@ -785,7 +831,10 @@ test('Runtime invokes the same Cache compression Hook before a model request aft
   const runtimeRequests: Parameters<RuntimeLlm['chat']>[0][] = []
   const llm: RuntimeLlm = {
     chat: async (request) => {
-      const hookCall = request.messages.some((message) => message.content.includes('Compress the runtime Cache'))
+      const hookCall = request.messages.some((message) => (
+        message.content.includes('Compress the runtime Cache')
+        || message.content.includes('You are the system context organization stage.')
+      ))
       if (hookCall) {
         hookCalls += 1
         return {
@@ -807,7 +856,7 @@ test('Runtime invokes the same Cache compression Hook before a model request aft
       baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
     }),
   }
-  const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
+  const loop = new RuntimeLoop({ projectDir, llm, contextOrganization: { enabled: false }, stepDelayMs: 0, streamDelayMs: 0 })
   try {
     await runLoopOnce(loop, 'preflight-cache-seed', 1)
     assert.equal(hookCalls, 0)
@@ -842,7 +891,7 @@ test('Runtime invokes the same Cache compression Hook before a model request aft
   }
 })
 
-test('System Cache compression Hook cannot replace messages or patch variables outside Cache', async () => {
+test('legacy compatibility: System Cache compression Hook cannot replace messages or patch variables outside Cache', async () => {
   const cases = [
     {
       name: 'messages',
@@ -861,7 +910,10 @@ test('System Cache compression Hook cannot replace messages or patch variables o
   ] as const
   for (const scenario of cases) {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), `capybara-hook-cache-boundary-${scenario.name}-`))
+    const systemDirectory = path.join(projectDir, 'system-resources')
     initializeProjectDirectory(projectDir)
+    fs.cpSync(path.join(os.homedir(), '.capybara', 'tools'), path.join(systemDirectory, 'tools'), { recursive: true })
+    fs.cpSync(path.join(os.homedir(), '.capybara', 'skills'), path.join(systemDirectory, 'skills'), { recursive: true })
     const llm: RuntimeLlm = {
       chat: async () => ({
         provider: 'custom', model: 'hook-model',
@@ -872,10 +924,10 @@ test('System Cache compression Hook cannot replace messages or patch variables o
         baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1000, maxRetries: 0,
       }),
     }
-    const loop = new RuntimeLoop({ projectDir, llm, stepDelayMs: 0, streamDelayMs: 0 })
+    const loop = new RuntimeLoop({ projectDir, systemDir: systemDirectory, llm, contextOrganization: { enabled: false }, stepDelayMs: 0, streamDelayMs: 0 })
     try {
       fs.writeFileSync(
-        path.join(projectDir, '.capybara', 'hooks', 'context-compression.ts'),
+        path.join(systemDirectory, 'hooks', 'context-compression.ts'),
         `import { defineHook } from "@capybara-agent/sdk";
 
 export default defineHook({

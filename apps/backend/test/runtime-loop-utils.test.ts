@@ -88,6 +88,109 @@ test('runtime utility validates cache shape and parses model output', () => {
     status: 'completed',
     content: 'done',
   })
+  const envelopeOutput = parseModelOutput(JSON.stringify({
+    status: 'completed',
+    content: 'done',
+    envelope: {
+      envelopeVersion: 1,
+      sessionId: 'session-1',
+      runId: 'run-1',
+      requestId: 'request-1',
+      decision: 'finish',
+      actions: [],
+      candidateDiffs: [],
+      evidenceRequests: [],
+      uncertainties: [],
+      completionCheck: { requiredEvidenceRefs: [], unresolvedUncertainties: [], verified: true },
+    },
+  }))
+  assert.equal(envelopeOutput.envelope?.decision, 'finish')
+  const waitOutput = parseModelOutput(JSON.stringify({
+    status: 'running', content: '等待外部信号', envelope: {
+      envelopeVersion: 1, sessionId: 'session-1', runId: 'run-1', requestId: 'request-1',
+      decision: 'wait', actions: [], candidateDiffs: [], evidenceRequests: [], uncertainties: [],
+      waitSpec: { reason: '等待工具回调', signalType: 'external', resumeCondition: '收到回调' },
+    },
+  }))
+  assert.equal(waitOutput.envelope?.waitSpec?.signalType, 'external')
+  assert.throws(() => parseModelOutput(JSON.stringify({
+    status: 'running', content: '调用工具', envelope: {
+      envelopeVersion: 1, sessionId: 'session-1', runId: 'run-1', requestId: 'request-1',
+      decision: 'tool_call', actions: [], candidateDiffs: [], evidenceRequests: [], uncertainties: [],
+    },
+  })), /tool_call requires a tool_call action/)
+  assert.throws(() => parseModelOutput(JSON.stringify({
+    status: 'running', content: '等待', envelope: {
+      envelopeVersion: 1, sessionId: 'session-1', runId: 'run-1', requestId: 'request-1',
+      decision: 'wait', actions: [], candidateDiffs: [], evidenceRequests: [], uncertainties: [],
+    },
+  })))
+  assert.throws(() => parseModelOutput(JSON.stringify({
+    status: 'running', content: '请澄清', envelope: {
+      envelopeVersion: 1, sessionId: 'session-1', runId: 'run-1', requestId: 'request-1',
+      decision: 'ask_user', actions: [], candidateDiffs: [], evidenceRequests: [], uncertainties: [],
+    },
+  })))
+  assert.throws(() => parseModelOutput(JSON.stringify({
+    status: 'completed', content: 'done', envelope: {
+      envelopeVersion: 1, sessionId: 'session-1', runId: 'run-1', requestId: 'request-1',
+      decision: 'finish', actions: [], candidateDiffs: [{ baseRevision: 0, projectionId: 'p', projectionHash: '0', candidateId: 'c', operation: 'add_entry', evidenceRefs: [], idempotencyKey: 'i' }], evidenceRequests: [], uncertainties: [],
+    },
+  })))
+  assert.throws(() => parseModelOutput(JSON.stringify({
+    status: 'running', content: 'update', envelope: {
+      envelopeVersion: 1, sessionId: 'session-1', runId: 'run-1', requestId: 'request-1',
+      decision: 'propose_diff', actions: [], candidateDiffs: [{
+        baseRevision: 0, projectionId: 'p', projectionHash: '0'.repeat(64), candidateId: 'c',
+        operation: 'replace_body', evidenceRefs: ['e'], idempotencyKey: 'i',
+      }], evidenceRequests: [], uncertainties: [],
+    },
+  })), /runtime envelope candidate diff is invalid/)
+  assert.throws(() => parseModelOutput(JSON.stringify({
+    status: 'running', content: 'update', envelope: {
+      envelopeVersion: 1, sessionId: 'session-1', runId: 'run-1', requestId: 'request-1',
+      decision: 'propose_diff', actions: [], candidateDiffs: [{
+        baseRevision: 0, projectionId: 'p', projectionHash: '0'.repeat(64), candidateId: 'c',
+        operation: 'append_evidence', evidenceRefs: [''], targetEntryId: 'entry', idempotencyKey: 'i',
+      }], evidenceRequests: [], uncertainties: [],
+    },
+  })), /runtime envelope candidate diff is invalid/)
+  assert.throws(() => parseModelOutput(JSON.stringify({
+    status: 'completed', content: 'done', envelope: {
+      envelopeVersion: 1, sessionId: 'session-1', runId: 'run-1', requestId: 'request-1',
+      decision: 'finish', actions: [], candidateDiffs: [], evidenceRequests: [], uncertainties: [],
+      completionCheck: { requiredEvidenceRefs: [], unresolvedUncertainties: [], verified: false },
+    },
+  })))
+  assert.throws(() => parseModelOutput(JSON.stringify({
+    status: 'completed', content: 'done', envelope: {
+      envelopeVersion: 1, sessionId: 'session-1', runId: 'run-1', requestId: 'request-1',
+      decision: 'finish', actions: [], candidateDiffs: [], evidenceRequests: [], uncertainties: [],
+      completionCheck: { requiredEvidenceRefs: [], requiredActions: [''], unresolvedUncertainties: [], verified: true },
+    },
+  })), /requiredActions is invalid/)
+  assert.throws(() => parseModelOutput(JSON.stringify({
+    status: 'running', content: '等待证据', envelope: {
+      envelopeVersion: 1, sessionId: 'session-1', runId: 'run-1', requestId: 'request-1',
+      decision: 'reflect', actions: [{ kind: 'request_evidence', requestId: 'missing' }], candidateDiffs: [],
+      evidenceRequests: [{ id: 'known', question: '补充来源', sourceKinds: ['tool'] }], uncertainties: [],
+    },
+  })), /request_evidence must reference an evidence request/)
+  assert.throws(() => parseModelOutput(JSON.stringify({
+    status: 'completed', content: 'done', envelope: {
+      envelopeVersion: 1, sessionId: ' ', runId: 'run-1', requestId: 'request-1',
+      decision: 'finish', actions: [], candidateDiffs: [], evidenceRequests: [], uncertainties: [],
+      completionCheck: { requiredEvidenceRefs: [], unresolvedUncertainties: ['unknown'], verified: true },
+    },
+  })), /sessionId must be non-empty/)
+  assert.throws(() => parseModelOutput(JSON.stringify({
+    status: 'completed', content: 'done', envelope: {
+      envelopeVersion: 1, sessionId: 'session-1', runId: 'run-1', requestId: 'request-1',
+      decision: 'finish', actions: [], candidateDiffs: [], evidenceRequests: [],
+      uncertainties: [{ id: 'same', statement: '冲突', relatedCandidateIds: [], blocking: false }, { id: 'same', statement: '重复', relatedCandidateIds: [], blocking: false }],
+      completionCheck: { requiredEvidenceRefs: [], unresolvedUncertainties: [], verified: true },
+    },
+  })), /uncertainty ids must be unique/)
   assert.throws(() => parseModelOutput('{"status":"completed","content":""}'))
 })
 

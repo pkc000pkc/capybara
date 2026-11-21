@@ -7,6 +7,7 @@ dist/
 **/.astro/
 .next/
 **/.next/
+apps/workbench/out/
 .next-e2e-*/
 **/.next-e2e-*/
 .next-e2e/

@@ -1,5 +1,6 @@
 import type { JsonPatchOperation, JsonValue, RuntimeVariables } from '#protocol/runtime-protocol'
 import type { ExperimentReference } from '#core/experiments/types'
+import type { ContextClassification } from '#core/context-classification'
 import type { LlmMessage, LlmUsage } from '#util/llm'
 
 export type HookFailurePolicy = 'continue' | 'retry'
@@ -86,6 +87,8 @@ export interface HookRunContext extends HookTriggerContext {
 export interface HookResult {
   patches?: JsonPatchOperation[]
   messages?: LlmMessage[]
+  contextObservations?: HookContextObservation[]
+  contextProposals?: HookContextProposal[]
   artifacts?: Array<{
     title: string
     value: JsonValue
@@ -102,6 +105,70 @@ export interface HookResult {
   loop?: {
     action: 'continue'
     reason: string
+  }
+}
+
+export interface HookContextDocumentSnapshot {
+  scope: 'project' | 'session'
+  documentId: string
+  revision: number
+  markdown: string
+  projectionId: string
+  projectionHash: string
+}
+
+export interface HookContextSnapshot {
+  project: HookContextDocumentSnapshot
+  session: HookContextDocumentSnapshot
+}
+
+export interface HookContextProposal {
+  diffVersion?: 1 | 2
+  targetNodeId?: string
+  targetNodeHash?: string
+  title?: string
+  parentNodeId?: string
+  beforeNodeId?: string | null
+  childIds?: string[]
+  scope: 'project' | 'session'
+  documentId: string
+  baseRevision: number
+  projectionId: string
+  projectionHash: string
+  candidateId?: string
+  sourceObservationId?: string
+  targetEntryId?: string
+  targetEntryHash?: string
+  headingPath?: string[]
+  operation: import('#protocol/runtime-protocol').RuntimeContextDiffOperation
+  body?: string
+  status?: 'active' | 'superseded' | 'archived'
+  evidenceRefs?: string[]
+  idempotencyKey: string
+  classification?: ContextClassification
+}
+
+export interface HookContextObservation {
+  id: string
+  scope: 'project' | 'session'
+  source: {
+    actor: 'user' | 'tool' | 'model' | 'system' | 'child-agent' | 'memory'
+    sourceId: string
+    toolName?: string
+    runId?: string
+    stepId?: string
+    capturedAt: string
+  }
+  rawArtifactId: string
+  normalizedContent: string
+  classification?: ContextClassification
+  evidence?: {
+    kind: 'observation' | 'artifact' | 'message' | 'external'
+    referenceId: string
+    sourceHash?: string
+    observedAt?: string
+    locator?: string
+    confidence?: 'low' | 'medium' | 'high'
   }
 }
 
@@ -278,6 +345,7 @@ export interface HookFixture {
   changedVariables: string[]
   variables: RuntimeVariables
   messages: LlmMessage[]
+  context?: HookContextSnapshot
   training?: HookTrainingContext
 }
 

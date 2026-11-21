@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { Ajv, type ValidateFunction } from 'ajv'
 
@@ -81,11 +82,15 @@ export class ToolRegistry {
   private readonly validateManifest = this.ajv.compile(MANIFEST_SCHEMA)
   private readonly projectDir: string
   private readonly projectRealDir: string
+  private readonly systemDir: string
+  private readonly systemRealDir: string
   private readonly registered = new Map<string, RegisteredTool>()
 
-  constructor(projectDir: string) {
+  constructor(projectDir: string, systemDir = path.join(os.homedir(), '.capybara')) {
     this.projectDir = path.resolve(projectDir)
     this.projectRealDir = fs.realpathSync(this.projectDir)
+    this.systemDir = path.resolve(systemDir)
+    this.systemRealDir = fs.existsSync(this.systemDir) ? fs.realpathSync(this.systemDir) : this.systemDir
   }
 
   load(manifestPaths: readonly string[]): void {
@@ -97,7 +102,8 @@ export class ToolRegistry {
         throw new Error(`invalid tool manifest ${manifestPath}: ${schemaError(this.validateManifest)}`)
       }
       const manifest = value as ToolManifest
-      const runnerEntry = this.resolveFile(path.dirname(manifestFile), manifest.runner.entry)
+      const manifestRoot = inside(this.projectDir, manifestFile) ? this.projectRealDir : this.systemRealDir
+      const runnerEntry = this.resolveFile(path.dirname(manifestFile), manifest.runner.entry, manifestRoot)
       for (const definition of manifest.tools) {
         if (next.has(definition.name)) {
           throw new Error(`duplicate project tool name: ${definition.name}`)
@@ -149,15 +155,36 @@ export class ToolRegistry {
     if (typeof relativeFile !== 'string' || !relativeFile.trim() || path.isAbsolute(relativeFile)) {
       throw new Error('tool manifest path must be a project-relative file')
     }
-    return this.resolveFile(this.projectDir, relativeFile)
+    const projectFile = path.resolve(this.projectDir, relativeFile)
+    if (!inside(this.projectDir, projectFile)) throw new Error('tool manifest leaves the project workspace')
+    const systemFile = path.resolve(this.systemDir, relativeFile)
+    const hasProjectFile = fs.existsSync(projectFile)
+    const hasSystemFile = inside(this.systemDir, systemFile) && fs.existsSync(systemFile)
+    // Older projects may contain an exact copy of a system-managed manifest.
+    // Treat that copy as the system fallback so the effective source remains
+    // stable without deleting user files. A changed project copy still wins.
+    if (hasSystemFile && hasProjectFile && this.sameFile(projectFile, systemFile)) {
+      return this.resolveFile(this.systemDir, relativeFile, this.systemRealDir)
+    }
+    if (hasProjectFile) return this.resolveFile(this.projectDir, relativeFile)
+    if (hasSystemFile) return this.resolveFile(this.systemDir, relativeFile, this.systemRealDir)
+    throw new Error(`tool manifest was not found in the project or system resources: ${relativeFile}`)
   }
 
-  private resolveFile(base: string, relativeFile: string): string {
+  private sameFile(left: string, right: string): boolean {
+    try {
+      return fs.readFileSync(left).equals(fs.readFileSync(right))
+    } catch {
+      return false
+    }
+  }
+
+  private resolveFile(base: string, relativeFile: string, allowedRealRoot = this.projectRealDir): string {
     if (path.isAbsolute(relativeFile)) throw new Error('tool runner path must be relative')
     const candidate = path.resolve(base, relativeFile)
-    if (!inside(this.projectDir, candidate)) throw new Error('tool file leaves the project workspace')
+    if (!inside(base, candidate)) throw new Error('tool file leaves its resource root')
     const realFile = fs.realpathSync(candidate)
-    if (!inside(this.projectRealDir, realFile)) throw new Error('tool symlink leaves the project workspace')
+    if (!inside(allowedRealRoot, realFile)) throw new Error('tool symlink leaves its resource root')
     if (!fs.statSync(realFile).isFile()) throw new Error(`tool path is not a file: ${relativeFile}`)
     return realFile
   }

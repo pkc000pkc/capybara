@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:chil
 import path from 'node:path'
 import fs from 'node:fs'
 import { assetWriteAudit, assertAssetWriteAllowed, isAssetPath } from '#core/asset-write-policy'
+import { capabilityAccessDenial } from '#core/runtime-capability-projection'
 
 import { ToolRegistry } from '#core/tools/tool-registry'
 import { toolNetworkRetrySettings, parseToolProgress, type ToolNetworkRetrySettings, type ToolProgress } from '#core/tools/network-retry'
@@ -35,6 +36,14 @@ interface RunnerResponse {
 
 function now(): string {
   return new Date().toISOString()
+}
+
+/** Electron's process.execPath is the Electron binary, not Node.  Tool
+ * runners are ordinary Node scripts and must be launched with a Node
+ * executable when the runtime is embedded in the desktop host. */
+function nodeExecutable(): string {
+  if (!process.versions.electron) return process.execPath
+  return process.env.CAPYBARA_NODE_PATH || process.env.npm_node_execpath || process.env.NODE || 'node'
 }
 
 function terminateProcessTree(child: ChildProcessWithoutNullStreams): void {
@@ -87,8 +96,8 @@ export class ToolDispatcher {
 
     const tool = this.registry.get(request.name)
     if (!tool) return Promise.resolve(fail('TOOL_NOT_FOUND', `unknown tool: ${request.name}`))
-    const denied = tool.permissions.filter((permission) => !this.permissions.has(permission))
-    if (denied.length > 0) {
+    if (capabilityAccessDenial(tool, this.permissions)) {
+      const denied = tool.permissions.filter((permission) => !this.permissions.has(permission))
       return Promise.resolve(fail('PERMISSION_DENIED', `tool permissions not granted: ${denied.join(', ')}`))
     }
     if (!tool.validateInput(request.arguments)) {
@@ -141,12 +150,13 @@ export class ToolDispatcher {
     // to the complete theoretical retry schedule (660 seconds by default).
     const timeoutMs = this.timeoutMs
     return new Promise((resolve) => {
-      const child = spawn(process.execPath, [tool.runnerEntry], {
+      const child = spawn(nodeExecutable(), [tool.runnerEntry], {
         cwd: path.dirname(tool.runnerEntry),
         detached: process.platform !== 'win32',
         env: { ...process.env, CAPYBARA_PROJECT_DIR: path.resolve(this.workspaceDir),
           CAPYBARA_TOOL_NETWORK_RETRY: JSON.stringify(retry) },
         stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
       })
       this.activeChild = child
       let stdout = ''
@@ -165,14 +175,18 @@ export class ToolDispatcher {
         resolve(result)
       }
       const stop = (result: ToolCallResult) => {
+        // Preserve the first terminal reason. A noisy runner can emit more
+        // output while it is being terminated; replacing TIMEOUT with a later
+        // OUTPUT_LIMIT/ABORTED error would make the receipt nondeterministic.
+        if (forcedError) return
         forcedError = result
         terminateProcessTree(child)
       }
-      const abort = () => stop(fail('ABORTED', 'tool call was aborted'))
+      const abort = () => stop(fail('ABORTED', 'tool call was aborted', { terminationRequestedAt: now() }))
       const timer = timeoutMs === -1
         ? undefined
         : setTimeout(
-            () => stop(fail('TIMEOUT', `tool call exceeded ${timeoutMs} ms`)),
+            () => stop(fail('TIMEOUT', `tool call exceeded ${timeoutMs} ms`, { timeoutMs, terminationRequestedAt: now() })),
             timeoutMs,
           )
       options.signal?.addEventListener('abort', abort, { once: true })
@@ -198,9 +212,32 @@ export class ToolDispatcher {
           stderr = stderr.slice(-this.outputLimitBytes)
         }
       })
-      child.once('error', (error) => finish(fail('RUNNER_FAILED', error.message)))
+      child.once('error', (error) => {
+        if (forcedError) return
+        finish(fail('RUNNER_FAILED', error.message))
+      })
       child.once('close', (code) => {
-        if (forcedError) return finish(forcedError)
+        if (forcedError) {
+          const error = forcedError.error
+          const details = error?.details && typeof error.details === 'object' && !Array.isArray(error.details)
+            ? error.details as Record<string, unknown>
+            : {}
+          return finish({
+            ...forcedError,
+            completedAt: now(),
+            durationMs: Date.now() - started,
+            ...(error ? {
+              error: {
+                ...error,
+                details: {
+                  ...details,
+                  processSettled: true,
+                  processSettledAt: now(),
+                },
+              },
+            } : {}),
+          })
+        }
         if (code !== 0) return finish(fail('RUNNER_FAILED', stderr.trim() || `tool runner exited with code ${code}`))
         let response: RunnerResponse
         try {

@@ -4,26 +4,29 @@
     {
       "key": "resource_loading",
       "label": "Resource loading",
-      "description": "Controls discovery and on-demand activation of project tools, harnesses, and skills.",
-      "value": "Project tools, harnesses, and skills are a searchable catalog and are not loaded by default. When the task needs a capability or guidance that is not already present, call search_resources with a concise query and the relevant resource kinds. Then call load_resources with exact IDs returned by the search. Activating a skill loads its instructions and required tools. Read an active skill reference only when its instructions require that detail, and run only scripts registered by that active skill. Never invent resource IDs or paths.",
+      "description": "Controls discovery and on-demand activation of project resources.",
+      "value": "Project tools, harnesses, and skills are a searchable catalog and are not loaded by default. Search for relevant resources before loading them, and use only exact IDs returned by the search.",
       "required": true,
-      "readonly": true
+      "readonly": true,
+      "type": "text"
     },
     {
       "key": "completion_status",
       "label": "Completion status",
-      "description": "Defines the structured status contract used by the Loop.",
-      "value": "When you are not making tool calls, output exactly one JSON object with no Markdown fence. Use {\"status\":\"completed\",\"content\":\"final user-facing response\"} when the task is finished, or {\"status\":\"running\",\"content\":\"brief reason more work is required\"} when another model step is required. Use completed only after the request is fully handled.",
+      "description": "Defines the structured status contract used by the runtime Loop.",
+      "value": "When you are not making tool calls, output exactly one JSON object with no Markdown fence. Use {\"status\":\"completed\",\"content\":\"final user-facing response\"} when the task is finished, or {\"status\":\"running\",\"content\":\"brief reason more work is required\"} when another model step is required.",
       "required": true,
-      "readonly": true
+      "readonly": true,
+      "type": "text"
     },
     {
       "key": "workspace_boundary",
       "label": "Workspace boundary",
-      "description": "Defines how project tools address the selected workspace.",
-      "value": "The selected workspace root is provided separately. Tool paths must be relative to that root. Convert an absolute path under the selected workspace to its relative form, and never access a parent or sibling directory.",
+      "description": "Constrains project tools to the selected workspace.",
+      "value": "Tool paths must be relative to the selected workspace root. Never access a parent or sibling directory.",
       "required": true,
-      "readonly": true
+      "readonly": true,
+      "type": "text"
     },
     {
       "key": "resource_search_tool_description",
@@ -31,7 +34,8 @@
       "description": "Description injected into the built-in resource search tool.",
       "value": "Search the Agent project catalog for tools, harnesses, and skills relevant to the current task.",
       "required": true,
-      "readonly": true
+      "readonly": true,
+      "type": "text"
     },
     {
       "key": "resource_load_tool_description",
@@ -39,47 +43,53 @@
       "description": "Description injected into the built-in resource loading tool.",
       "value": "Activate Agent project tools, harnesses, or skills by exact IDs returned from search_resources.",
       "required": true,
-      "readonly": true
+      "readonly": true,
+      "type": "text"
     },
     {
       "key": "system_variable_read_tool_description",
       "label": "System variable reader",
       "description": "Description injected into the built-in system variable reader.",
-      "value": "Read selected system prompt variables and the current revision before proposing a change.",
+      "value": "Read selected system variables and their types, structured values, dependencies, and current revision before proposing a change. Typed values are available to Jinja2 as builtin.variables.<key>; prompt_template variables are resolved before the main prompt renders, while builtin.prompts remains a compatible rendered view.",
       "required": true,
-      "readonly": true
+      "readonly": true,
+      "type": "text"
     },
     {
       "key": "system_variable_apply_tool_description",
       "label": "System variable change tool",
       "description": "Description injected into the built-in system variable change tool.",
-      "value": "Atomically add, patch, replace, or remove system prompt variables using the latest revision and return the validated diff.",
+      "value": "Atomically add, patch, replace, or remove typed system variables using the latest revision and return the validated diff. Supported types are text, prompt_template, boolean, integer, number, date, datetime, array, object, and secret_ref. Use text patch only for strings; use json_patch for arrays and objects. secret_ref stores only a reference and never resolves credentials.",
       "required": true,
-      "readonly": true
+      "readonly": true,
+      "type": "text"
     },
     {
       "key": "workflow_execution_tool_description",
       "label": "Runtime workflow execution",
-      "description": "Instructs the model how to generate a temporary multi-tool workflow for the current run.",
-    "value": "Generate and execute one temporary workflow for the current task. The workflow exists only in the current runtime and is never a project resource. Use it when two or more already-loaded project Tool operations can be chained without another model decision. Steps execute in array order. A tool step calls one loaded Tool. The tool field may use either the loaded Tool function name (for example list_files) or its exact resource ID (for example project-files:list_files). A filter step resolves input and evaluates its JSONata expression once per item. A foreach step resolves an array and calls one loaded Tool for each item, bounded by maxItems. Use {\"$ref\":\"steps.<step-id>.output.<field>\"} for direct mappings and {\"$expr\":\"...\"} for JSONata mappings. Inside foreach arguments, use {\"$ref\":\"item.<field>\"} or the name declared by as. Do not call execute_workflow together with another Tool in the same model response. Do not use it when an intermediate result requires semantic model judgment.",
+      "description": "Description injected into the temporary workflow tool.",
+      "value": "Generate and execute one temporary workflow when multiple loaded Tool operations can be chained without another model decision.",
       "required": true,
-      "readonly": true
+      "readonly": true,
+      "type": "text"
     },
     {
       "key": "skill_reference_tool_description",
       "label": "Skill reference reader",
-      "description": "Description injected into the built-in Skill reference reader.",
+      "description": "Description injected into the Skill reference reader.",
       "value": "Read one exact reference path registered by an active Skill and add its content to the next context revision.",
       "required": true,
-      "readonly": true
+      "readonly": true,
+      "type": "text"
     },
     {
       "key": "skill_script_tool_description",
       "label": "Skill script runner",
-      "description": "Description injected into the controlled Skill script runner.",
-      "value": "Run one exact .mjs script registered by an active Skill with an explicit argv array inside the selected workspace.",
+      "description": "Description injected into the Skill script runner.",
+      "value": "Run one exact script registered by an active Skill with an explicit argument array inside the selected workspace.",
       "required": true,
-      "readonly": true
+      "readonly": true,
+      "type": "text"
     },
     {
       "key": "agent_identity",

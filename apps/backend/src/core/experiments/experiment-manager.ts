@@ -498,10 +498,17 @@ export class ExperimentManager {
           await this.executeCase(run, item, active)
         }
       }
-      await Promise.all(Array.from(
+      const workers = Array.from(
         { length: Math.min(run.config.concurrency, cases.length) },
         () => worker(),
-      ))
+      )
+      try {
+        await Promise.all(workers)
+      } catch (error) {
+        active.controller.abort(error)
+        await Promise.allSettled(workers)
+        throw error
+      }
       const completedAt = new Date().toISOString()
       if (active.controller.signal.aborted) {
         const cancelled = { code: 'EXPERIMENT_CANCELLED', message: 'Experiment was cancelled.', phase: 'runtime', retryable: true }
@@ -583,17 +590,19 @@ export class ExperimentManager {
     }
     let abortTimer: NodeJS.Timeout | undefined
     const timeoutController = new AbortController()
+    let interruptTerminal: ((reason: unknown) => void) | undefined
+    const cancelRuntime = (reason: string, state = loop.getSnapshot(0).run) => {
+      if (!state.runId || TERMINAL_RUN_STATUSES.has(state.status)) return
+      try { this.command(loop, 'run.cancel', { reason }) }
+      catch { /* The case owns cleanup even if the runtime rejects cancellation. */ }
+    }
     const cancel = () => {
       diagnosticLog('experiment.cancel_requested', { experimentRunId: run.id, caseId: item.id, source: 'experiment_cancel' })
-      timeoutController.abort(active.controller.signal.reason)
-      const snapshot = loop.getSnapshot(0)
-      if (snapshot.run.runId && !TERMINAL_RUN_STATUSES.has(snapshot.run.status)) {
-        try {
-          this.command(loop, 'run.cancel', { reason: 'experiment cancelled' })
-        } catch {
-          loop.close()
-        }
-      }
+      if (abortTimer) clearTimeout(abortTimer)
+      const reason = active.controller.signal.reason
+      interruptTerminal?.(reason)
+      timeoutController.abort(reason)
+      cancelRuntime('experiment cancelled')
     }
     active.controller.signal.addEventListener('abort', cancel, { once: true })
     try {
@@ -626,23 +635,17 @@ export class ExperimentManager {
         fs.mkdirSync(path.dirname(caseFile), { recursive: true })
         fs.writeFileSync(caseFile, `${JSON.stringify(caseContext, null, 2)}\n`, 'utf8')
       }
+      active.controller.signal.throwIfAborted()
       const terminal = new Promise<RunState>((resolve, reject) => {
         let effectiveDeadline = Date.now() + run.config.timeoutMs
         const creditedRetries = new Set<string>()
         const onTimeout = () => {
-          diagnosticLog('experiment.cancel_requested', { experimentRunId: run.id, caseId: item.id, source: 'case_timeout', timeoutMs: run.config.timeoutMs, runtimeRunId: loop.getSnapshot(0).run.runId })
+          const state = loop.getSnapshot(0).run
+          diagnosticLog('experiment.cancel_requested', { experimentRunId: run.id, caseId: item.id, source: 'case_timeout', timeoutMs: run.config.timeoutMs, runtimeRunId: state.runId })
           const timeoutError = new Error(`experiment case exceeded ${run.config.timeoutMs} ms of active runtime`)
+          interruptTerminal?.(timeoutError)
           timeoutController.abort(timeoutError)
-          const snapshot = loop.getSnapshot(0)
-          if (snapshot.run.runId && !TERMINAL_RUN_STATUSES.has(snapshot.run.status)) {
-            try {
-              this.command(loop, 'run.cancel', { reason: 'experiment case timed out' })
-            } catch {
-              loop.close()
-            }
-          }
-          unsubscribe()
-          reject(timeoutError)
+          cancelRuntime('experiment case timed out', state)
         }
         const armTimeout = () => {
           if (abortTimer) clearTimeout(abortTimer)
@@ -665,25 +668,35 @@ export class ExperimentManager {
             }
           }
           if (TERMINAL_RUN_STATUSES.has(event.payload.status)) {
+            interruptTerminal = undefined
             unsubscribe()
             resolve(event.payload)
           }
         })
+        interruptTerminal = reason => {
+          interruptTerminal = undefined
+          unsubscribe()
+          reject(reason)
+        }
         armTimeout()
       })
-      withAssetWritePolicy({
-        projectDir: workspaceDir,
-        readonly: run.config.readonlyAssets === true,
-        assetPaths: (() => {
-          const settings = new ProjectResources(workspaceDir).readSettings()
-          return [...settings.skills, ...settings.harnesses, ...settings.tools, ...settings.tools.map(file => path.dirname(file))]
-        })(),
-        onAudit: event => assetWrites.push(event),
-      }, () => this.command(loop, 'chat.message.send', {
-        clientMessageId: `experiment-${item.id}`,
-        content: [{ type: 'text', text: item.question }],
-        autoStart: true,
-      }))
+      try {
+        withAssetWritePolicy({
+          projectDir: workspaceDir,
+          readonly: run.config.readonlyAssets === true,
+          assetPaths: (() => {
+            const settings = new ProjectResources(workspaceDir).readSettings()
+            return [...settings.skills, ...settings.harnesses, ...settings.tools, ...settings.tools.map(file => path.dirname(file))]
+          })(),
+          onAudit: event => assetWrites.push(event),
+        }, () => this.command(loop, 'chat.message.send', {
+          clientMessageId: `experiment-${item.id}`,
+          content: [{ type: 'text', text: item.question }],
+          autoStart: true,
+        }))
+      } catch (error) {
+        interruptTerminal?.(error)
+      }
       const runState = await terminal
       const state = loop.exportState()
       const snapshot = state.snapshot
@@ -861,8 +874,8 @@ export class ExperimentManager {
       })
     } finally {
       if (abortTimer) clearTimeout(abortTimer)
-      await cleanupAdapter().catch(() => undefined)
       active.controller.signal.removeEventListener('abort', cancel)
+      await cleanupAdapter().catch(() => undefined)
       active.loops.delete(loop)
       loop.close()
       if (!run.config.keepWorkspaces) fs.rmSync(workspaceDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })

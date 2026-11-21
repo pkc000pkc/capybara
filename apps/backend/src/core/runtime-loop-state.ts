@@ -7,6 +7,9 @@ import type {
   RuntimeEffectiveContextRevision,
   RuntimeObservation,
   RuntimeSnapshot,
+  RuntimeContextScopesState,
+  RuntimeV2ControlState,
+  RuntimeTaskControl,
   RuntimeVariables,
   RuntimeWorkflowsState,
   SkillDefinition,
@@ -19,6 +22,11 @@ import type {
   WorkflowExecutionData,
 } from '#core/workflows/generated-workflow'
 import type { LlmMessage, LlmUsage } from '#util/llm'
+import type { ApplyReceipt, CandidateReviewReceipt, ContextDocument, ContextDocumentEngineState, EvidenceReviewResult } from '#core/context-document-engine'
+import type { ContextTrainingSample } from '#core/context-training-recorder'
+import type { BrowserGatewayState } from '#core/browser-gateway-service'
+import type { ContextHistoryState } from '#core/context-history'
+import type { McpManagerState } from '#core/mcp/client-manager'
 
 export const MAX_RETAINED_CHECKPOINTS = 8
 
@@ -88,6 +96,7 @@ export function interruptTimelineStep(
 }
 
 export interface RuntimeCheckpoint {
+  mcp?: McpManagerState
   id: string
   createdAt: string
   currentStep: number
@@ -113,6 +122,28 @@ export interface RuntimeCheckpoint {
   loopIteration?: number
   loopVariableBaseline?: RuntimeVariables
   usage: LlmUsage
+  contextDocumentState?: ContextDocumentEngineState
+  projectContextDocumentState?: ContextDocumentEngineState
+  contextControl?: RuntimeV2ControlState
+  reflectionRecordId?: string
+  reflectionFailure?: { requestId: string; code: string; artifactId: string }
+  taskControl?: RuntimeTaskControl
+  contextScopes?: RuntimeContextScopesState
+  contextTrainingSamples?: ContextTrainingSample[]
+  children?: import('#protocol/runtime-protocol').RuntimeChildrenState
+  processes?: import('#protocol/runtime-protocol').RuntimeProcessesState
+  browserGateway?: BrowserGatewayState
+  browserContexts?: RuntimeBrowserContextState[]
+}
+
+export interface RuntimeBrowserContextState {
+  key: string
+  profileId: string
+  sessionId: string
+  tabId: string
+  browserInstanceId: string
+  allowedOrigins: string[]
+  nextSequence: number
 }
 
 export interface StoredRuntimeArtifact {
@@ -121,6 +152,10 @@ export interface StoredRuntimeArtifact {
 }
 
 export interface RuntimeLoopState {
+  reflectionRecordId?: string
+  reflectionFailure?: { requestId: string; code: string; artifactId: string }
+  mcp?: McpManagerState
+  contextHistory?: ContextHistoryState
   version: 1
   snapshot: RuntimeSnapshot
   artifacts: StoredRuntimeArtifact[]
@@ -138,4 +173,22 @@ export interface RuntimeLoopState {
   loopIteration?: number
   loopVariableBaseline?: RuntimeVariables
   runUsage: LlmUsage
+  contextDocument?: ContextDocument
+  projectContextDocument?: ContextDocument
+  projectContextDocumentReceipts?: Array<[string, ApplyReceipt]>
+  projectContextDocumentReviewReceipts?: CandidateReviewReceipt[]
+  projectContextDocumentEvidenceReviewReceipts?: EvidenceReviewResult[]
+  projectContextDocumentProjections?: ContextDocumentEngineState['projections']
+  contextDocumentReceipts?: Array<[string, ApplyReceipt]>
+  contextDocumentReviewReceipts?: CandidateReviewReceipt[]
+  contextDocumentEvidenceReviewReceipts?: EvidenceReviewResult[]
+  contextDocumentProjections?: ContextDocumentEngineState['projections']
+  contextControl?: RuntimeV2ControlState
+  taskControl?: RuntimeTaskControl
+  contextScopes?: RuntimeContextScopesState
+  contextTrainingSamples?: ContextTrainingSample[]
+  children?: import('#protocol/runtime-protocol').RuntimeChildrenState
+  processes?: import('#protocol/runtime-protocol').RuntimeProcessesState
+  browserGateway?: BrowserGatewayState
+  browserContexts?: RuntimeBrowserContextState[]
 }

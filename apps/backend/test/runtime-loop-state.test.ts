@@ -68,6 +68,28 @@ test('runtime persistence preserves a checkpoint array already within the window
   assert.equal(retainRecentCheckpoints(checkpoints), checkpoints)
 })
 
+test('runtime state carries the Browser Gateway persistence envelope', () => {
+  const projectDir = copyRuntimeProject()
+  let loop: RuntimeLoop | undefined
+  try {
+    loop = new RuntimeLoop({
+      projectDir,
+      llm: testLlm(),
+      browserHost: async () => ({ ok: true, output: {} }),
+      stepDelayMs: 0,
+      streamDelayMs: 0,
+    })
+    const state = loop.exportState()
+    assert.equal(state.browserGateway?.version, 1)
+    assert.deepEqual(state.browserContexts, [])
+    assert.equal(state.browserGateway?.capability.version, 1)
+    assert.equal(state.browserGateway?.ledger.version, 1)
+  } finally {
+    loop?.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime messages discard orphan tool outputs and preserve complete call pairs', () => {
   const messages = [
     { role: 'system' as const, content: 'system' },

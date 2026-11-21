@@ -1,4 +1,5 @@
 import type { ValidateFunction } from 'ajv'
+import type { RuntimeCapabilityAuthorization } from '#protocol/runtime-protocol'
 import type { ToolNetworkRetrySettings } from '#core/tools/network-retry'
 
 export type ToolPermission =
@@ -48,6 +49,7 @@ export interface ToolCallRequest {
   id: string
   name: string
   arguments: unknown
+  authorization?: RuntimeCapabilityAuthorization
 }
 
 export type ToolCallErrorCode =
@@ -60,11 +62,22 @@ export type ToolCallErrorCode =
   | 'OUTPUT_LIMIT'
   | 'TIMEOUT'
   | 'ABORTED'
+  | 'MCP_DISCONNECTED'
+  | 'MCP_TOOL_ERROR'
+  | 'MCP_PROTOCOL_ERROR'
+  | 'MCP_INPUT_REQUIRED'
+  | 'RECOVERY_BLOCKED'
+  | 'MCP_JOURNAL_FAILED'
 
 export interface ToolCallResult {
   id: string
   name: string
   ok: boolean
+  /** Host-only linkage for a completed MCP form continuation. */
+  mcpInput?: { id: string; originCallId: string; originStepId: string; tool: string; argumentHash: string;
+    operationId?: string; workflow?: { id: string; nodeId: string } }
+  source?: { type: 'mcp'; serverId: string; toolName: string; connectionId: string; sourceVersion: string; protocolVersion?: string;
+    rpcRequestId?: string | number; operationId?: string; dispatched: boolean; outcome: 'succeeded' | 'failed' | 'unknown' | 'not_dispatched' }
   output?: unknown
   error?: {
     code: ToolCallErrorCode

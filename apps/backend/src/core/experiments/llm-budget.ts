@@ -12,6 +12,7 @@ export function budgetedLlm(llm: RuntimeLlm, limit: number): RuntimeLlm {
     const next = { ...request, maxTokens: Math.min(request.maxTokens ?? 6000, available) }
     // Runtime callbacks are intentionally non-enumerable and must survive wrapping.
     Object.defineProperty(next, 'onRetry', { value: request.onRetry, enumerable: false })
+    Object.defineProperty(next, 'validateResponse', { value: request.validateResponse, enumerable: false })
     return next
   }
   const record = (response: LlmChatResponse, request: LlmChatRequest) => {
@@ -20,6 +21,7 @@ export function budgetedLlm(llm: RuntimeLlm, limit: number): RuntimeLlm {
     return response
   }
   return {
+    admitsTransportAttempts: llm.admitsTransportAttempts,
     getConfig: () => llm.getConfig(),
     chat: async request => { const next = prepare(request); return record(await llm.chat(next), next) },
     ...(llm.stream ? { stream: async (request: LlmChatRequest, onText: (text: string) => void) => {

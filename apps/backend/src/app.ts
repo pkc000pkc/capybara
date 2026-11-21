@@ -22,6 +22,8 @@ import {
   isInitializableProjectDirectory,
 } from '#core/project-initializer'
 import { ProjectResources } from '#core/project-resources'
+import { ProjectArtifactIndex, type ProjectArtifactReviewStatus } from '#core/project-artifact-index'
+import { SOURCE_REF_RELATIONS, SOURCE_REF_TYPES, type SourceRef } from '#core/product-work-ledger'
 import { PluginMutationService } from '#core/plugins/plugin-mutation-service'
 import { resolveSystemPromptVariables } from '#core/system-prompt-templates'
 import {
@@ -40,15 +42,98 @@ import { configureProxyPreferences } from '#util/llm/proxy'
 import { WebSocketChannel } from '#transport/websocket-channel'
 import { loadLlmConfig } from '#util/llm/config'
 import { createLlmService } from '#util/llm'
+import { registerMarketResearchRoutes } from '#core/market-research-routes'
+import { registerBrowserHttpRoutes } from '#core/browser-http-routes'
+
+const PROJECT_ARTIFACT_STATUSES = new Set<ProjectArtifactReviewStatus>(['produced', 'quarantined', 'available', 'accepted', 'rejected', 'expired'])
+
+function sourceRefsFromLegacy(value: unknown): SourceRef[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const candidate = item as Record<string, unknown>
+    if (typeof candidate.type !== 'string' || !SOURCE_REF_TYPES.includes(candidate.type as typeof SOURCE_REF_TYPES[number])) return []
+    if (typeof candidate.id !== 'string' || typeof candidate.relation !== 'string' || !SOURCE_REF_RELATIONS.includes(candidate.relation as typeof SOURCE_REF_RELATIONS[number])) return []
+    return [{
+      type: candidate.type as SourceRef['type'],
+      id: candidate.id,
+      relation: candidate.relation as SourceRef['relation'],
+      ...(typeof candidate.version === 'number' ? { version: candidate.version } : {}),
+    }]
+  })
+}
+
+/**
+ * Older persisted market-research results predate the project artifact index.
+ * Reconcile them lazily when the artifact API is read or mutated so the same
+ * review surface works after an upgrade without rewriting the research result.
+ */
+function reconcileLegacyResearchArtifacts(projectDir: string, index: ProjectArtifactIndex): void {
+  const researchRoot = path.join(projectDir, '.capybara', 'runtime', 'research')
+  if (!fs.existsSync(researchRoot)) return
+  let runs: fs.Dirent[]
+  try {
+    runs = fs.readdirSync(researchRoot, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const run of runs) {
+    if (!run.isDirectory()) continue
+    const resultFile = path.join(researchRoot, run.name, 'result.json')
+    if (!fs.existsSync(resultFile)) continue
+    let envelope: unknown
+    try {
+      envelope = JSON.parse(fs.readFileSync(resultFile, 'utf8'))
+    } catch {
+      continue
+    }
+    const result = envelope && typeof envelope === 'object' && !Array.isArray(envelope)
+      ? (envelope as Record<string, unknown>).result
+      : undefined
+    const artifacts = result && typeof result === 'object' && !Array.isArray(result)
+      ? (result as Record<string, unknown>).artifacts
+      : undefined
+    if (!Array.isArray(artifacts)) continue
+    for (const item of artifacts) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+      const candidate = item as Record<string, unknown>
+      const artifactId = typeof candidate.artifactId === 'string' ? candidate.artifactId : ''
+      const kind = typeof candidate.kind === 'string' ? candidate.kind : ''
+      const contentRef = typeof candidate.contentRef === 'string' ? candidate.contentRef : ''
+      const status = typeof candidate.status === 'string' && PROJECT_ARTIFACT_STATUSES.has(candidate.status as ProjectArtifactReviewStatus)
+        ? candidate.status as ProjectArtifactReviewStatus
+        : undefined
+      if (!artifactId || !kind || !contentRef || !status || index.get(artifactId)) continue
+      index.upsert({
+        artifactId,
+        kind,
+        contentRef,
+        status,
+        summary: typeof candidate.summary === 'string' ? candidate.summary : 'Imported from persisted research result',
+        ...(typeof candidate.contentHash === 'string' ? { contentHash: candidate.contentHash } : {}),
+        ...(typeof candidate.relativePath === 'string' ? { relativePath: candidate.relativePath } : {}),
+        sourceRefs: sourceRefsFromLegacy(candidate.sourceRefs),
+        ...(typeof candidate.runId === 'string' ? { runId: candidate.runId } : {}),
+      })
+    }
+  }
+}
+import type { MarketResearchService } from '#core/market-research-service'
+import { closeDefaultMarketResearchHosts, createDefaultMarketResearchService } from '#core/stock-market-research-factory'
 
 export interface BuildAppOptions {
   runtimeLoop?: RuntimeLoopOptions
   logger?: boolean
   userConfigDir?: string
+  /** Optional host-owned factory; no market providers are invented by default. */
+  marketResearchFactory?: (input: { projectId: string; runId: string; projectPath?: string }) => MarketResearchService | Promise<MarketResearchService>
 }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
-  const app = Fastify({ logger: options.logger ?? false })
+  // Artifact IDs carry run/action provenance and are intentionally structured
+  // identifiers. Keep the parameterized artifact routes usable without
+  // weakening the route grammar or truncating the identifier.
+  const app = Fastify({ logger: options.logger ?? false, routerOptions: { maxParamLength: 2048 } })
   const exampleProjectDir = path.resolve(import.meta.dirname, '../../../examples/test-project')
   const defaultProjectDir = path.resolve(
     options.runtimeLoop?.projectDir ?? process.env.CAPYBARA_PROJECT_DIR ?? exampleProjectDir,
@@ -159,6 +244,24 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.get('/hello', async () => {
     return { message: 'hello' }
   })
+
+  app.get('/api/capabilities', async (request) => {
+    const projectId = typeof (request.query as { projectId?: unknown }).projectId === 'string'
+      ? String((request.query as { projectId: string }).projectId)
+      : undefined
+    return {
+      projectId,
+      backend: { state: 'available', detail: '本地 RuntimeLoop 服务已连接' as const },
+      applicationRuntime: { state: 'available', detail: '应用版本与本地 HTML host 能力已注册' as const },
+      browserGateway: { state: 'available', detail: '受限 HTTP 页面读取适配器已连接；交互式 Chromium 动作仍需宿主执行器' as const },
+      marketResearch: { state: 'available', detail: '市场数据、显式研报下载、本地 Python 和行情看板链路可用' as const },
+    }
+  })
+
+  await registerMarketResearchRoutes(app, {
+    serviceFactory: options.marketResearchFactory ?? ((input) => createDefaultMarketResearchService({ projectId: input.projectId, runId: input.runId, projectPath: input.projectPath ?? defaultProjectDir })),
+  })
+  await registerBrowserHttpRoutes(app)
 
   app.addHook('onSend', async (request, reply, payload) => {
     if (request.url.startsWith('/api/')) {
@@ -894,6 +997,41 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   })
   app.get('/api/resources/catalog', async (request) =>
     new ProjectResourceRegistry(requestProject(request).path).list())
+  app.get('/api/resources/artifacts', async (request, reply) => {
+    try {
+      const projectPath = requestProject(request).path
+      const index = new ProjectArtifactIndex(projectPath)
+      reconcileLegacyResearchArtifacts(projectPath, index)
+      return { revision: index.read().revision, items: index.list() }
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/resources/artifacts/:id/review', async (request, reply) => {
+    try {
+      const artifactId = String((request.params as { id?: unknown }).id ?? '')
+      const decision = (request.body as { decision?: unknown } | undefined)?.decision
+      if (decision !== 'accept' && decision !== 'reject') throw new Error('artifact review decision must be accept or reject')
+      const projectPath = requestProject(request).path
+      const index = new ProjectArtifactIndex(projectPath)
+      reconcileLegacyResearchArtifacts(projectPath, index)
+      const status = decision === 'accept' ? 'accepted' as const : 'rejected' as const
+      return { artifact: index.updateStatus(artifactId, status, 'user'), revision: index.read().revision }
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  app.post('/api/resources/artifacts/:id/verify', async (request, reply) => {
+    try {
+      const artifactId = String((request.params as { id?: unknown }).id ?? '')
+      const projectPath = requestProject(request).path
+      const index = new ProjectArtifactIndex(projectPath)
+      reconcileLegacyResearchArtifacts(projectPath, index)
+      return { verification: index.verify(artifactId), revision: index.read().revision }
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
   app.post('/api/resources/plugins', async (request, reply) => {
     try {
       const body = (request.body ?? {}) as { name?: unknown }
@@ -1186,6 +1324,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       const session = stored?.session ?? store.create()
       const loop = new RuntimeLoop({
         ...options.runtimeLoop,
+        sessionId: session.id,
         projectDir: project.path,
         workspaceDir: project.path,
         ...(stored?.state ? { initialState: stored.state as RuntimeLoopState } : {}),
@@ -1239,6 +1378,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     for (const store of stores.values()) store.close()
     await Promise.all([...trainingManagers.values()].map((manager) => manager.close()))
     await Promise.all([...experimentManagers.values()].map((manager) => manager.close()))
+    await closeDefaultMarketResearchHosts()
   })
 
   return app

@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
 import { loadLlmConfig } from '#util/llm/config'
@@ -6,6 +7,7 @@ import { loadLlmConfig } from '#util/llm/config'
 const SYSTEM_PROJECT_TEMPLATE_DIR = path.resolve(import.meta.dirname, '../../templates/project')
 const SYSTEM_MANAGED_PROJECT_FILES = [
   '.capybara/hooks/context-compression.ts',
+  '.capybara/hooks/context-organization.ts',
   '.capybara/hooks/hook-authoring.ts',
   '.capybara/harnesses/hook-authoring/manifest.json',
   '.capybara/harnesses/hook-authoring/hook-authoring.j2',
@@ -15,12 +17,19 @@ const SYSTEM_MANAGED_PROJECT_FILES = [
 const INITIAL_PROJECT_TEMPLATE_FILES = [
   'agent.md',
   'capybara.plugin.json',
-  ...SYSTEM_MANAGED_PROJECT_FILES,
   'hooks/.gitkeep',
   'training-hooks/.gitkeep',
-  'tools/files/manifest.json',
-  'tools/files/runner.mjs',
 ] as const
+
+const SYSTEM_RESOURCE_ROOT = path.join(os.homedir(), '.capybara')
+
+function systemResourceTarget(relative: string, systemRoot = SYSTEM_RESOURCE_ROOT): string {
+  const normalized = relative.replaceAll('\\', '/')
+  const resourcePath = normalized.startsWith('.capybara/')
+    ? normalized.slice('.capybara/'.length)
+    : normalized
+  return path.join(systemRoot, resourcePath)
+}
 
 const INITIAL_MAIN_TEMPLATE = `{{ builtin.variables.agent_identity }}
 {{ builtin.variables.execution_policy }}
@@ -95,6 +104,16 @@ Active skills: none
 {% endif %}
 `
 
+export function isDefaultProjectMainTemplate(source: string): boolean {
+  return source.replaceAll('\r\n', '\n') === INITIAL_MAIN_TEMPLATE.replaceAll('\r\n', '\n')
+}
+
+export function bundledAuthoringHarnessTemplate(source: unknown): string | undefined {
+  if (source !== '@system/harnesses/hook-authoring/hook-authoring.j2'
+    && source !== '@system/harnesses/variable-authoring/variable-authoring.j2') return undefined
+  return fs.readFileSync(path.join(SYSTEM_PROJECT_TEMPLATE_DIR, '.capybara', source.slice('@system/'.length)), 'utf8')
+}
+
 const INITIAL_SYSTEM_VARIABLES = {
   version: 1,
   variables: [
@@ -112,7 +131,7 @@ const INITIAL_SYSTEM_VARIABLES = {
       type: 'text',
       label: 'Completion status',
       description: 'Defines the structured status contract used by the runtime Loop.',
-      value: 'When you are not making tool calls, output exactly one JSON object with no Markdown fence. Use {"status":"completed","content":"final user-facing response"} when the task is finished, or {"status":"running","content":"brief reason more work is required"} when another model step is required.',
+      value: 'Use the current Runtime control schema for control decisions and the native tool channel for projected tools.',
       required: true,
       readonly: true,
     },
@@ -241,19 +260,19 @@ export interface ProjectInitializationResult {
 
 export function isInitializableProjectDirectory(projectDir: string): boolean {
   if (!fs.existsSync(projectDir) || !fs.statSync(projectDir).isDirectory()) return false
-  return fs.readdirSync(projectDir).every((entry) => entry === '.git')
+  return fs.readdirSync(projectDir).every((entry) => entry === '.git' || entry === '.capybara')
 }
 
-export function installSystemProjectResources(input: string): string[] {
+export function installSystemProjectResources(input: string, systemRoot = SYSTEM_RESOURCE_ROOT): string[] {
   const projectDir = path.resolve(input)
   const installed: string[] = []
   for (const relative of SYSTEM_MANAGED_PROJECT_FILES) {
     const source = fs.readFileSync(path.join(SYSTEM_PROJECT_TEMPLATE_DIR, relative), 'utf8')
-    const target = path.join(projectDir, relative)
-    if (fs.existsSync(target) && fs.readFileSync(target, 'utf8') === source) continue
+    const target = systemResourceTarget(relative, systemRoot)
+    if (fs.existsSync(target)) continue
     fs.mkdirSync(path.dirname(target), { recursive: true })
     fs.writeFileSync(target, source, 'utf8')
-    installed.push(relative)
+    installed.push(`@system/${path.relative(systemRoot, target).replaceAll('\\', '/')}`)
   }
   const systemVariablesFile = path.join(projectDir, '.capybara', 'system-variables.json')
   if (fs.existsSync(systemVariablesFile)) {
@@ -304,6 +323,11 @@ export function initializeProjectDirectory(input: string): ProjectInitialization
     throw new Error(`project directory is not empty: ${projectDir}`)
   }
 
+  // System-owned Hooks and Harnesses live in the user-level resource root.
+  // Seed them before the project catalog is first queried; the project itself
+  // receives only project-owned files below.
+  installSystemProjectResources(projectDir)
+
   const llm = loadLlmConfig()
   const files = new Map<string, string>([
     ['.capybara/config.json', `${JSON.stringify({
@@ -334,7 +358,10 @@ export function initializeProjectDirectory(input: string): ProjectInitialization
         max_input_tokens: 16_000,
         reserved_output_tokens: 2_000,
       },
-      tools: ['tools/files/manifest.json'],
+      // File tools and the project-files Skill are system resources.  The
+      // project records only project-owned resources; ProjectResources adds
+      // the system defaults when it builds the effective settings.
+      tools: [],
       skills: [],
       harnesses: [],
       plugins: [],
@@ -361,6 +388,23 @@ export function initializeProjectDirectory(input: string): ProjectInitialization
   ])
   const createdFiles: string[] = []
   const createdDirectories: string[] = []
+  const overwrittenFiles: Array<{ target: string; content: string }> = []
+  const replaceableFiles = new Set<string>()
+  const configTarget = path.join(projectDir, '.capybara', 'config.json')
+  if (fs.existsSync(configTarget)) {
+    try {
+      const existingConfig = JSON.parse(fs.readFileSync(configTarget, 'utf8')) as { main_template?: unknown }
+      // The runtime host can bootstrap an empty directory with a minimal
+      // `.capybara/main.j2` before the full project initializer runs. Treat
+      // that exact bootstrap shape as an upgradeable file instead of failing
+      // with EEXIST when the user opens the project from the Workbench.
+      if (existingConfig.main_template === '.capybara/main.j2' && !fs.existsSync(path.join(projectDir, 'main.j2'))) {
+        replaceableFiles.add('.capybara/config.json')
+      }
+    } catch {
+      // A malformed existing config is never overwritten implicitly.
+    }
+  }
   try {
     for (const [relative, content] of files) {
       const target = path.join(projectDir, relative)
@@ -369,11 +413,30 @@ export function initializeProjectDirectory(input: string): ProjectInitialization
         fs.mkdirSync(directory, { recursive: true })
         createdDirectories.push(directory)
       }
-      fs.writeFileSync(target, content, { encoding: 'utf8', flag: 'wx' })
-      createdFiles.push(target)
+      if (fs.existsSync(target)) {
+        const existing = fs.readFileSync(target, 'utf8')
+        if (existing === content) continue
+        if (!replaceableFiles.has(relative)) {
+          throw new Error(`project initialization would overwrite existing file: ${relative}`)
+        }
+        overwrittenFiles.push({ target, content: existing })
+        fs.writeFileSync(target, content, 'utf8')
+        continue
+      }
+      try {
+        fs.writeFileSync(target, content, { encoding: 'utf8', flag: 'wx' })
+        createdFiles.push(target)
+      } catch (error) {
+        // Two desktop actions can initialize the same project concurrently.
+        // If the other initializer won with identical content, the desired
+        // state is already present and this invocation can continue.
+        if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST' && fs.existsSync(target) && fs.readFileSync(target, 'utf8') === content) continue
+        throw error
+      }
     }
   } catch (error) {
     for (const file of createdFiles.reverse()) fs.rmSync(file, { force: true })
+    for (const file of overwrittenFiles.reverse()) fs.writeFileSync(file.target, file.content, 'utf8')
     for (const directory of createdDirectories.reverse()) {
       try {
         fs.rmdirSync(directory)

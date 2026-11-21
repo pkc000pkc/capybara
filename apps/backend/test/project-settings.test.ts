@@ -27,6 +27,24 @@ test('legacy context settings infer the context window from max_input_tokens', (
   }
 })
 
+test('effective project settings always include system tool and Skill fallbacks', () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-system-resource-defaults-'))
+  try {
+    initializeProjectDirectory(projectDir)
+    const configFile = path.join(projectDir, '.capybara', 'config.json')
+    const config = JSON.parse(fs.readFileSync(configFile, 'utf8'))
+    config.tools = []
+    config.skills = []
+    fs.writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`)
+
+    const settings = new ProjectResources(projectDir).readSettings()
+    assert.deepEqual(settings.tools, ['tools/files/manifest.json'])
+    assert.deepEqual(settings.skills, ['skills/project-files'])
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
 test('project settings persist -1 or a non-negative integer as the model retry limit', () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-model-retries-'))
   try {

@@ -4,6 +4,11 @@ import type { ToolCallResult } from '#core/tools/types'
 
 const OUTPUT_LIMIT = 1024 * 1024
 
+function nodeExecutable(): string {
+  if (!process.versions.electron) return process.execPath
+  return process.env.CAPYBARA_NODE_PATH || process.env.npm_node_execpath || process.env.NODE || 'node'
+}
+
 export class SkillScriptRunner {
   private activeChild?: ChildProcessWithoutNullStreams
   private abortActive?: () => void
@@ -18,10 +23,11 @@ export class SkillScriptRunner {
     script: string,
     argv: readonly string[],
     signal?: AbortSignal,
+    authorize?: () => void,
   ): Promise<ToolCallResult> {
     const started = Date.now()
     const startedAt = new Date().toISOString()
-    const fail = (code: 'RUNNER_FAILED' | 'OUTPUT_LIMIT' | 'TIMEOUT' | 'ABORTED', message: string) => ({
+    const fail = (code: 'PERMISSION_DENIED' | 'RUNNER_FAILED' | 'OUTPUT_LIMIT' | 'TIMEOUT' | 'ABORTED', message: string) => ({
       ...request,
       ok: false,
       error: { code, message },
@@ -30,12 +36,15 @@ export class SkillScriptRunner {
       durationMs: Date.now() - started,
     }) satisfies ToolCallResult
     if (signal?.aborted) return Promise.resolve(fail('ABORTED', 'skill script was aborted'))
+    try { authorize?.() }
+    catch (error) { return Promise.resolve(fail('PERMISSION_DENIED', error instanceof Error ? error.message : String(error))) }
 
     return new Promise((resolve) => {
-      const child = spawn(process.execPath, [script, ...argv], {
+      const child = spawn(nodeExecutable(), [script, ...argv], {
         cwd: this.workspaceDir,
         env: { ...process.env, CAPYBARA_PROJECT_DIR: this.workspaceDir },
         stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
       })
       this.activeChild = child
       let stdout = ''

@@ -1,4 +1,6 @@
 import fs from 'node:fs'
+import { createHash } from 'node:crypto'
+import os from 'node:os'
 import path from 'node:path'
 import { parse } from 'yaml'
 
@@ -86,11 +88,15 @@ export function parseSkillDocument(
 export class SkillRegistry {
   private readonly projectDir: string
   private readonly projectRealDir: string
+  private readonly systemDir: string
+  private readonly systemRealDir: string
   private readonly registered = new Map<string, RegisteredSkill>()
 
-  constructor(projectDir: string) {
+  constructor(projectDir: string, systemDir = path.join(os.homedir(), '.capybara')) {
     this.projectDir = path.resolve(projectDir)
     this.projectRealDir = fs.realpathSync(this.projectDir)
+    this.systemDir = path.resolve(systemDir)
+    this.systemRealDir = fs.existsSync(this.systemDir) ? fs.realpathSync(this.systemDir) : this.systemDir
   }
 
   load(skillDirectories: readonly string[]): void {
@@ -98,19 +104,24 @@ export class SkillRegistry {
     for (const relativeDir of skillDirectories) {
       const rootDir = this.resolveSkillRoot(relativeDir)
       const entryFile = this.resolveEntry(rootDir)
-      const definition = parseSkillDocument(
-        fs.readFileSync(entryFile, 'utf8'),
-        path.basename(rootDir),
-      )
+      const entry = fs.readFileSync(entryFile)
+      const definition = parseSkillDocument(entry.toString('utf8'), path.basename(rootDir))
       if (next.has(definition.name)) throw new Error(`duplicate project skill: ${definition.name}`)
+      const entryHash = createHash('sha256').update(entry).digest('hex')
+      const scriptFiles = this.filesIn(rootDir, 'scripts')
+      const referenceFiles = this.filesIn(rootDir, 'references')
+      const assetFiles = this.filesIn(rootDir, 'assets')
+      const sourceVersion = createHash('sha256').update(JSON.stringify({ entryFile, entryHash, scriptFiles, referenceFiles, assetFiles })).digest('hex')
       next.set(definition.name, {
         ...definition,
         id: definition.name,
         rootDir,
         entryFile,
-        scriptFiles: this.filesIn(rootDir, 'scripts'),
-        referenceFiles: this.filesIn(rootDir, 'references'),
-        assetFiles: this.filesIn(rootDir, 'assets'),
+        entryHash,
+        sourceVersion,
+        scriptFiles,
+        referenceFiles,
+        assetFiles,
       })
     }
     this.registered.clear()
@@ -133,10 +144,14 @@ export class SkillRegistry {
     if (typeof relativeDir !== 'string' || !relativeDir.trim() || path.isAbsolute(relativeDir)) {
       throw new Error('skill path must be a project-relative directory')
     }
-    const candidate = path.resolve(this.projectDir, relativeDir)
-    if (!inside(this.projectDir, candidate)) throw new Error('skill directory leaves the project workspace')
+    const projectCandidate = path.resolve(this.projectDir, relativeDir)
+    const projectHasEntry = fs.existsSync(path.join(projectCandidate, 'SKILL.md'))
+    const base = fs.existsSync(projectCandidate) && projectHasEntry ? this.projectDir : this.systemDir
+    const candidate = path.resolve(base, relativeDir)
+    if (!inside(base, candidate)) throw new Error('skill directory leaves its resource root')
     const realDir = fs.realpathSync(candidate)
-    if (!inside(this.projectRealDir, realDir)) throw new Error('skill symlink leaves the project workspace')
+    const allowedRealRoot = base === this.projectDir ? this.projectRealDir : this.systemRealDir
+    if (!inside(allowedRealRoot, realDir)) throw new Error('skill symlink leaves its resource root')
     if (!fs.statSync(realDir).isDirectory()) throw new Error(`skill path is not a directory: ${relativeDir}`)
     return realDir
   }
@@ -146,7 +161,9 @@ export class SkillRegistry {
     if (!fs.existsSync(entryFile) || !fs.statSync(entryFile).isFile()) {
       throw new Error(`skill directory requires SKILL.md: ${path.relative(this.projectDir, rootDir)}`)
     }
-    return fs.realpathSync(entryFile)
+    const realFile = fs.realpathSync(entryFile)
+    if (!inside(rootDir, realFile)) throw new Error('skill entry leaves its directory')
+    return realFile
   }
 
   private filesIn(rootDir: string, directory: string): string[] {

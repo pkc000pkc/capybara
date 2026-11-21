@@ -1,6 +1,7 @@
 import { assertAssetWriteAllowed, auditedAssetWrite } from '#core/asset-write-policy'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import vm from 'node:vm'
 import ts from 'typescript'
@@ -221,10 +222,13 @@ export class HookRegistry {
   private cachedCatalogHooks?: RegisteredHook[]
   private cachedHooks?: RegisteredHook[]
 
-  constructor(readonly projectDir: string) {
+  constructor(
+    readonly projectDir: string,
+    systemDir = path.join(os.homedir(), '.capybara'),
+  ) {
     const root = path.resolve(projectDir)
     this.projectRealDir = fs.realpathSync(root)
-    this.systemHooksDir = path.join(root, '.capybara', 'hooks')
+    this.systemHooksDir = path.join(path.resolve(systemDir), 'hooks')
     this.projectHooksDir = path.join(root, 'hooks')
     this.hooksDir = this.projectHooksDir
   }

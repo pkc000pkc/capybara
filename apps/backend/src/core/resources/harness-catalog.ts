@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
 import { HarnessRegistry } from '#core/harnesses/harness-registry'
@@ -46,7 +47,8 @@ export function loadHarnessCatalog(
 }
 
 function systemHarnessManifests(projectDir: string): string[] {
-  const root = path.join(projectDir, '.capybara', 'harnesses')
+  const systemRoot = path.join(os.homedir(), '.capybara')
+  const root = path.join(systemRoot, 'harnesses')
   if (!fs.existsSync(root)) return []
   const manifests: string[] = []
   const visit = (directory: string) => {
@@ -54,7 +56,7 @@ function systemHarnessManifests(projectDir: string): string[] {
       const target = path.join(directory, entry.name)
       if (entry.isDirectory()) visit(target)
       if (entry.isFile() && entry.name === 'manifest.json') {
-        manifests.push(path.relative(projectDir, target).replaceAll('\\', '/'))
+        manifests.push(`@system/${path.relative(systemRoot, target).replaceAll('\\', '/')}`)
       }
     }
   }

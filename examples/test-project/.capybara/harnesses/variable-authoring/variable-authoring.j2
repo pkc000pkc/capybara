@@ -1,12 +1,18 @@
 System variable authoring protocol:
 
-Use this protocol only when the user explicitly asks to create, update, organize, or delete persistent Agent context. Do not change variables merely because a response could be improved.
+First classify the user's intent:
 
-1. Call read_system_variables immediately before every change batch. Pass keys for only the variables you will change; omit keys only when discovering the full catalog. Include dynamic_context only when changing its references. Use the exact returned revision as base_revision.
-2. Call apply_system_variable_changes with one atomic batch. Use upsert to create a variable or intentionally replace its complete value, patch to change an existing value through one or more exact text replacements, and remove to delete. For upsert include op, key, value, and only the desired definition fields. For patch include only op, key, and edits. For remove include only op and key. A patch old_text must match exactly once in the value at that edit step; include enough surrounding text to make it unique. Never attempt to change a readonly variable.
+- Persistent declarative context: facts, preferences, terminology, constraints, domain methods, or organized knowledge that should shape future turns. Store this as system variables and connect it through dynamic_context.
+- Recurring lifecycle behavior: logic that should inspect messages, status, changed variables, or Loop completion and act again on later turns. Implement this as a project Hook through the Hook authoring protocol, not as prose hidden in a variable.
+- One-time work: a request that only needs an answer or one execution. Complete it without changing variables or generating a Hook.
+
+Durable intent must come from the user. It may be expressed without the words "variable" or "Hook" through phrases such as "from now on", "remember this", "whenever", "after every Loop", or an equivalent clear instruction. Do not persist context or create automation merely because it could improve a response. If intent is ambiguous, leave the project unchanged and explain the available persistent option.
+
+1. Call read_system_variables immediately before every change batch. Pass keys for only the variables you will change; omit keys only when discovering the full catalog. Include dynamic_context when changing its references. Use the exact returned revision as base_revision and the returned value_sha256 as expected_value_sha256 for every existing variable.
+2. Call apply_system_variable_changes with one atomic batch. Use upsert to create a variable or intentionally replace its complete value, patch to change an existing value through one or more exact text replacements, and remove to delete. For a new upsert use expected_value_sha256: null. For an existing upsert, patch, or remove use the exact hash returned by the immediately preceding read. A patch old_text must match exactly once at that edit step; include enough surrounding text to make it unique. Never attempt to change a readonly variable.
 3. Use text for literal content. Use prompt_template only for Jinja2 composition through {{ '{{' }} builtin.prompts.variable_key {{ '}}' }}. Keep keys lowercase snake_case and never store credentials or private session data.
 4. The dynamic_context prompt_template is the stable context entry point. When a variable must affect future model turns, update dynamic_context in the same batch so it references that variable. When deleting such a variable, remove its reference from dynamic_context in that same batch.
-5. After applying changes, inspect the compact diff and dependencies. Rendered dynamic_context is returned when that root template changes; otherwise the result confirms it was unchanged. Report only changes confirmed by the tool result.
+5. After applying changes, inspect the compact diff, applied patch edits, resulting hashes, and dependencies. Rendered dynamic_context is returned when that root template changes; otherwise the result confirms it was unchanged. Report only changes confirmed by the tool result. On a revision or value-hash conflict, read the affected variables again and recompute the diff; never replay a stale patch unchanged.
 
 {% if builtin.prompts.dynamic_context %}
 Active dynamic context:

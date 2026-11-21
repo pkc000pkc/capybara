@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { validateMcpServers, type McpServerConfig } from '#core/mcp/config'
 import fs from 'node:fs'
 import path from 'node:path'
 import { assertAssetWriteAllowed, auditedAssetWrite } from '#core/asset-write-policy'
@@ -7,6 +8,7 @@ import { loadLlmConfig } from '#util/llm/config'
 import type { LlmProtocol, LlmProviderName } from '#util/llm/types'
 import { enqueueProjectWrite } from '#core/project-write-queue'
 import { toolNetworkRetrySettings, type ToolNetworkRetrySettings } from '#core/tools/network-retry'
+import type { ContextAssistantMode } from '#core/context-assistant-modes'
 import { findSystemVariableReferences } from '#core/system-variable-references'
 import {
   resolveSystemPromptVariables,
@@ -17,6 +19,38 @@ import {
   type SystemPromptVariableType,
   type SystemPromptVariableValue,
 } from '#core/system-prompt-templates'
+
+/**
+ * Baseline resources supplied by the system runtime.  Resource paths remain
+ * relative so ToolRegistry and SkillRegistry can apply the project-first,
+ * system-fallback resolution rule.  An older project may omit these fields;
+ * reading its settings must still expose the host's file/code capabilities.
+ */
+export const SYSTEM_DEFAULT_TOOL_PATHS = ['tools/files/manifest.json'] as const
+export const SYSTEM_DEFAULT_SKILL_PATHS = ['skills/project-files'] as const
+
+function effectiveResourcePaths(value: unknown, defaults: readonly string[]): string[] {
+  if (value === undefined) return [...defaults]
+  if (!Array.isArray(value)) return value as string[]
+  return [...new Set([
+    ...value.filter((item): item is string => typeof item === 'string'),
+    ...defaults,
+  ])]
+}
+
+function persistableResourcePaths(projectDir: string, value: unknown, defaults: readonly string[]): string[] {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value
+    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    .filter((item) => {
+      const normalized = item.replaceAll('\\', '/').replace(/^\.\//, '')
+      if (!defaults.includes(normalized)) return true
+      // A project may intentionally override a system resource at the same
+      // relative path. Preserve that explicit project copy; otherwise keep
+      // the system fallback out of project configuration.
+      return fs.existsSync(path.resolve(projectDir, normalized))
+    }))]
+}
 
 export type SystemVariableScope = 'session' | 'project'
 
@@ -91,6 +125,14 @@ export interface SystemVariableChangeResult extends SystemVariablesState {
   diff: SystemVariableDiff[]
 }
 
+function validateContextAssistantModes(value: unknown): ContextAssistantMode[] {
+  if (!Array.isArray(value) || new Set(value).size !== value.length
+    || value.some(mode => !['normalize', 'recall', 'parent_merge', 'dream'].includes(mode))) {
+    throw new Error('context_assistant_modes must contain unique supported modes')
+  }
+  return [...value]
+}
+
 export interface ProjectSettings {
   resource_format: 1 | 2
   main_template: string
@@ -113,8 +155,15 @@ export interface ProjectSettings {
     context_window_tokens: number
     max_input_tokens: number
     reserved_output_tokens: number
+    max_model_tokens?: number
+    max_model_attempts?: number
   }
   tools: string[]
+  mcp_servers: McpServerConfig[]
+  context_assistant_modes?: ContextAssistantMode[]
+  context_assistant_profile?: string
+  context_file_disposition_profile?: string
+  context_organization_version?: 1 | 2 | 3 | 4
   skills: string[]
   harnesses: string[]
   plugins: Array<{
@@ -139,6 +188,8 @@ export interface ProjectLlmProfile {
   protocol: LlmProtocol
   max_retries: number
   api_key?: string
+  chat_template_tokenizer?: { directory: string; context_window_tokens: number }
+  file_disposition_batch?: { max_spans: number; max_characters: number }
 }
 
 export interface ProjectLlmFailoverSettings {
@@ -333,6 +384,7 @@ export class ProjectResources {
       base_url: configuredLlm.base_url ?? llm.baseUrl,
       protocol: configuredLlm.protocol ?? llm.protocol,
       max_retries: configuredLlm.max_retries ?? llm.maxRetries,
+      chat_template_tokenizer: configuredLlm.chat_template_tokenizer,
     }
     const profileValues = (configuredProfiles.length > 0 ? configuredProfiles : [legacyProfile]).map((item, index) => {
       if (!isObject(item)) return item
@@ -346,6 +398,8 @@ export class ProjectResources {
         base_url: item.base_url ?? llm.baseUrl,
         protocol: item.protocol ?? llm.protocol,
         max_retries: item.max_retries ?? llm.maxRetries,
+        chat_template_tokenizer: item.chat_template_tokenizer,
+        file_disposition_batch: item.file_disposition_batch,
         ...(apiKey ? { api_key: apiKey } : {}),
       }
     })
@@ -397,9 +451,14 @@ export class ProjectResources {
           ?? 16_000,
         max_input_tokens: configuredContext.max_input_tokens ?? 16_000,
         reserved_output_tokens: configuredContext.reserved_output_tokens ?? 2_000,
+        max_model_tokens: configuredContext.max_model_tokens,
+        max_model_attempts: configuredContext.max_model_attempts,
       },
-      tools: value.tools ?? [],
-      skills: value.skills ?? [],
+      // System resources are always part of the effective project catalog.
+      // Project paths are kept first so a project resource with the same
+      // identity can override the system fallback without being duplicated.
+      tools: effectiveResourcePaths(value.tools, SYSTEM_DEFAULT_TOOL_PATHS),
+      skills: effectiveResourcePaths(value.skills, SYSTEM_DEFAULT_SKILL_PATHS),
       harnesses: value.harnesses ?? [],
       plugins: value.plugins ?? [],
       harness_policy: value.harness_policy ?? {
@@ -408,6 +467,11 @@ export class ProjectResources {
         experience_auto_attach: true,
       },
       tool_permissions: value.tool_permissions ?? [],
+      mcp_servers: value.mcp_servers ?? [],
+      context_assistant_modes: value.context_assistant_modes,
+      context_assistant_profile: value.context_assistant_profile,
+      context_file_disposition_profile: value.context_file_disposition_profile,
+      context_organization_version: value.context_organization_version,
     })
   }
 
@@ -437,6 +501,16 @@ export class ProjectResources {
         } as ProjectLlmProfile
         if (patch.api_key === null) delete merged.api_key
         else if (typeof patch.api_key === 'string' && patch.api_key.trim()) merged.api_key = patch.api_key
+        const endpointChanged = merged.model !== base.model || merged.provider !== base.provider || merged.protocol !== base.protocol
+          || merged.base_url !== base.base_url
+        if (patch.chat_template_tokenizer === null) delete merged.chat_template_tokenizer
+        else if (patch.chat_template_tokenizer !== undefined) {
+          merged.chat_template_tokenizer = patch.chat_template_tokenizer as ProjectLlmProfile['chat_template_tokenizer']
+        } else if (endpointChanged) delete merged.chat_template_tokenizer
+        if (patch.file_disposition_batch === null) delete merged.file_disposition_batch
+        else if (patch.file_disposition_batch !== undefined) {
+          merged.file_disposition_batch = patch.file_disposition_batch as ProjectLlmProfile['file_disposition_batch']
+        } else if (endpointChanged) delete merged.file_disposition_batch
         return merged
       }
       let profiles = current.llm.profiles.map((profile) => ({ ...profile }))
@@ -469,6 +543,7 @@ export class ProjectResources {
         ...(incomingLlm.protocol === undefined ? {} : { protocol: incomingLlm.protocol }),
         ...(incomingLlm.max_retries === undefined ? {} : { max_retries: incomingLlm.max_retries }),
         ...(incomingLlm.api_key === undefined ? {} : { api_key: incomingLlm.api_key }),
+        ...(incomingLlm.chat_template_tokenizer === undefined ? {} : { chat_template_tokenizer: incomingLlm.chat_template_tokenizer }),
       }
       const active = mergeProfile(activeBase, activePatch)
       profiles = profiles.some((profile) => profile.id === active.id)
@@ -494,6 +569,11 @@ export class ProjectResources {
       llm: nextLlm,
       ...(value.context === undefined ? {} : { context: { ...current.context, ...value.context } }),
       ...(value.tools === undefined ? {} : { tools: value.tools }),
+      ...(value.mcp_servers === undefined ? {} : { mcp_servers: value.mcp_servers }),
+      ...(value.context_assistant_modes === undefined ? {} : { context_assistant_modes: value.context_assistant_modes }),
+      ...(value.context_assistant_profile === undefined ? {} : { context_assistant_profile: value.context_assistant_profile }),
+      ...(value.context_file_disposition_profile === undefined ? {} : { context_file_disposition_profile: value.context_file_disposition_profile }),
+      ...(value.context_organization_version === undefined ? {} : { context_organization_version: value.context_organization_version }),
       ...(value.skills === undefined ? {} : { skills: value.skills }),
       ...(value.harnesses === undefined ? {} : { harnesses: value.harnesses }),
       ...(value.plugins === undefined ? {} : { plugins: value.plugins }),
@@ -515,8 +595,22 @@ export class ProjectResources {
     const persistProfiles = Array.isArray(sourceLlm.profiles)
       || Array.isArray(incomingLlm.profiles)
       || profiles.length > 1
+      || profiles.some(profile => profile.chat_template_tokenizer || profile.file_disposition_batch)
+    const incomingObject = isObject(value) ? value : {}
+    const persistedTools = persistableResourcePaths(
+      this.projectDir,
+      incomingObject.tools ?? (isObject(sourceValue) ? sourceValue.tools : undefined) ?? settings.tools,
+      SYSTEM_DEFAULT_TOOL_PATHS,
+    )
+    const persistedSkills = persistableResourcePaths(
+      this.projectDir,
+      incomingObject.skills ?? (isObject(sourceValue) ? sourceValue.skills : undefined) ?? settings.skills,
+      SYSTEM_DEFAULT_SKILL_PATHS,
+    )
     this.writeJson(this.configFile, {
       ...settings,
+      tools: persistedTools,
+      skills: persistedSkills,
       llm: persistProfiles
         ? { ...llm, profiles: persistedProfiles }
         : {
@@ -544,11 +638,12 @@ export class ProjectResources {
   }
 
   saveSkillDirectories(skillDirectories: readonly string[]): ProjectSettings {
-    const settings = this.resolveSettings({ skills: [...skillDirectories] })
+    const persistedSkills = persistableResourcePaths(this.projectDir, skillDirectories, SYSTEM_DEFAULT_SKILL_PATHS)
+    const settings = this.resolveSettings({ skills: persistedSkills })
     const source = fs.existsSync(this.configFile) ? this.configFile : this.legacyConfigFile
     const current = this.readJson(source, {})
     if (!isObject(current)) throw new Error('.capybara/config.json must contain an object')
-    this.writeJsonAtomic(this.configFile, { ...current, skills: settings.skills })
+    this.writeJsonAtomic(this.configFile, { ...current, skills: persistedSkills })
     return settings
   }
 
@@ -860,6 +955,27 @@ export class ProjectResources {
       if (!['responses', 'codex-like', 'chat-completions'].includes(String(candidate.protocol))) throw new Error(`llm.profiles[${index}].protocol is unsupported`)
       if (!Number.isInteger(candidate.max_retries) || (Number(candidate.max_retries) !== -1 && Number(candidate.max_retries) < 0)) throw new Error(`llm.max_retries must be -1 or a non-negative integer (invalid profile ${id})`)
       if (candidate.api_key !== undefined && (typeof candidate.api_key !== 'string' || !candidate.api_key.trim())) throw new Error(`llm.profiles[${index}].api_key must be a non-empty string`)
+      const tokenizer = candidate.chat_template_tokenizer
+      let chatTemplateTokenizer: ProjectLlmProfile['chat_template_tokenizer']
+      if (tokenizer !== undefined && tokenizer !== null) {
+        if (candidate.provider !== 'custom' || candidate.protocol !== 'chat-completions'
+          || !isObject(tokenizer) || typeof tokenizer.directory !== 'string' || !path.isAbsolute(tokenizer.directory)
+          || !Number.isSafeInteger(tokenizer.context_window_tokens) || Number(tokenizer.context_window_tokens) < 1_024
+          || Number(tokenizer.context_window_tokens) > 10_000_000) {
+          throw new Error(`llm.profiles[${index}].chat_template_tokenizer requires custom chat-completions, an absolute directory and a valid context window`)
+        }
+        chatTemplateTokenizer = { directory: path.normalize(tokenizer.directory), context_window_tokens: Number(tokenizer.context_window_tokens) }
+      }
+      const fileBatch = candidate.file_disposition_batch
+      let fileDispositionBatch: ProjectLlmProfile['file_disposition_batch']
+      if (fileBatch !== undefined && fileBatch !== null) {
+        if (candidate.provider !== 'custom' || candidate.protocol !== 'chat-completions' || !isObject(fileBatch)
+          || !Number.isSafeInteger(fileBatch.max_spans) || Number(fileBatch.max_spans) < 1 || Number(fileBatch.max_spans) > 256
+          || !Number.isSafeInteger(fileBatch.max_characters) || Number(fileBatch.max_characters) < 256 || Number(fileBatch.max_characters) > 65_536) {
+          throw new Error(`llm.profiles[${index}].file_disposition_batch requires custom chat-completions, 1–256 spans and 256–65536 characters`)
+        }
+        fileDispositionBatch = { max_spans: Number(fileBatch.max_spans), max_characters: Number(fileBatch.max_characters) }
+      }
       return {
         id,
         name: typeof candidate.name === 'string' && candidate.name.trim() ? candidate.name.trim() : id,
@@ -869,11 +985,27 @@ export class ProjectResources {
         protocol: candidate.protocol as LlmProtocol,
         max_retries: Number(candidate.max_retries),
         ...(typeof candidate.api_key === 'string' ? { api_key: candidate.api_key.trim() } : {}),
+        ...(chatTemplateTokenizer ? { chat_template_tokenizer: chatTemplateTokenizer } : {}),
+        ...(fileDispositionBatch ? { file_disposition_batch: fileDispositionBatch } : {}),
       }
     })
     const activeProfile = typeof llm.active_profile === 'string' ? llm.active_profile.trim() : (profiles[0] as ProjectLlmProfile).id
     if (!profileIds.has(activeProfile)) throw new Error(`llm.active_profile does not match a profile: ${activeProfile}`)
     const active = profiles.find((profile) => profile.id === activeProfile) as ProjectLlmProfile
+    const assistantProfile = value.context_assistant_profile
+    const fileDispositionProfile = value.context_file_disposition_profile
+    const organizationVersion = value.context_organization_version
+    if (organizationVersion !== undefined && organizationVersion !== 1 && organizationVersion !== 2 && organizationVersion !== 3 && organizationVersion !== 4) {
+      throw new Error('context_organization_version must be 1, 2, 3 or 4')
+    }
+    if (assistantProfile !== undefined && assistantProfile !== null
+      && (typeof assistantProfile !== 'string' || !profileIds.has(assistantProfile))) {
+      throw new Error('context_assistant_profile must match an existing LLM profile')
+    }
+    if (fileDispositionProfile !== undefined && fileDispositionProfile !== null
+      && (typeof fileDispositionProfile !== 'string' || !profileIds.has(fileDispositionProfile))) {
+      throw new Error('context_file_disposition_profile must match an existing LLM profile')
+    }
     const failover = llm.failover
     if (!isObject(failover)) throw new Error('llm.failover must be an object')
     if (typeof failover.enabled !== 'boolean') throw new Error('llm.failover.enabled must be boolean')
@@ -904,6 +1036,13 @@ export class ProjectResources {
     }
     if (!Number.isInteger(reservedOutputTokens) || Number(reservedOutputTokens) < 128 || Number(reservedOutputTokens) >= Number(contextWindowTokens)) {
       throw new Error('context.reserved_output_tokens must be an integer below context_window_tokens')
+    }
+    const modelBudget = { max_model_tokens: context.max_model_tokens, max_model_attempts: context.max_model_attempts }
+    for (const key of ['max_model_tokens', 'max_model_attempts'] as const) {
+      const limit = modelBudget[key]
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || Number(limit) < 1)) {
+        throw new Error(`context.${key} must be a positive safe integer`)
+      }
     }
     if (!Array.isArray(value.tools) || !value.tools.every((item) => typeof item === 'string' && item.trim())) {
       throw new Error('tools must be an array of project-relative manifest paths')
@@ -970,6 +1109,8 @@ export class ProjectResources {
         context_window_tokens: Number(contextWindowTokens),
         max_input_tokens: Number(maxInputTokens),
         reserved_output_tokens: Number(reservedOutputTokens),
+        ...(modelBudget.max_model_tokens !== undefined ? { max_model_tokens: Number(modelBudget.max_model_tokens) } : {}),
+        ...(modelBudget.max_model_attempts !== undefined ? { max_model_attempts: Number(modelBudget.max_model_attempts) } : {}),
       },
       tools: [...value.tools] as string[],
       skills: [...value.skills] as string[],
@@ -981,6 +1122,11 @@ export class ProjectResources {
         experience_auto_attach: harnessPolicy.experience_auto_attach,
       },
       tool_permissions: [...value.tool_permissions] as string[],
+      mcp_servers: validateMcpServers(value.mcp_servers),
+      ...(value.context_assistant_modes === undefined ? {} : { context_assistant_modes: validateContextAssistantModes(value.context_assistant_modes) }),
+      ...(typeof assistantProfile === 'string' ? { context_assistant_profile: assistantProfile } : {}),
+      ...(typeof fileDispositionProfile === 'string' ? { context_file_disposition_profile: fileDispositionProfile } : {}),
+      ...(organizationVersion === undefined ? {} : { context_organization_version: organizationVersion }),
     }
   }
 

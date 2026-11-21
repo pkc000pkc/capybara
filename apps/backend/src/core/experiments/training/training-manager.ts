@@ -920,18 +920,11 @@ export class TrainingManager {
         return
       }
       extractionItem = corrected.successfulItem
-      this.store.recordEvaluation(item.id, {
-        experimentCaseId: extractionItem.experimentCaseId ?? '',
-        actualAnswer: extractionItem.actualAnswer,
-        actualTools: extractionItem.actualTools,
-        toolCalls: extractionItem.toolCalls,
-        usage: extractionItem.usage,
-        score: extractionItem.score,
-        passed: true,
-        rationale: extractionItem.rationale,
-        ...(extractionItem.evaluation ? { evaluation: extractionItem.evaluation } : {}),
-        ...(extractionItem.failure ? { failure: extractionItem.failure } : {}),
-      })
+      // Keep the source evaluation immutable.  A correction execution is a
+      // separate attempt used as the input for experience extraction; its
+      // result must not rewrite the original case's answer, score, or pass
+      // signal.  CorrectionAttempt already retains the corrected execution
+      // detail for audit and replay.
     }
 
     while (true) {
@@ -954,9 +947,12 @@ export class TrainingManager {
           message: error instanceof Error ? error.message : String(error),
           usage: error instanceof LearningHookExecutionError ? error.usage : { ...EMPTY_USAGE },
         })
-        // Evaluation already succeeded (including any correction). Learning is
-        // best-effort and must not change the case or batch outcome.
-        this.store.setCaseStatus(item.id, 'completed')
+        // Preserve the successful evaluation, but keep the learning case
+        // retryable. A failed extraction is part of the training pipeline and
+        // must remain visible in the run state instead of being hidden behind
+        // a completed batch. `retryCase` will restore the evaluated state so a
+        // retry reruns this Hook without rerunning the Agent evaluation.
+        this.store.setCaseStatus(item.id, 'unresolved')
         return
       }
       const generated = extraction.experiences.map((candidate) =>
@@ -1057,10 +1053,20 @@ export class TrainingManager {
         })
         break
       }
+      if (usedTokens >= run.config.maxCorrectionTokens) {
+        this.store.recordEvent(run.id, 'correction.budget_exhausted', {
+          sourceCaseId: source.id,
+          reason: 'max_tokens',
+          semanticAttempts,
+          totalTokens: usedTokens,
+          elapsedMs: elapsed,
+        })
+        break
+      }
       const ordinal = attempts.length + 1
       const attemptStartedAt = new Date().toISOString()
-      // Each correction receives a fresh allowance, shared by its Hook and execution.
-      const remainingTokens = run.config.maxCorrectionTokens
+      // The Hook and its clean execution share the remaining run budget.
+      const remainingTokens = run.config.maxCorrectionTokens - usedTokens
       let execution
       try {
         execution = await hookRunner.run(
@@ -1158,7 +1164,7 @@ export class TrainingManager {
         continue
       }
 
-      const totalAfterHook = execution.usage.totalTokens
+      const totalAfterHook = usedTokens + execution.usage.totalTokens
       const elapsedAfterHook = Date.now() - startedAt
       const budgetReason: TrainingCorrectionAttempt['terminalReason'] = totalAfterHook >= run.config.maxCorrectionTokens
         ? 'max_tokens'

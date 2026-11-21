@@ -1,5 +1,6 @@
 import { Ajv, type ValidateFunction } from 'ajv'
 import jsonata from 'jsonata'
+import type { RuntimeCapabilityAuthorization } from '#protocol/runtime-protocol'
 
 export interface WorkflowToolStep {
   id: string
@@ -40,10 +41,29 @@ export interface GeneratedWorkflowDefinition {
 }
 
 export interface WorkflowExecutionData {
+  authorization?: RuntimeCapabilityAuthorization
   steps: Record<string, {
     status: 'pending' | 'running' | 'completed' | 'skipped' | 'failed'
     output?: unknown
+    outputUnavailable?: true
   }>
+}
+
+/** Expressions can inspect the entire step map. A missing original cannot safely feed them. */
+export function needsWorkflowOutput(step: GeneratedWorkflowStep, sourceId: string, expandedIteration: boolean): boolean {
+  const reads = (value: unknown): boolean => {
+    if (Array.isArray(value)) return value.some(reads)
+    if (!isObject(value)) return false
+    if (Object.keys(value).length === 1 && typeof value.$expr === 'string') return true
+    if (Object.keys(value).length === 1 && typeof value.$ref === 'string') {
+      const [root, id, field] = value.$ref.split('.')
+      return root === 'steps' && (!id || (id === sourceId && field !== 'status'))
+    }
+    return Object.values(value).some(reads)
+  }
+  if (expandedIteration) return 'arguments' in step && reads(step.arguments)
+  if (step.when || step.type === 'filter') return true
+  return reads(step.arguments) || (step.type === 'foreach' && reads(step.input))
 }
 
 export const GENERATED_WORKFLOW_PARAMETERS = {

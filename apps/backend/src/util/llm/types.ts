@@ -72,13 +72,31 @@ export type LlmRetryHandler = (notification: LlmRetryNotification) => void
  * usable by the caller. This callback is local-only and is never serialized
  * into an OpenAI-compatible request body.
  */
-export type LlmResponseValidator = (response: LlmChatResponse) => string | undefined
+/** A runtime recovery retains the candidate for repair without publishing its deltas. */
+export type LlmResponseValidator = (response: LlmChatResponse) => string | { recovery: 'runtime' } | undefined
 
 export interface LlmClientMetadata {
   sessionId?: string
   threadId?: string
   turnId?: string
 }
+
+/** Local transport admission. The serialized body is the body about to be sent. */
+export interface LlmAttemptInput {
+  provider: LlmProviderName
+  protocol: LlmProtocol
+  model: string
+  serializedBody: string
+  maxOutputTokens: number
+  chatTemplateTokenizer?: {
+    contextWindowTokens: number
+    measure: () => { inputTokens: number; identity: string }
+  }
+}
+
+export type LlmAttemptAdmission = (input: LlmAttemptInput) => (
+  outcome: { status: 'returned' | 'failed' | 'unknown'; usage?: LlmUsage; statusCode?: number },
+) => void
 
 export interface LlmChatRequest {
   messages: LlmMessage[]
@@ -91,6 +109,7 @@ export interface LlmChatRequest {
   signal?: AbortSignal
   onRetry?: LlmRetryHandler
   validateResponse?: LlmResponseValidator
+  admitAttempt?: LlmAttemptAdmission
 }
 
 export interface LlmChatResponse {
@@ -114,9 +133,11 @@ export interface LlmConfig {
   timeoutMs: number
   maxRetries: number
   headers?: Record<string, string>
+  chatTemplateTokenizer?: { directory: string; contextWindowTokens: number }
 }
 
 export interface LlmProvider {
+  readonly admitsTransportAttempts?: boolean
   chat(request: LlmChatRequest): Promise<LlmChatResponse>
   stream(request: LlmChatRequest, onTextDelta: LlmTextDeltaHandler): Promise<LlmChatResponse>
   getConfig(): Readonly<LlmConfig>

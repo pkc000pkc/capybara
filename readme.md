@@ -1,58 +1,56 @@
 # Capybara
 
-Capybara is a local-first system for building, observing, debugging, evaluating, and running tool-using AI agents.
+Capybara is a local-first system for building and running AI agents. Its focus is high-quality, maintainable context: keeping the information and working methods an agent needs organized, readable, and available as work evolves.
 
-Use the developer interface while authoring and training an Agent, then run the same project through the standalone local Runner without starting the Capybara UI. Browser and Node.js applications can connect through the framework-neutral TypeScript Client SDK.
+V2 brings the runtime and a local desktop Workbench together. You can open a local project, work with an agent, inspect its context and execution trace, and return to persisted sessions. The system is under active development; V2 is an architectural generation, not a claim that a `2.0.0` package has been released.
 
-The repository keeps the runtime service, developer interface, Client SDK, example projects, and shared protocol boundary in one workspace so implementation changes can be reviewed and tested atomically. Long-form engineering and research documentation is maintained in the companion `capybara-doc` repository.
+## The idea behind V2
 
-![Capybara workflow: runtime debugging, resource authoring, and experiment analysis](.github/assets/capybara-workflow.gif)
+An agent needs more than a long prompt or a larger context window. It needs relevant information, suitable methods, and a way to distinguish evidence from tentative observations.
 
-Capybara keeps the full agent engineering loop visible: inspect live context and execution state, compose project-scoped Plugins and shared Tools, then evaluate changes against datasets.
+Capybara separates project context from session context and uses a structured context document to organize information over time. Candidates, evidence, revisions, and review decisions give context changes an explicit path. The runtime manages context organization and control centrally, so projects do not need to build all of this coordination through their own Hooks. Hook compatibility remains available.
 
-## What it provides
+The goal is to make context easier for both people and models to work with, while leaving users able to inspect the work. Long-running behavior, information retention, recall quality, and end-to-end task performance still need further evaluation.
 
-- A project format where Plugins compose variables, Harnesses, ordinary Hooks, training Hooks, and explicit shared Tool dependencies.
-- A visible Runtime Loop with streaming output, Tool traces, artifacts, checkpoints, and Session restoration.
-- Dataset-backed training, correction Hooks, replay, snapshots, held-out testing, and analysis.
-- A standalone authenticated Runner for local deployment without the developer interface.
-- A typed WebSocket Client SDK shared by browser and Node.js applications.
-- Runtime Skill marketplace discovery with explicit user confirmation before installation or removal.
-- Project Hooks with hot reload and validated, model-assisted prompt variable authoring.
+## What V2 includes
 
-## Interface tour
+- **Local Workbench:** an Electron desktop interface for opening a local project, working in sessions, and inspecting results.
+- **Structured context:** separate project and session documents, with candidates, evidence, revisions, and controlled changes.
+- **Visible execution:** runtime traces show events such as model activity, tool calls, child-agent work, and artifacts.
+- **Persistent work:** project context, session records, and runtime history are stored locally to support continuing work.
+- **Managed capabilities:** local application and browser-related capabilities use explicit runtime boundaries; availability depends on the configured adapters and environment.
+- **Context research:** the system records context-organization decisions for training and analysis. Automatic improvement and reliable long-term memory remain active areas of work, not guaranteed outcomes.
 
-### Observe and debug the runtime
+The V2 desktop chat runtime is hosted in the Electron main process and uses typed IPC. The earlier web developer interface, standalone Runner, and WebSocket Client SDK remain in the repository; they are distinct from the V2 desktop chat path.
 
-Inspect conversations, loaded context resources, runtime health, execution mode, and the step-by-step trace in one adjustable workspace.
+## V2 Workbench screenshots
 
-![Capybara runtime workspace with context tools, conversation, status, and execution trace](.github/assets/runtime-overview.png)
+These screenshots were captured from the Chinese-language interface on November 10, 2026. The Workbench is evolving, so the current interface may look different.
 
-### Author project resources
+**Runtime trace:** inspect an agent's response alongside model activity, tool calls, and the execution timeline.
 
-Browse project files and edit versioned agent resources with language-aware code views. Plugins expose their variables, Harnesses, ordinary Hooks, training Hooks, and Tool dependencies together; shared Tools retain independent definitions, diagnostics, and test surfaces.
+![Capybara V2 Workbench showing an agent session and runtime trace](.github/assets/v2-workbench-trace-2026-11-10.png)
 
-![Capybara resource workspace showing the project file browser and code editor](.github/assets/resources-workspace.png)
+**Session and project application:** review the conversation, a stopped run, and the project application panel.
 
-### Track experiments
-
-Scope analysis to a dataset, then review overall trends, compare experiments, or inspect a single run from the same workspace.
-
-![Capybara experiment analysis workspace with dataset-scoped views](.github/assets/experiments-dashboard.png)
+![Capybara V2 Workbench showing a stopped session and project application panel](.github/assets/v2-workbench-session-2026-11-10.png)
 
 ## Repository layout
 
 ```text
 apps/
-  backend/            Fastify runtime and resource service
-  frontend/           Next.js developer interface
+  backend/            Agent runtime, capabilities, and backend services
+  workbench/          V2 Electron desktop Workbench
+  frontend/           Earlier Next.js developer interface
+  website/            Project website and blog
 examples/
-  test-project/       Sanitized Plugin, Tool, Dataset, and Context example
-  appworld/           AppWorld training Hooks, adapter, runtime resources, and reproduction guide
-  state-bench/        STATE-Bench Agent Learning Track integration overlay and local result summary
+  test-project/       Example agent project and resources
+  appworld/           Historical AppWorld integration and reproduction guide
+  state-bench/        STATE-Bench integration example
 packages/
-  client/             Browser and Node.js WebSocket Client SDK
-  protocol/           Shared Runtime commands, events, and state types
+  client/             Browser and Node.js WebSocket Client SDK for the Runner
+  protocol/           Shared runtime commands, events, and state types
+docs/                 V2 design, implementation, and acceptance notes
 ```
 
 ## Requirements
@@ -60,25 +58,33 @@ packages/
 - Node.js 22 or newer
 - npm 10 or newer
 
-## Development
+## Getting started with the V2 Workbench
 
-Install all workspace dependencies from the repository root:
+The current desktop workflow targets Windows. Install dependencies and build the desktop application from the repository root:
 
 ```bash
 npm install
+npm --prefix apps/workbench run desktop:build
+npm --prefix apps/workbench run desktop:start
 ```
 
-Start Backend on port `3005` and Frontend on port `3000`:
+Open or select a local project directory in the Workbench and configure a model provider and API key in its settings. Configuration and credentials are stored under the current user's `.capybara` directory; project sessions and context are stored under the selected project's `.capybara` directory. Do not commit credentials or local session data.
+
+See the [Workbench README](apps/workbench/README.md) for environment-variable configuration, development commands, and runtime details. A model provider and network access are required for model-backed conversations.
+
+### Earlier web interface
+
+The root development command starts the backend and the earlier web interface; it does **not** start the V2 desktop Workbench:
 
 ```bash
 npm run dev
 ```
 
-The default project is `examples/test-project`. Add the LLM API Key from the Project configuration screen. The Key is written to `.capybara/secrets.json`, which is ignored by Git.
+The default project for this interface is `examples/test-project`.
 
 ## Local Agent Runner
 
-Run an Agent project without starting the Capybara developer interface. The Runner is published as `capybara-agent`:
+The earlier standalone Runner can run an Agent project without starting the developer interface. Its npm package and WebSocket API are separate from the V2 desktop runtime; installing the package does not imply that it includes the current V2 Workbench. The Runner is published as `capybara-agent`:
 
 ```bash
 npm install --global capybara-agent
@@ -149,7 +155,7 @@ provided by the Capybara Runtime when a Hook is loaded, not a separately install
 
 ## Client SDK
 
-The framework-neutral TypeScript client uses only `fetch`, `WebSocket`, and standard Web APIs.
+The Runner's framework-neutral TypeScript client uses only `fetch`, `WebSocket`, and standard Web APIs.
 It supports modern browsers and Node.js 22 or newer.
 
 Install the published framework-neutral Client SDK:
@@ -196,7 +202,7 @@ See [`packages/client/README.md`](packages/client/README.md) for the SDK API and
 
 ## Project Plugins
 
-Every version 2 project has a root `capybara.plugin.json`. Installed Plugins use the same manifest
+In the earlier plugin-based project format, the root project has a `capybara.plugin.json`. Installed Plugins use the same manifest
 inside `plugins/<plugin-id>/` and may declare variables, Harnesses, ordinary Hooks, training Hooks,
 and Tool dependencies. Tools remain project-level shared resources under `tools/` so compatible
 packages can be reused by multiple Plugins.
@@ -210,11 +216,13 @@ Capybara asks whether to keep it or uninstall it in a separate confirmed action.
 
 ## Runtime Skills
 
-An Agent can search and preview GitHub Skills, inspect installed Skills, and request installation or removal through runtime system tools. File-changing operations never run directly from a model tool call. They create a confirmation card in the conversation, and the user must explicitly confirm or cancel the action.
+In the earlier runtime interface, an Agent can search and preview GitHub Skills, inspect installed Skills, and request installation or removal through runtime system tools. These installation and removal requests create a confirmation card in the conversation, and the user must explicitly confirm or cancel the action.
 
 Installation is pinned to a full Git commit SHA and revalidated immediately before files are written. System Skills inside `.capybara` cannot be removed, local modifications are surfaced as warnings, and confirmation state survives Session refresh and reconnection.
 
-## AppWorld reproduction
+## Historical AppWorld result
+
+The following result belongs to an earlier Capybara submission, **not V2**. It should not be interpreted as a V2 benchmark result.
 
 The [`examples/appworld`](examples/appworld) project contains the training Hooks, official evaluator
 adapter, runtime resources, dataset generator, state-diff helper, experiment launcher, and leaderboard
@@ -251,3 +259,7 @@ Do not commit `.env`, `.capybara/secrets.json`, session databases, experiment da
 ## License
 
 Capybara is licensed under the [Apache License 2.0](LICENSE).
+
+## Work opportunities
+
+I am open to relevant AI agent, software architecture, and full-stack engineering opportunities. If your company would like to learn more about my experience or request my résumé, please contact me at [pkc000pkc@gmail.com](mailto:pkc000pkc@gmail.com).

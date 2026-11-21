@@ -47,8 +47,8 @@ test('resource HTTP API exposes tools, skills, and harnesses and executes their 
         .map((item: any) => item.id)
         .sort(),
       [
-        'harness-module:.capybara/harnesses/hook-authoring/manifest.json',
-        'harness-module:.capybara/harnesses/variable-authoring/manifest.json',
+        'harness-module:@system/harnesses/hook-authoring/manifest.json',
+        'harness-module:@system/harnesses/variable-authoring/manifest.json',
       ],
     )
     assert.equal(toolModule.runner.entry, 'tools/files/runner.mjs')

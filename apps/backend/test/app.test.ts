@@ -8,6 +8,7 @@ import type { FastifyInstance } from 'fastify'
 
 import { buildApp } from '#app'
 import { initializeProjectDirectory } from '#core/project-initializer'
+import { ProjectArtifactIndex } from '#core/project-artifact-index'
 import { ProjectResources } from '#core/project-resources'
 import {
   RuntimeLoop,
@@ -135,7 +136,7 @@ class RuntimeClient {
           new Error(
             `Timed out waiting for ${type}; received ${this.events
               .map((event) => event.type)
-              .join(', ')}`,
+              .join(', ')}; runFailures=${JSON.stringify(this.events.filter(event => event.type === 'run.state.changed' && event.payload.status === 'failed'))}`,
           ),
         )
       }, 4_000)
@@ -221,6 +222,207 @@ test('GET /hello returns hello', async () => {
   }
 })
 
+test('project artifact routes expose relative records and append review evidence', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-artifact-route-'))
+  initializeProjectDirectory(projectDir)
+  const index = new ProjectArtifactIndex(projectDir)
+  index.upsert({ artifactId: 'route-artifact', kind: 'download', contentRef: 'artifact:route', status: 'quarantined', summary: 'Route artifact', relativePath: 'report.pdf', sourceRefs: [] })
+  const app = await buildApp({ runtimeLoop: { projectDir, llm: fakeLlm() } })
+  const query = `?projectPath=${encodeURIComponent(projectDir)}`
+  try {
+    const listed = await app.inject({ method: 'GET', url: `/api/resources/artifacts${query}` })
+    assert.equal(listed.statusCode, 200)
+    assert.equal(listed.json().items[0].relativePath, 'report.pdf')
+    const reviewed = await app.inject({ method: 'POST', url: `/api/resources/artifacts/route-artifact/review${query}`, payload: { decision: 'accept' } })
+    assert.equal(reviewed.statusCode, 200)
+    assert.equal(reviewed.json().artifact.status, 'accepted')
+    assert.equal(new ProjectArtifactIndex(projectDir).read().reviewEvents?.at(-1)?.toStatus, 'accepted')
+  } finally {
+    await app.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('project artifact routes reconcile legacy research result artifacts before review', async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-legacy-artifact-route-'))
+  initializeProjectDirectory(projectDir)
+  const artifactId = `legacy-run:artifact:${'action-'.repeat(30)}1`
+  const resultDir = path.join(projectDir, '.capybara', 'runtime', 'research', 'legacy-run')
+  fs.mkdirSync(resultDir, { recursive: true })
+  fs.writeFileSync(path.join(resultDir, 'result.json'), JSON.stringify({
+    schemaVersion: 1,
+    result: {
+      artifacts: [{
+        artifactId,
+        kind: 'research-report',
+        contentRef: 'quarantine:legacy-report',
+        contentHash: 'legacy-hash',
+        status: 'quarantined',
+        summary: 'Legacy persisted report',
+        runId: 'legacy-run',
+        sourceRefs: [{ type: 'project', id: 'project:legacy', relation: 'references' }],
+      }],
+    },
+  }, null, 2))
+  const app = await buildApp({ runtimeLoop: { projectDir, llm: fakeLlm() } })
+  const query = `?projectPath=${encodeURIComponent(projectDir)}`
+  try {
+    const listed = await app.inject({ method: 'GET', url: `/api/resources/artifacts${query}` })
+    assert.equal(listed.statusCode, 200)
+    assert.equal(listed.json().items[0].artifactId, artifactId)
+    const reviewed = await app.inject({ method: 'POST', url: `/api/resources/artifacts/${encodeURIComponent(artifactId)}/review${query}`, payload: { decision: 'accept' } })
+    assert.equal(reviewed.statusCode, 200)
+    assert.equal(reviewed.json().artifact.status, 'accepted')
+  } finally {
+    await app.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime dispatches structured browser actions through the injected browser host', async () => {
+  const requests: LlmChatRequest[] = []
+  const hostCalls: Array<{ action: string; callId: string; runId: string; stepId: string }> = []
+  const llm = fakeLlm(async (request) => {
+    requests.push(structuredClone({ ...request, signal: undefined }))
+    if (requests.length === 1) {
+      assert.ok(request.tools?.some((tool) => tool.name === 'browser_action'))
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: '',
+        toolCalls: [{
+          id: 'call-browser-action',
+          name: 'browser_action',
+          arguments: {
+            action: 'read',
+            browser_instance_id: 'browser:test',
+            url: 'https://example.com/',
+            allowed_origins: ['https://example.com'],
+          },
+        }],
+        raw: {},
+      }
+    }
+    const toolMessage = request.messages.find((message) => message.toolCallId === 'call-browser-action')
+    assert.match(toolMessage?.content ?? '', /Example Domain/)
+    return {
+      provider: 'custom',
+      model: 'test-model',
+      text: JSON.stringify({ status: 'completed', content: '浏览器读取已完成。' }),
+      finishReason: 'stop',
+      usage: { inputTokens: 20, outputTokens: 6, totalTokens: 26 },
+      raw: {},
+    }
+  })
+
+  await withRuntime(async (client) => {
+    const start = client.events.length
+    client.send('chat.message.send', {
+      clientMessageId: 'browser-action-message',
+      content: [{ type: 'text', text: '打开网页并读取标题。' }],
+      autoStart: true,
+    })
+    await client.waitFor('run.state.changed', (event) => event.payload.status === 'completed', start)
+    const events = client.events.slice(start)
+    const completed = events.find(
+      (event): event is EventOf<'tool.call.completed'> => event.type === 'tool.call.completed' && event.payload.toolName === 'browser_action',
+    )
+    assert.equal(completed?.payload.callId, 'call-browser-action')
+    const serializedResult = JSON.stringify(completed?.payload.result)
+    assert.match(serializedResult, /Example Domain/)
+    assert.match(serializedResult, /"browserReceipt"/)
+    assert.match(serializedResult, /"ledgerReceipt"/)
+    assert.match(serializedResult, /"pageStateId"/)
+    assert.match(serializedResult, /"evidence"/)
+    assert.equal(hostCalls.length, 1)
+    assert.deepEqual(hostCalls[0], {
+      action: 'read',
+      callId: 'call-browser-action',
+      runId: completed?.runId,
+      stepId: completed?.stepId,
+    })
+    const snapshotStart = client.events.length
+    client.send('runtime.snapshot.get', {})
+    const snapshot = await client.waitFor('runtime.snapshot', undefined, snapshotStart)
+    const browserContexts = (snapshot.payload as { browserContexts?: Array<{ browserInstanceId?: string; url?: string }> }).browserContexts
+    assert.equal(browserContexts?.length, 1)
+    assert.equal(browserContexts?.[0]?.browserInstanceId, 'browser:test')
+    assert.equal(browserContexts?.[0]?.url, 'https://example.com/')
+  }, {
+    llm,
+    browserHost: async (input) => {
+      hostCalls.push({ action: input.action, callId: input.callId, runId: input.runId, stepId: input.stepId })
+      return {
+        ok: true,
+        output: {
+          state: { browserInstanceId: input.browserInstanceId ?? 'browser:test', url: input.url ?? 'https://example.com/', title: 'Example Domain', loading: false },
+          page: { url: 'https://example.com/', title: 'Example Domain', text: 'Example Domain This domain is for use in documentation examples.' },
+        },
+      }
+    },
+  })
+})
+
+test('runtime browser downloads return a quarantined artifact and linked receipt', async () => {
+  const llm = fakeLlm(async (request) => {
+    if (!request.messages.some((message) => message.toolCallId === 'call-browser-download')) {
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: '',
+        toolCalls: [{
+          id: 'call-browser-download',
+          name: 'browser_action',
+          arguments: {
+            action: 'download',
+            browser_instance_id: 'browser:download-test',
+            url: 'https://example.com/report.pdf',
+            allowed_origins: ['https://example.com'],
+          },
+        }],
+        raw: {},
+      }
+    }
+    const toolMessage = request.messages.find((message) => message.toolCallId === 'call-browser-download')
+    return {
+      provider: 'custom',
+      model: 'test-model',
+      text: JSON.stringify({ status: 'completed', content: '研报已下载并进入隔离状态。' }),
+      finishReason: 'stop',
+      raw: {},
+    }
+  })
+  await withRuntime(async (client, projectDir) => {
+    const start = client.events.length
+    client.send('chat.message.send', {
+      clientMessageId: 'browser-download-message',
+      content: [{ type: 'text', text: '下载研报。' }],
+      autoStart: true,
+    })
+    await client.waitFor('run.state.changed', (event) => event.payload.status === 'completed', start)
+    const completed = client.events.slice(start).find(
+      (event): event is EventOf<'tool.call.completed'> => event.type === 'tool.call.completed' && event.payload.toolName === 'browser_action',
+    )
+    const serializedResult = JSON.stringify(completed?.payload.result)
+    assert.match(serializedResult, /browser-download-message|call-browser-download/)
+    assert.match(serializedResult, /quarantined/)
+    assert.match(serializedResult, /"kind":"download"/)
+    const indexed = new ProjectArtifactIndex(projectDir).list()
+    assert.equal(indexed.length, 1)
+    assert.equal(indexed[0]?.kind, 'download')
+    assert.equal(indexed[0]?.status, 'quarantined')
+  }, {
+    llm,
+    browserHost: async (input) => ({
+      ok: true,
+      output: {
+        state: { browserInstanceId: input.browserInstanceId ?? 'browser:download-test', url: input.url ?? 'https://example.com/report.pdf', title: 'Report', loading: false },
+        download: { url: input.url ?? 'https://example.com/report.pdf', filename: 'report.pdf', path: 'project/.capybara/runtime/browser-downloads/report.pdf', status: 'completed', size: 12 },
+      },
+    }),
+  })
+})
+
 test('empty project directories require confirmation and initialize a runnable project without overwriting files', async () => {
   const emptyProject = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-empty-project-'))
   const gitProject = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-empty-git-project-'))
@@ -255,16 +457,8 @@ test('empty project directories require confirmation and initialize a runnable p
         'main.j2',
         'agent.md',
         'capybara.plugin.json',
-        '.capybara/hooks/context-compression.ts',
-        '.capybara/hooks/hook-authoring.ts',
-        '.capybara/harnesses/hook-authoring/manifest.json',
-        '.capybara/harnesses/hook-authoring/hook-authoring.j2',
-        '.capybara/harnesses/variable-authoring/manifest.json',
-        '.capybara/harnesses/variable-authoring/variable-authoring.j2',
         'hooks/.gitkeep',
         'training-hooks/.gitkeep',
-        'tools/files/manifest.json',
-        'tools/files/runner.mjs',
         '.gitignore',
         '.gitattributes',
       ])
@@ -272,7 +466,8 @@ test('empty project directories require confirmation and initialize a runnable p
       const initializedConfig = JSON.parse(
         fs.readFileSync(path.join(projectDir, '.capybara', 'config.json'), 'utf8'),
       )
-      assert.deepEqual(initializedConfig.tools, ['tools/files/manifest.json'])
+      assert.deepEqual(initializedConfig.tools, [])
+      assert.deepEqual(initializedConfig.skills, [])
       assert.deepEqual(initializedConfig.tool_permissions, [
         'filesystem:read',
         'filesystem:write',
@@ -286,13 +481,17 @@ test('empty project directories require confirmation and initialize a runnable p
       })
       assert.equal(catalog.statusCode, 200)
       const fileTools = catalog.json().items.find((item: any) => item.package === 'project-files')
+      const fileSkill = catalog.json().items.find((item: any) => item.kind === 'skill' && item.package === 'project-files')
       assert.equal(catalog.json().items.some((item: any) => item.kind === 'hook'), false)
+      assert.equal(fileTools.source, '@system/tools/files/manifest.json')
+      assert.equal(fileSkill.source, '@system/skills/project-files/SKILL.md')
       assert.deepEqual(fileTools.tools.map((tool: any) => tool.name), [
         'read_file',
         'list_files',
         'search_file',
         'search_in_file',
         'write_file',
+        'edit_file',
         'delete_file',
         'run_code',
         'run_command',
@@ -375,7 +574,7 @@ export default defineHook({
         false,
       )
       assert.equal(
-        fs.existsSync(path.join(projectDir, '.capybara', 'hooks', 'context-compression.ts')),
+        fs.existsSync(path.join(os.homedir(), '.capybara', 'hooks', 'context-compression.ts')),
         true,
       )
 
@@ -387,8 +586,11 @@ export default defineHook({
       assert.equal(toolInvocation.statusCode, 200)
       assert.equal(toolInvocation.json().ok, true)
       assert.ok(toolInvocation.json().output.entries.some(
-        (entry: { path: string }) => entry.path === 'tools',
+        (entry: { path: string }) => entry.path === '.capybara',
       ))
+      assert.equal(toolInvocation.json().output.entries.some(
+        (entry: { path: string }) => entry.path === 'tools',
+      ), false)
 
       const commandInvocation = await app.inject({
         method: 'POST',
@@ -1188,9 +1390,10 @@ test('runtime forwards decoded content from the native LLM stream', async () => 
     })
     await client.waitFor('chat.assistant.completed', () => true, start)
     const streamed = client.events.slice(start)
-      .filter((event) => event.type === 'chat.assistant.delta')
+      .filter((event): event is EventOf<'chat.assistant.delta'> => event.type === 'chat.assistant.delta' && event.payload.channel === 'final')
       .map((event) => event.payload.delta)
     assert.deepEqual(streamed, ['First', ' line\nSecond', ' line'])
+    assert.ok(client.events.slice(start).some((event) => event.type === 'chat.assistant.delta' && event.payload.channel === 'thinkingSummary'))
     assert.equal(streamed.some((delta) => delta.includes('status')), false)
   }, { llm })
 })
@@ -1341,7 +1544,7 @@ test('runtime dispatches native model tool calls and returns results to the next
       (event) => event.payload.status === 'completed',
       start,
     )
-    assert.equal(requests.length, 4)
+    assert.equal(requests.length, 4, 'four actor requests; completed tasks no longer invoke the legacy organizer Hook')
     const events = client.events.slice(start)
     const started = events.find(
       (event): event is EventOf<'tool.call.started'> =>
@@ -1521,6 +1724,22 @@ export default defineHook({
 `
   let modelCalls = 0
   const llm = fakeLlm(async (request) => {
+    const isContextOrganization = request.messages.some((message) => (
+      message.content.includes('You are the system context organization stage.')
+      || message.content.includes('contextProposals')
+    ))
+    if (isContextOrganization) {
+      return {
+        provider: 'custom',
+        model: 'test-model',
+        text: JSON.stringify({
+          contextObservations: [],
+          contextProposals: [],
+        }),
+        finishReason: 'stop',
+        raw: {},
+      }
+    }
     modelCalls += 1
     const systemPrompt = request.messages[0]?.content ?? ''
     if (modelCalls === 1) {
@@ -2496,7 +2715,7 @@ test('unlimited model retries also keep repairing invalid output', async () => {
       clientMessageId: 'unlimited-output-repair', content: [{ type: 'text', text: 'Answer' }], autoStart: true,
     })
     await client.waitFor('run.state.changed', event => event.payload.status === 'completed')
-    assert.equal(calls, 6)
+    assert.equal(calls, 6, 'five invalid actor outputs and one repaired output')
   }, { llm })
 })
 
@@ -2725,7 +2944,7 @@ test('runtime continues on running status and exits only on completed status', a
         event.payload.step.status === 'success',
     )
     const deltas = client.events.slice(start).filter(
-      (event): event is EventOf<'chat.assistant.delta'> => event.type === 'chat.assistant.delta',
+      (event): event is EventOf<'chat.assistant.delta'> => event.type === 'chat.assistant.delta' && event.payload.channel === 'final',
     )
     assert.equal(modelCalls, 2)
     assert.equal(modelSteps.length, 2)
@@ -3534,11 +3753,21 @@ test('model-loaded skill references and scripts reach subsequent model requests'
       (message) => message.role === 'tool' && message.name === 'run_skill_script',
     )
     assert.match(scriptResult?.content ?? '', /entries/)
+    const projectedReference = JSON.parse(requests[3]!.messages.find(message => message.role === 'tool' && message.name === 'read_skill_resource')!.content)
+    assert.equal(projectedReference.result.content, undefined)
+    assert.equal(projectedReference.result.contentRef, 'active_skill_context')
+    assert.match(requests[3]!.messages[0]!.content, /# File Safety/)
     const snapshotIndex = client.events.length
     client.send('runtime.snapshot.get', {})
     const snapshot = await client.waitFor('runtime.snapshot', () => true, snapshotIndex)
     assert.equal(snapshot.payload.skills.items[0]?.id, 'project-files')
+    assert.equal(projectedReference.result.skillVersion, snapshot.payload.skills.items[0]?.sourceVersion)
     assert.ok(snapshot.payload.contexts.items.length >= 3)
+    const referenceArtifact = snapshot.payload.artifacts.items.find(artifact => artifact.kind === 'skill-reference')!
+    const originalIndex = client.events.length
+    client.send('runtime.artifact.get', { artifactId: referenceArtifact.id })
+    const original = await client.waitFor('runtime.artifact.content', event => event.payload.artifact.id === referenceArtifact.id, originalIndex)
+    assert.match((original.payload.value as { result: { content: string } }).result.content, /# File Safety/)
   }, { llm })
 })
 
@@ -3726,13 +3955,15 @@ test('project sessions persist runtime requests and can be cleared', async () =>
   })
 })
 
-test('SQLite session restore refreshes active skills from current project files', async () => {
+test('SQLite session restore refreshes active Skills but reloads references only when their version still matches', async () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-session-restart-'))
   fs.cpSync(path.resolve(process.env.CAPYBARA_TEST_PROJECT_DIR ?? 'test-project'), projectDir, {
     filter: (source) => !path.basename(source).startsWith('sessions.sqlite'),
     recursive: true,
   })
   let sessionId = ''
+  let originalVersion: string | undefined
+  const reference = 'references/safety.md'
   const firstApp = await buildApp({
     runtimeLoop: { projectDir, llm: fakeLlm(), streamDelayMs: 1, stepDelayMs: 1 },
   })
@@ -3750,10 +3981,15 @@ test('SQLite session restore refreshes active skills from current project files'
         skillId: 'project-files',
         baseRevision: snapshot.payload.skills.revision,
       })
-      await client.waitFor(
+      const activated = await client.waitFor(
         'runtime.skills.updated',
         (event) => event.payload.items.some((skill) => skill.id === 'project-files'),
       )
+      originalVersion = activated.payload.items[0]?.sourceVersion
+      assert.ok(originalVersion)
+      client.send('runtime.skills.reference.load', { skillId: 'project-files', path: reference, baseRevision: activated.payload.revision })
+      const loaded = await client.waitFor('runtime.skills.updated', (event) => event.payload.items[0]?.resources.some(resource => resource.path === reference && resource.status === 'loaded') ?? false)
+      assert.ok(loaded.payload.items[0]?.resources.find(resource => resource.path === reference)?.hash)
     } finally {
       client.close()
     }
@@ -3778,9 +4014,21 @@ test('SQLite session restore refreshes active skills from current project files'
     try {
       const snapshot = await client.waitFor('runtime.snapshot')
       assert.match(snapshot.payload.skills.items[0]?.instructions ?? '', /Loaded after process restart/)
+      assert.ok(snapshot.payload.skills.items[0]?.sourceVersion)
+      assert.notEqual(snapshot.payload.skills.items[0]?.sourceVersion, originalVersion)
+      assert.equal(snapshot.payload.skills.items[0]?.resources.find(resource => resource.path === reference)?.status, 'unloaded')
       assert.match(snapshot.payload.renderResult?.messages[0]?.content ?? '', /Loaded after process restart/)
+      assert.doesNotMatch(snapshot.payload.renderResult?.messages[0]?.content ?? '', /# File Safety/)
       assert.equal(snapshot.payload.variables.value.builtin.config_file, path.join(projectDir, '.capybara', 'config.json'))
       assert.equal(snapshot.payload.contexts.items.at(-1)?.reason, 'restore-refresh')
+      client.send('runtime.skills.reference.load', { skillId: 'project-files', path: reference, baseRevision: snapshot.payload.skills.revision })
+      const loaded = await client.waitFor('runtime.skills.updated', (event) => event.payload.items[0]?.resources.some(resource => resource.path === reference && resource.status === 'loaded') ?? false)
+      assert.equal(loaded.payload.items[0]?.sourceVersion, snapshot.payload.skills.items[0]?.sourceVersion)
+      const editedAt = client.events.length
+      fs.appendFileSync(path.join(projectDir, 'skills', 'project-files', reference), '\nReference changed during the session.\n')
+      const unloaded = await client.waitFor('runtime.skills.updated', (event) => event.payload.items[0]?.resources.some(resource => resource.path === reference && resource.status === 'unloaded') ?? false, editedAt)
+      assert.equal(unloaded.payload.items[0]?.sourceVersion, loaded.payload.items[0]?.sourceVersion)
+      await client.waitFor('render.result.updated', (event) => !(event.payload.messages[0]?.content ?? '').includes('# File Safety'), editedAt)
     } finally {
       client.close()
     }
