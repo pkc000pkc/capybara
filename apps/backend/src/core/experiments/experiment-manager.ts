@@ -69,6 +69,7 @@ type ActiveExperiment = {
   controller: AbortController
   loops: Set<RuntimeLoop>
   llm: RuntimeLlm
+  contextLlm?: RuntimeLlm
   variableOverrides?: Record<string, string>
   initialProjectContext?: ContextDocumentEngineState
   projectContextReadOnly?: boolean
@@ -250,6 +251,7 @@ export class ExperimentManager {
     }
     if (!git.clean && !execution.allowDirtyProject) throw new Error('project must be clean before starting an experiment')
     const llm = this.providedLlm ?? this.projectLlm()
+    const contextLlm = this.runtimeLoopOptions?.contextOrganization?.llm ?? this.projectContextLlm()
     const config = llm.getConfig()
     const createdAt = new Date().toISOString()
     const id = randomUUID()
@@ -330,6 +332,7 @@ export class ExperimentManager {
       controller: new AbortController(),
       loops: new Set<RuntimeLoop>(),
       llm,
+      ...(contextLlm ? { contextLlm } : {}),
       ...(execution.variableOverrides ? { variableOverrides: { ...execution.variableOverrides } } : {}),
       ...(execution.initialProjectContext ? { initialProjectContext: execution.initialProjectContext } : {}),
       ...(execution.projectContextReadOnly ? { projectContextReadOnly: true } : {}),
@@ -345,10 +348,12 @@ export class ExperimentManager {
     const run = this.store.resumeRun(id)
     const cases = this.store.runnableCases(id)
     if (cases.length === 0) throw new Error('experiment has no interrupted or queued cases to resume')
+    const contextLlm = this.runtimeLoopOptions?.contextOrganization?.llm ?? this.projectContextLlm()
     const active: ActiveExperiment = {
       controller: new AbortController(),
       loops: new Set<RuntimeLoop>(),
       llm: this.providedLlm ?? this.projectLlm(),
+      ...(contextLlm ? { contextLlm } : {}),
     }
     this.active.set(id, active)
     active.done = Promise.resolve().then(() => this.executeRun(run, cases, active))
@@ -546,6 +551,7 @@ export class ExperimentManager {
     const assetWrites: AssetWriteAudit[] = []
     const llmRequests: ExperimentLlmAudit[] = []
     const runtimeLlm = auditedLlm(active.llm, 'actor', llmRequests)
+    const contextLlm = active.contextLlm ? auditedLlm(active.contextLlm, 'organizer', llmRequests) : undefined
     if (active.variableOverrides && Object.keys(active.variableOverrides).length > 0) {
       const resources = new ProjectResources(workspaceDir)
       const projectKeys = new Set(resources.readSystemVariables().variables.map(variable => variable.key))
@@ -560,6 +566,12 @@ export class ExperimentManager {
       initialVariableOverrides: active.variableOverrides,
       ...(active.initialProjectContext ? { initialProjectContext: active.initialProjectContext } : {}),
       ...(active.projectContextReadOnly ? { projectContextReadOnly: true } : {}),
+      ...(contextLlm ? {
+        contextOrganization: {
+          ...this.runtimeLoopOptions?.contextOrganization,
+          llm: contextLlm,
+        },
+      } : {}),
       llm: active.maxTotalTokens ? budgetedLlm(runtimeLlm, active.maxTotalTokens) : runtimeLlm,
     })
     active.loops.add(loop)
@@ -1072,6 +1084,19 @@ export class ExperimentManager {
   private projectLlm(): RuntimeLlm {
     const settings = new ProjectResources(this.projectDir).readSettings()
     return createProjectLlmService(settings.llm)
+  }
+
+  private projectContextLlm(): RuntimeLlm | undefined {
+    const settings = new ProjectResources(this.projectDir).readSettings()
+    const profileId = settings.context_assistant_profile
+    if (!profileId) return undefined
+    const profile = settings.llm.profiles.find(item => item.id === profileId)
+    if (!profile) return undefined
+    return createProjectLlmService({
+      ...settings.llm,
+      active_profile: profile.id,
+      profiles: [profile],
+    })
   }
 
   private prepareWorkspace(runId: string, caseId: string): string {
