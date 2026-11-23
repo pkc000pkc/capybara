@@ -125,6 +125,21 @@ AppWorld 的批量运行必须显式配置提供商的窗口 token 上限和安�
 
 额度守门记录窗口上限、安全余量、触发时已观测 token、Run ID、停止时间和恢复批次来源。额度耗尽、模型质量失败、Case 超时和官方评估失败分别统计，不能合并成同一种失败。
 
+运行方式使用显式窗口参数：
+
+```shell
+node scripts/run_experiment.mjs \
+  --dataset appworld-train-all-scenarios \
+  --quota-window-tokens <provider-window-tokens> \
+  --quota-safety-margin-tokens <safety-margin-tokens>
+
+node scripts/run_experiment.mjs \
+  --dataset appworld-train-all-scenarios \
+  --resume-from-report experiments/outputs/<previous-report>.json \
+  --quota-window-tokens <provider-window-tokens> \
+  --quota-safety-margin-tokens <safety-margin-tokens>
+```
+
 ## 5. 验收标准
 
 ### 5.1 运行完整性
