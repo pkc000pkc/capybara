@@ -92,7 +92,7 @@ function providerQuotaFailure(cases) {
     const failure = item?.failure ?? item?.error
     if (!failure) continue
     const text = JSON.stringify(failure).toLowerCase()
-    if (/\b429\b|too many requests|rate limit|quota.{0,32}(?:exhaust|limit|window)|token window/.test(text)) {
+    if (/\b429\b|too many requests|rate limit|quota.{0,32}(?:exhaust|exceed|limit|window)|(?:exhaust|exceed|insufficient).{0,32}quota|token window/.test(text)) {
       return { sampleId: item.sampleId, code: failure.code, message: failure.message }
     }
   }
