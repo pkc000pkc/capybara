@@ -209,6 +209,8 @@ docs/appworld-v2-formal-training-round1-plan-2026-11-23.md
 
 本轮在 42/90 个 Case 完成后主动触发额度窗口保护并停止。已完成 Case 中 10 个通过、30 个官方任务质量失败、2 个运行时超时，48 个 Case 因停止而取消。累计 agent token 使用约 5.41M。运行早期未见授权拒绝，末尾 Case 的运行日志出现提供商 HTTP 429 `Too Many Requests`，与用户观察到的窗口耗尽一致。对已完成 Case 的 Trace 审计显示，42 个 Context Training Sample 的 Organizer 决策均因 `CONTEXT_ORGANIZATION_OUTPUT_TRUNCATED` 被拒绝，Project Context revision 均为 0。这是运行时输出预算配置问题，不归因于 AppWorld 题目能力。已将 Organizer 的固定 4096 输出预算改为由 RuntimeLoop 传入的保留输出预算，修复后需在额度恢复时先抽查组织提交，再按 cancelled 清单续跑，不重复已经完成的 Case。
 
+额度守门现在同时处理两种信号。已完成 Case 的累计 token 达到安全阈值时主动取消，Case 回执出现 429、Too Many Requests、rate limit 或 quota window 等提供商额度错误时立即取消。两种停止原因分别写入报告的 `quotaGuard.reason`，便于续跑和审计。
+
 ## 8. 下一步
 
 1. 等待提供商窗口恢复，在额度守门下从取消报告续跑剩余 Case。续跑前先用短批次确认 Organizer 不再因输出截断拒绝。

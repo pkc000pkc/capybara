@@ -87,6 +87,18 @@ function usageTotal(cases) {
   return cases.reduce((total, item) => total + (Number(item.usage?.totalTokens) || 0), 0)
 }
 
+function providerQuotaFailure(cases) {
+  for (const item of cases) {
+    const failure = item?.failure ?? item?.error
+    if (!failure) continue
+    const text = JSON.stringify(failure).toLowerCase()
+    if (/\b429\b|too many requests|rate limit|quota.{0,32}(?:exhaust|limit|window)|token window/.test(text)) {
+      return { sampleId: item.sampleId, code: failure.code, message: failure.message }
+    }
+  }
+  return undefined
+}
+
 function validateQuotaOptions(options) {
   if (options.quotaWindowTokens === undefined) return
   if (!Number.isSafeInteger(options.quotaWindowTokens) || options.quotaWindowTokens <= 0) {
@@ -227,6 +239,8 @@ async function main() {
     observedTokens: 0,
     stoppedAtTokens: undefined,
     reason: undefined,
+    triggerSampleId: undefined,
+    triggerCode: undefined,
   }
   while (['queued', 'running'].includes(run.status)) {
     const progress = `${run.status} ${run.progress.completed}/${run.progress.total}`
@@ -235,8 +249,20 @@ async function main() {
     await new Promise((resolve) => setTimeout(resolve, options.pollMs))
     run = await request(projectUrl(options, `/api/experiments/${run.id}`))
     if (quotaGuard && run.status === 'running') {
-      quotaGuard.observedTokens = usageTotal(await allCases(options, run.id))
-      if (!quotaStopRequested && quotaGuard.observedTokens >= quotaGuard.stopAtTokens) {
+      const cases = await allCases(options, run.id)
+      quotaGuard.observedTokens = usageTotal(cases)
+      const quotaFailure = providerQuotaFailure(cases)
+      if (!quotaStopRequested && quotaFailure) {
+        quotaStopRequested = true
+        quotaGuard.triggerSampleId = quotaFailure.sampleId
+        quotaGuard.triggerCode = quotaFailure.code
+        quotaGuard.reason = 'provider_quota_failure_detected'
+        console.log(JSON.stringify({ quotaGuard: { ...quotaGuard, action: 'cancel_run' } }))
+        await request(projectUrl(options, `/api/experiments/${run.id}/cancel`), {
+          method: 'POST',
+          body: JSON.stringify({ reason: quotaGuard.reason }),
+        })
+      } else if (!quotaStopRequested && quotaGuard.observedTokens >= quotaGuard.stopAtTokens) {
         quotaStopRequested = true
         quotaGuard.stoppedAtTokens = quotaGuard.observedTokens
         quotaGuard.reason = 'provider_token_window_safety_margin_reached'
