@@ -544,6 +544,17 @@ test('organizer uses the caller-provided output budget and a non-truncating defa
   assert.equal(await run(1234), 1234)
 })
 
+test('organizer accepts a provider JSON response wrapped in a markdown fence', async () => {
+  const { history, project, session } = fixture()
+  const result = await organizeContext({ history: history.snapshot(), project: project.exportState(), session: session.exportState(), runtimeState: {},
+    originalSystemPrompt: '客服解题助手', chat: async request => {
+      const response = organizeResponse(request)
+      return { ...response, text: `\`\`\`json\n${response.text}\n\`\`\`` }
+    }, projectGate: () => undefined })
+  assert.ok(result)
+  assert.ok(result.session.document.information.length > 0)
+})
+
 test('reference drafts resolve a heading edit from visible nodes and attach genuine source evidence', async () => {
   const { history, project, session } = fixture()
   const result = await organizeContext({ version: 2, history: history.snapshot(), project: project.exportState(),

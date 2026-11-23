@@ -142,6 +142,12 @@ export interface OrganizerOptions {
   projectCandidateGate?: (input: { classification?: ContextClassification; evidenceRefs: string[]; engine: ContextDocumentEngine }) => string | undefined
 }
 
+function parseOrganizerJson(text: string): unknown {
+  const trimmed = text.trim()
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  return JSON.parse(fenced?.[1] ?? trimmed)
+}
+
 function restore(state: ContextDocumentEngineState): ContextDocumentEngine {
   return new ContextDocumentEngine(state.document, state.receipts, state.projections, state.reviewReceipts, state.evidenceReviewReceipts)
 }
@@ -435,7 +441,7 @@ export async function organizeContext(options: OrganizerOptions): Promise<Organi
     const response = await options.chat(request, referenced?.binding, documentView)
     if (response.toolCalls?.length) throw new Error('CONTEXT_ORGANIZATION_TOOL_INTENT_FORBIDDEN')
     if (response.finishReason === 'length' || response.finishReason === 'incomplete') throw new Error('CONTEXT_ORGANIZATION_OUTPUT_TRUNCATED')
-    const value: unknown = JSON.parse(response.text)
+    const value: unknown = parseOrganizerJson(response.text)
     const archiveChecks: OrganizationResult['requests'] = []
     const pendingWindows: PendingWindow[] = []
     const pendingWholeReads: PartialWholeRead[] = []
@@ -465,7 +471,7 @@ export async function organizeContext(options: OrganizerOptions): Promise<Organi
         if (review.toolCalls?.length || review.finishReason === 'length' || review.finishReason === 'incomplete') {
           throw new Error('CONTEXT_ORGANIZATION_FILE_ARCHIVE_REVIEW_INCOMPLETE')
         }
-        const checked = parseFileDispositions(JSON.parse(review.text), view.binding, positions.length)
+        const checked = parseFileDispositions(parseOrganizerJson(review.text), view.binding, positions.length)
         return { input: reviewInput, modelProposal: checked, operationEvidence: new Map(),
           output: { organizationVersion: 1, mode: 'organize', snapshotId: view.binding.snapshotId, observations: [], diffProposals: [],
             archiveProposals: [], recallProposals: [], uncertainties: [], coverageProposal: null },
