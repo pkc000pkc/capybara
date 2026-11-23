@@ -4,10 +4,31 @@
   "max_tool_rounds": 60,
   "tool_timeout_ms": 120000,
   "llm": {
-    "model": "glm-5.3-flash",
-    "base_url": "https://open.bigmodel.cn/api/paas/v4",
-    "protocol": "chat-completions",
-    "provider": "custom"
+    "active_profile": "main-glm",
+    "failover": {
+      "enabled": false,
+      "retries_per_profile": 0
+    },
+    "profiles": [
+      {
+        "id": "main-glm",
+        "name": "GLM 5.3 Flash main",
+        "provider": "custom",
+        "model": "glm-5.3-flash",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "protocol": "chat-completions",
+        "max_retries": 3
+      },
+      {
+        "id": "organizer-glm",
+        "name": "GLM 4.5 Air organizer",
+        "provider": "custom",
+        "model": "glm-4.5-air",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "protocol": "chat-completions",
+        "max_retries": 1
+      }
+    ]
   },
   "context": {
     "max_input_tokens": 128000,
@@ -35,5 +56,6 @@
       "path": "plugins/appworld-guidance",
       "enabled": true
     }
-  ]
+  ],
+  "context_assistant_profile": "organizer-glm"
 }
