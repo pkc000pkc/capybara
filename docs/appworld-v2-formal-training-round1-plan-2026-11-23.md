@@ -207,7 +207,7 @@ docs/appworld-v2-formal-training-round1-plan-2026-11-23.md
 | 8K 输出预留正式运行 | 已因提供商 token 窗口保护停止，保留分批报告 |
 | 90 Case 正式训练 | 已因提供商 token 窗口保护停止，Run ID `a63e95d0-2088-42fa-b136-75c93bb825a4`，已完成 42/90 |
 
-本轮在 42/90 个 Case 完成后主动触发额度窗口保护并停止。已完成 Case 中 10 个通过、30 个官方任务质量失败、2 个运行时超时，48 个 Case 因停止而取消。累计 agent token 使用约 5.41M，未观察到 401、403 或 429。对已完成 Case 的 Trace 审计显示，42 个 Context Training Sample 的 Organizer 决策均因 `CONTEXT_ORGANIZATION_OUTPUT_TRUNCATED` 被拒绝，Project Context revision 均为 0。这是运行时输出预算配置问题，不归因于 AppWorld 题目能力。已将 Organizer 的固定 4096 输出预算改为由 RuntimeLoop 传入的保留输出预算，修复后需在额度恢复时先抽查组织提交，再按 cancelled 清单续跑，不重复已经完成的 Case。
+本轮在 42/90 个 Case 完成后主动触发额度窗口保护并停止。已完成 Case 中 10 个通过、30 个官方任务质量失败、2 个运行时超时，48 个 Case 因停止而取消。累计 agent token 使用约 5.41M。运行早期未见授权拒绝，末尾 Case 的运行日志出现提供商 HTTP 429 `Too Many Requests`，与用户观察到的窗口耗尽一致。对已完成 Case 的 Trace 审计显示，42 个 Context Training Sample 的 Organizer 决策均因 `CONTEXT_ORGANIZATION_OUTPUT_TRUNCATED` 被拒绝，Project Context revision 均为 0。这是运行时输出预算配置问题，不归因于 AppWorld 题目能力。已将 Organizer 的固定 4096 输出预算改为由 RuntimeLoop 传入的保留输出预算，修复后需在额度恢复时先抽查组织提交，再按 cancelled 清单续跑，不重复已经完成的 Case。
 
 ## 8. 下一步
 
