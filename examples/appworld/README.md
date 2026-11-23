@@ -90,10 +90,13 @@ git commit -m "Add train-derived AppWorld context"
 Run both closed-book test splits from that exact commit:
 
 ```powershell
-node .\scripts\run_experiment.mjs --dataset appworld-test-normal-all-scenarios --name "AppWorld test normal closed book" --concurrency 2
-node .\scripts\run_experiment.mjs --dataset appworld-test-challenge-all-scenarios --name "AppWorld test challenge closed book" --concurrency 2
+node .\scripts\run_experiment.mjs --dataset appworld-test-normal-all-scenarios --project-context .capybara\project_context.json --name "AppWorld test normal closed book" --concurrency 2
+node .\scripts\run_experiment.mjs --dataset appworld-test-challenge-all-scenarios --project-context .capybara\project_context.json --name "AppWorld test challenge closed book" --concurrency 2
 node .\scripts\summarize_benchmark.mjs --runs <normal-run-id>,<challenge-run-id>
 ```
+
+The `--project-context` option checks the frozen Project Context against task IDs, answers, and
+private Ground Truth references before a closed-book run starts. It reports only hashed matches.
 
 The summary combines TGC by task count and SGC by scenario count. It rejects Runs from different
 models or project commits so that the score cannot silently mix different contexts.

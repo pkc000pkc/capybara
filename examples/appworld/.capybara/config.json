@@ -4,13 +4,13 @@
   "max_tool_rounds": 60,
   "tool_timeout_ms": 120000,
   "llm": {
-    "model": "gpt-5.6-luna",
-    "base_url": "http://token.ai.longjitech.com/v1",
-    "protocol": "responses"
+    "model": "glm-5.3-flash",
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "protocol": "chat-completions"
   },
   "context": {
-    "max_input_tokens": 64000,
-    "reserved_output_tokens": 6000
+    "max_input_tokens": 128000,
+    "reserved_output_tokens": 64000
   },
   "tools": [
     "tools/appworld/manifest.json"

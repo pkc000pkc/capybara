@@ -242,7 +242,8 @@ test('Normalize feeds the organizer suggestions alongside intact source spans an
     try {
       const roles = db.prepare('SELECT DISTINCT role, run_id FROM runtime_model_budget_attempts').all()
       assert.ok(['main', 'normalize', 'organize'].every(role => roles.some(row => row.role === role)))
-      assert.equal(new Set(roles.map(row => row.run_id)).size, 1)
+      assert.equal(new Set(roles.map(row => row.run_id)).size, 2)
+      assert.ok(roles.some(row => row.role === 'organize' && String(row.run_id).endsWith(':organize')))
     } finally { db.close() }
     const state = f.loop.exportState()
     assert.ok(state.contextHistory!.messages.some(item => item.message.content.includes('125')))

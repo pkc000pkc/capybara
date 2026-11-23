@@ -273,6 +273,7 @@ export class TrainingStore {
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL UNIQUE REFERENCES training_runs(id) ON DELETE CASCADE,
         variables_json TEXT NOT NULL,
+        project_context_json TEXT,
         content_hash TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
@@ -303,6 +304,10 @@ export class TrainingStore {
     const caseColumns = new Set((this.database.prepare('PRAGMA table_info(training_cases)').all() as Array<{ name: string }>).map((column) => column.name))
     if (!caseColumns.has('evaluation_json')) {
       this.database.exec('ALTER TABLE training_cases ADD COLUMN evaluation_json TEXT')
+    }
+    const snapshotColumns = new Set((this.database.prepare('PRAGMA table_info(training_snapshots)').all() as Array<{ name: string }>).map((column) => column.name))
+    if (!snapshotColumns.has('project_context_json')) {
+      this.database.exec('ALTER TABLE training_snapshots ADD COLUMN project_context_json TEXT')
     }
     const experienceColumns = new Set((this.database.prepare('PRAGMA table_info(experience_candidates)').all() as Array<{ name: string }>).map((column) => column.name))
     const experienceMigrations = [
@@ -818,9 +823,9 @@ export class TrainingStore {
 
   createSnapshot(snapshot: TestSnapshot): TestSnapshot {
     this.database.prepare(`
-      INSERT INTO training_snapshots (id, run_id, variables_json, content_hash, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(snapshot.id, snapshot.runId, JSON.stringify(snapshot.variables), snapshot.contentHash, snapshot.createdAt)
+      INSERT INTO training_snapshots (id, run_id, variables_json, project_context_json, content_hash, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(snapshot.id, snapshot.runId, JSON.stringify(snapshot.variables), snapshot.projectContext ? JSON.stringify(snapshot.projectContext) : null, snapshot.contentHash, snapshot.createdAt)
     this.database.prepare(`
       UPDATE training_runs SET snapshot_id = ?, status = 'ready_for_test', updated_at = ? WHERE id = ?
     `).run(snapshot.id, snapshot.createdAt, snapshot.runId)
@@ -835,6 +840,7 @@ export class TrainingStore {
       id: string
       run_id: string
       variables_json: string
+      project_context_json: string | null
       content_hash: string
       created_at: string
     } | undefined
@@ -842,6 +848,7 @@ export class TrainingStore {
       id: row.id,
       runId: row.run_id,
       variables: parseJson(row.variables_json, {}),
+      ...(row.project_context_json ? { projectContext: parseJson(row.project_context_json, undefined) } : {}),
       contentHash: row.content_hash,
       createdAt: row.created_at,
     } : undefined

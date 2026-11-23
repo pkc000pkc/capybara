@@ -8,6 +8,7 @@
     ]
   },
   "timeout_ms": 600000,
+  "evaluate_on_runtime_failure": true,
   "phases": [
     "prepare",
     "evaluate",

@@ -157,6 +157,67 @@ test('project context survives a new RuntimeLoop and has a project projection', 
   }
 })
 
+test('frozen project context is restored for evaluation and rejects project writes', () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-project-context-frozen-'))
+  initializeProjectDirectory(projectDir)
+  const frozen = ContextDocumentEngine.create({ sessionId: 'frozen-project-context', projectId: projectDir, constitutionRevision: 'test' })
+  frozen.observe({
+    candidate: {
+      source: { actor: 'memory', sourceId: 'frozen-rule', capturedAt: '2026-11-20T00:00:00.000Z' },
+      rawArtifactId: 'frozen-rule',
+      normalizedContent: '评估期间项目上下文只读。',
+      classification: { durability: 'project', target: 'project', confidence: 'high', reason: '冻结快照规则', projectAnchors: ['project:file:main.j2'] },
+    },
+    evidence: { kind: 'artifact', referenceId: 'frozen-rule', confidence: 'high' },
+  })
+  const sessionId = 'frozen-project-session'
+  const loop = new RuntimeLoop({
+    projectDir,
+    sessionId,
+    initialProjectContext: frozen.exportState(),
+    projectContextReadOnly: true,
+    stepDelayMs: 0,
+    streamDelayMs: 0,
+  })
+  try {
+    const restored = loop.exportState()
+    assert.equal(restored.projectContextDocument?.id, frozen.snapshot().id)
+    assert.equal(restored.projectContextDocument?.revision, frozen.snapshot().revision)
+    assert.ok(restored.projectContextDocument?.candidates.some((candidate) => candidate.source.sourceId === 'frozen-rule'))
+
+    const projectObservation = command('runtime.context.v2.observe', { observation: {
+      scope: 'project',
+      candidate: {
+        source: { actor: 'user', sourceId: 'forbidden-project-write', capturedAt: '2026-11-20T00:00:01.000Z' },
+        rawArtifactId: 'forbidden-project-write',
+        normalizedContent: '不应写入冻结项目上下文。',
+        classification: { durability: 'project', target: 'project', confidence: 'high', reason: '只读门禁测试', projectAnchors: ['project:file:main.j2'] },
+      },
+      evidence: { kind: 'message', referenceId: 'forbidden-project-write', confidence: 'high' },
+    } }, 'frozen-project-observe', sessionId)
+    loop.validate(projectObservation)
+    assert.throws(() => loop.execute(projectObservation, 1), /PROJECT_CONTEXT_READONLY/u)
+    assert.equal(loop.exportState().projectContextDocument?.candidates.some((candidate) => candidate.source.sourceId === 'forbidden-project-write'), false)
+
+    const sessionObservation = command('runtime.context.v2.observe', { observation: {
+      scope: 'session',
+      candidate: {
+        source: { actor: 'user', sourceId: 'allowed-session-write', capturedAt: '2026-11-20T00:00:02.000Z' },
+        rawArtifactId: 'allowed-session-write',
+        normalizedContent: '会话级信息仍可写入。',
+        classification: { durability: 'session', target: 'session', confidence: 'high', reason: '当前任务信息', projectAnchors: [] },
+      },
+      evidence: { kind: 'message', referenceId: 'allowed-session-write', confidence: 'high' },
+    } }, 'frozen-session-observe', sessionId)
+    loop.validate(sessionObservation)
+    loop.execute(sessionObservation, 2)
+    assert.ok(loop.exportState().contextDocument?.candidates.some((candidate) => candidate.source.sourceId === 'allowed-session-write'))
+  } finally {
+    loop.close()
+    fs.rmSync(projectDir, { recursive: true, force: true })
+  }
+})
+
 test('project context rejects observations without durable project classification', () => {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-project-classification-gate-'))
   initializeProjectDirectory(projectDir)

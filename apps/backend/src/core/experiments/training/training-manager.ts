@@ -15,6 +15,9 @@ import { ProjectVariableWriter, variableHash } from '#core/experiments/training/
 import { SnapshotService } from '#core/experiments/training/snapshot-service'
 import { TrainingStore } from '#core/experiments/training/training-store'
 import { resolveTrainingReference } from '#core/experiments/training/training-reference'
+import { ContextDocumentEngine, type ContextDocumentEngineState } from '#core/context-document-engine'
+import { ProjectContextStore } from '#core/project-context-store'
+import { V2_CONSTITUTION_REVISION } from '#core/v2-prompts'
 import {
   MAX_TEST_CASES,
   MAX_TRAINING_CASES,
@@ -796,7 +799,10 @@ export class TrainingManager {
   }
 
   private async processTestCase(run: TrainingRun, item: TrainingCase): Promise<boolean> {
-    if (item.status === 'queued') await this.executeCase(run, item, this.store.getSnapshot(run.id)?.variables)
+    if (item.status === 'queued') {
+      const snapshot = this.store.getSnapshot(run.id)
+      await this.executeCase(run, item, snapshot?.variables, true, run.config.timeoutMs, undefined, undefined, snapshot?.projectContext)
+    }
     const completed = this.store.getCase(item.id)
     if (completed.status === 'error') throw new Error(completed.failure?.message ?? `test case failed: ${item.sampleId}`)
     this.store.setCaseStatus(item.id, 'completed')
@@ -811,6 +817,7 @@ export class TrainingManager {
     timeoutMs = run.config.timeoutMs,
     deadlineAt?: number,
     maxTotalTokens?: number,
+    projectContext?: TestSnapshot['projectContext'],
   ): Promise<ExperimentCaseDetail> {
     const overridableVariables = new Set(
       new PluginRegistry(this.projectDir).effectiveSystemVariablesState().resource.variables
@@ -837,6 +844,7 @@ export class TrainingManager {
       }, {
         allowDirtyProject: true,
         ...(remainingTokens !== undefined ? { maxTotalTokens: remainingTokens } : {}),
+        ...(item.phase === 'testing' && projectContext ? { initialProjectContext: projectContext, projectContextReadOnly: true } : {}),
         ...(overrides && Object.keys(overrides).length ? { variableOverrides: overrides } : {}),
       })
       if (persist) this.store.startCase(item.id, child.id)
@@ -852,6 +860,7 @@ export class TrainingManager {
       const childDetail = this.experiments.case(terminal.id, childCase.id)
       aggregateUsage = addUsage(aggregateUsage, childDetail.usage)
       const detail = { ...childDetail, usage: aggregateUsage }
+      if (persist && item.phase === 'training') this.mergeTrainingProjectContext(run, item, detail)
       const shouldRetry = detail.failure?.retryable === true
         && attempt < 2
         && (!persist || ACTIVE_STATUSES.has(this.store.getRun(run.id).status))
@@ -880,6 +889,45 @@ export class TrainingManager {
       return detail
     }
     throw new Error('training case retry loop completed without a result')
+  }
+
+  private mergeTrainingProjectContext(run: TrainingRun, item: TrainingCase, detail: ExperimentCaseDetail): void {
+    const sourceState = detail.trace?.projectContext
+    if (!sourceState) return
+    const source = structuredClone(sourceState) as ContextDocumentEngineState
+    const sourceRevision = source.document.revision
+    const store = new ProjectContextStore(this.projectDir, this.projectDir, V2_CONSTITUTION_REVISION)
+    try {
+      const current = store.load()
+      const currentRevision = current.snapshot().revision
+      if (sourceRevision <= currentRevision) return
+      source.document.id = current.snapshot().id
+      source.document.projectId = this.projectDir
+      source.document.sessionId = 'project-context'
+      const imported = new ContextDocumentEngine(
+        source.document,
+        source.receipts,
+        source.projections,
+        source.reviewReceipts,
+        source.evidenceReviewReceipts,
+      )
+      store.save(imported, currentRevision, `training:${run.id}:${item.id}`)
+      this.store.recordEvent(run.id, 'context.project_committed', {
+        sourceCaseId: item.id,
+        previousRevision: currentRevision,
+        nextRevision: sourceRevision,
+        candidateCount: imported.snapshot().candidates.length,
+        informationCount: imported.snapshot().information.length,
+      })
+    } catch (error) {
+      this.store.recordEvent(run.id, 'context.project_commit_failed', {
+        sourceCaseId: item.id,
+        message: error instanceof Error ? error.message : String(error),
+      })
+      throw error
+    } finally {
+      store.close()
+    }
   }
 
   private async learnFromCase(run: TrainingRun, item: TrainingCase): Promise<void> {

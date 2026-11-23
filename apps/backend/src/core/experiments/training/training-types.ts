@@ -7,6 +7,7 @@ import type {
   ExperimentToolCall,
   ExperimentUsage,
 } from '#core/experiments/types'
+import type { ContextDocumentEngineState } from '#core/context-document-engine'
 
 export const MAX_TRAINING_CASES = 10_000
 export const MAX_TEST_CASES = 10_000
@@ -278,6 +279,7 @@ export interface TestSnapshot {
   id: string
   runId: string
   variables: Record<string, string>
+  projectContext?: ContextDocumentEngineState
   contentHash: string
   createdAt: string
 }

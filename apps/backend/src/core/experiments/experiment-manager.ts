@@ -35,6 +35,7 @@ import { ProjectGitService } from '#core/project-git'
 import { createProjectLlmService } from '#core/project-llm'
 import { ProjectResources } from '#core/project-resources'
 import { RuntimeLoop, type RuntimeLlm, type RuntimeLoopOptions } from '#core/runtime-loop'
+import type { ContextDocumentEngineState } from '#core/context-document-engine'
 import type { ChannelEvent, ClientCommand, RunState } from '#protocol/runtime-protocol'
 import type { JsonObject, JsonValue } from '#protocol/runtime-protocol'
 import type { LlmChatResponse, LlmUsage } from '#util/llm'
@@ -59,6 +60,8 @@ export interface ExperimentExecutionOptions {
   maxTotalTokens?: number
   allowDirtyProject?: boolean
   variableOverrides?: Record<string, string>
+  initialProjectContext?: ContextDocumentEngineState
+  projectContextReadOnly?: boolean
 }
 
 type ActiveExperiment = {
@@ -67,6 +70,8 @@ type ActiveExperiment = {
   loops: Set<RuntimeLoop>
   llm: RuntimeLlm
   variableOverrides?: Record<string, string>
+  initialProjectContext?: ContextDocumentEngineState
+  projectContextReadOnly?: boolean
   done?: Promise<void>
 }
 
@@ -326,6 +331,8 @@ export class ExperimentManager {
       loops: new Set<RuntimeLoop>(),
       llm,
       ...(execution.variableOverrides ? { variableOverrides: { ...execution.variableOverrides } } : {}),
+      ...(execution.initialProjectContext ? { initialProjectContext: execution.initialProjectContext } : {}),
+      ...(execution.projectContextReadOnly ? { projectContextReadOnly: true } : {}),
       ...(execution.maxTotalTokens ? { maxTotalTokens: execution.maxTotalTokens } : {}),
     }
     this.active.set(id, active)
@@ -551,6 +558,8 @@ export class ExperimentManager {
       projectDir: workspaceDir,
       workspaceDir,
       initialVariableOverrides: active.variableOverrides,
+      ...(active.initialProjectContext ? { initialProjectContext: active.initialProjectContext } : {}),
+      ...(active.projectContextReadOnly ? { projectContextReadOnly: true } : {}),
       llm: active.maxTotalTokens ? budgetedLlm(runtimeLlm, active.maxTotalTokens) : runtimeLlm,
     })
     active.loops.add(loop)
@@ -737,10 +746,22 @@ export class ExperimentManager {
           .filter((artifact) => !runtimeRunId || artifact.meta.runId === runtimeRunId)
           .map((artifact) => ({ meta: artifact.meta, value: artifact.value })),
         renderedMessages: snapshot.renderResult?.messages ?? [],
+        ...(state.projectContextDocument ? { projectContext: {
+          document: state.projectContextDocument,
+          receipts: state.projectContextDocumentReceipts ?? [],
+          projections: state.projectContextDocumentProjections ?? [],
+          reviewReceipts: state.projectContextDocumentReviewReceipts ?? [],
+          evidenceReviewReceipts: state.projectContextDocumentEvidenceReviewReceipts ?? [],
+        } } : {}),
+        ...(state.contextTrainingSamples ? { contextTrainingSamples: state.contextTrainingSamples } : {}),
         ...(adapter ? { adapter: { ...(adapterPrepare === undefined ? {} : { prepare: adapterPrepare }) } } : {}),
       }
       const runtimeUsage = usage(state.runUsage)
-      if (runState.status !== 'completed') {
+      const adapterMayEvaluateRuntimeFailure = adapter?.evaluateOnRuntimeFailure === true && runState.status !== 'cancelled'
+      const shouldEvaluateWithAdapter = Boolean(adapter && (
+        runState.status === 'completed' || adapterMayEvaluateRuntimeFailure
+      ))
+      if (runState.status !== 'completed' && !shouldEvaluateWithAdapter) {
         const runtimeFailure = runState.failure
           ? failure(runState.failure, runState.failure.code)
           : { code: runState.status === 'cancelled' ? 'EXPERIMENT_CANCELLED' : 'RUNTIME_FAILED', message: `runtime finished with status ${runState.status}`, phase: 'runtime' }
@@ -762,14 +783,15 @@ export class ExperimentManager {
         })
         return
       }
-      if (!actualAnswer) throw new Error('runtime completed without an assistant answer')
-      if (adapter) {
+      if (adapter && shouldEvaluateWithAdapter) {
         const evaluation = await adapter.evaluate(adapterPayload({
           actual: jsonObject({
-            answer: actualAnswer,
+            answer: actualAnswer || null,
             tools: actualTools,
             toolCalls,
             runtimeRunId: runtimeRunId ?? null,
+            runtimeStatus: runState.status,
+            runtimeFailure: runState.failure ?? null,
           }),
         }), { signal: timeoutController.signal })
         trace.adapter = { ...(trace.adapter ?? {}), evaluation }
@@ -798,6 +820,7 @@ export class ExperimentManager {
         })
         return
       }
+      if (!actualAnswer) throw new Error('runtime completed without an assistant answer')
       const score = await this.score(auditedLlm(active.llm, 'scorer', llmRequests), run, item, actualAnswer, actualTools, timeoutController.signal)
       const scoringUsage = usage(score.response.usage)
       trace.scoring = { prompt: score.prompt, response: score.response.text, usage: scoringUsage }
@@ -868,6 +891,14 @@ export class ExperimentManager {
             .filter((artifact) => !runtimeRunId || artifact.meta.runId === runtimeRunId)
             .map((artifact) => ({ meta: artifact.meta, value: artifact.value })),
           renderedMessages: snapshot.renderResult?.messages ?? [],
+          ...(state.projectContextDocument ? { projectContext: {
+            document: state.projectContextDocument,
+            receipts: state.projectContextDocumentReceipts ?? [],
+            projections: state.projectContextDocumentProjections ?? [],
+            reviewReceipts: state.projectContextDocumentReviewReceipts ?? [],
+            evidenceReviewReceipts: state.projectContextDocumentEvidenceReviewReceipts ?? [],
+          } } : {}),
+          ...(state.contextTrainingSamples ? { contextTrainingSamples: state.contextTrainingSamples } : {}),
           ...(adapter ? { adapter: { ...(adapterPrepare === undefined ? {} : { prepare: adapterPrepare }) } } : {}),
         },
         completedAt: new Date().toISOString(),

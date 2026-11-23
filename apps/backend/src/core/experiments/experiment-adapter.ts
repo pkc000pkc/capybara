@@ -27,6 +27,7 @@ interface ExperimentAdapterManifest {
   }
   timeout_ms?: number
   phases?: ExperimentAdapterPhase[]
+  evaluate_on_runtime_failure?: boolean
 }
 
 interface AdapterResponse {
@@ -92,6 +93,7 @@ function manifestValue(value: unknown): ExperimentAdapterManifest {
     },
     timeout_ms: Number(timeoutMs),
     phases: normalizedPhases,
+    ...(value.evaluate_on_runtime_failure === true ? { evaluate_on_runtime_failure: true } : {}),
   }
 }
 
@@ -120,6 +122,7 @@ export class ExperimentAdapterRunner {
   readonly entryFile: string
   readonly timeoutMs: number
   readonly phases: ExperimentAdapterPhase[]
+  readonly evaluateOnRuntimeFailure: boolean
   readonly revision: string
 
   static load(projectDir: string): ExperimentAdapterRunner | undefined {
@@ -156,6 +159,7 @@ export class ExperimentAdapterRunner {
     this.entryFile = realEntry
     this.timeoutMs = manifest.timeout_ms ?? DEFAULT_TIMEOUT_MS
     this.phases = manifest.phases ?? ['prepare', 'evaluate', 'cleanup']
+    this.evaluateOnRuntimeFailure = manifest.evaluate_on_runtime_failure === true
     const revision = createHash('sha256').update(manifestSource).update('\0')
     for (const file of [this.entryFile, ...dependencyFiles]) {
       revision.update(path.relative(this.projectDir, file).replaceAll('\\', '/')).update('\0')
@@ -172,6 +176,7 @@ export class ExperimentAdapterRunner {
       revision: this.revision,
       timeoutMs: this.timeoutMs,
       phases: [...this.phases],
+      ...(this.evaluateOnRuntimeFailure ? { evaluateOnRuntimeFailure: true } : {}),
     }
   }
 

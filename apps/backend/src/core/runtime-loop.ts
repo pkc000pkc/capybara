@@ -208,7 +208,7 @@ import {
 } from '#util/llm'
 import { estimateTokens } from '#util/token-estimate'
 import { blockedToolRequest } from '#core/tools/recovery-policy'
-import { ContextDocumentEngine, contextKnowledgeHash, type ContextDocument } from '#core/context-document-engine'
+import { ContextDocumentEngine, contextKnowledgeHash, type ContextDocument, type ContextDocumentEngineState } from '#core/context-document-engine'
 import { canPromoteToProject, projectAnchorParts, sameContextPlacement, validateContextClassification, type ContextClassification } from '#core/context-classification'
 import { ProjectContextStore } from '#core/project-context-store'
 import { createContextScopesState, type RuntimeContextScopesState } from '#core/context-scope'
@@ -310,6 +310,8 @@ export interface RuntimeLoopOptions {
   contextAssistant?: { llm?: RuntimeLlm; budget?: Partial<AuxiliaryBudget>; modes?: readonly ContextAssistantMode[] }
   sessionId?: string
   contextOrganization?: { enabled?: boolean; minGroups?: number; chunkCharacters?: number; llm?: RuntimeLlm }
+  /** Prevents project-context writes while retaining session-local organization. */
+  projectContextReadOnly?: boolean
   projectDir?: string
   workspaceDir?: string
   /** User-level system resource root. Defaults to ~/.capybara. */
@@ -318,6 +320,8 @@ export interface RuntimeLoopOptions {
   stepDelayMs?: number
   llm?: RuntimeLlm
   initialState?: RuntimeLoopState
+  /** Optional frozen project context supplied by a benchmark or replay snapshot. */
+  initialProjectContext?: ContextDocumentEngineState
   /** Isolated experiment inputs, resolved against the effective plugin registry. */
   initialVariableOverrides?: Record<string, string>
   skillMarketplace?: RuntimeSkillMarketplace
@@ -533,6 +537,7 @@ export class RuntimeLoop extends Loop {
   private childService?: RuntimeChildService
   private readonly childRecords = new Map<string, ChildRecord>()
   private readonly childAgentMode: boolean
+  private readonly projectContextReadOnly: boolean
   private readonly hookRegistry: HookRegistry
   private llm: RuntimeLlm
   private readonly projectLlmEnabled: boolean
@@ -758,6 +763,7 @@ export class RuntimeLoop extends Loop {
     this.childAgentHost = options.childAgentHost
     this.childAgentEnabled = options.childAgentEnabled === true
     this.childAgentMode = options.childAgentMode === true
+    this.projectContextReadOnly = options.projectContextReadOnly === true
     this.requireInitialPlanning = options.planningRequired === true
     this.hookRegistry = new HookRegistry(this.projectDir, this.systemDir)
     this.toolDispatcher = new ToolDispatcher(this.toolRegistry, this.workspaceDir, {
@@ -831,11 +837,19 @@ export class RuntimeLoop extends Loop {
       this.projectDir,
       V2_CONSTITUTION_REVISION,
     )
-    this.projectContextDocumentEngine = this.projectContextStore.load(options.initialState?.projectContextDocument ? {
-      document: options.initialState.projectContextDocument, receipts: options.initialState.projectContextDocumentReceipts ?? [],
-      projections: options.initialState.projectContextDocumentProjections ?? [], reviewReceipts: options.initialState.projectContextDocumentReviewReceipts ?? [],
-      evidenceReviewReceipts: options.initialState.projectContextDocumentEvidenceReviewReceipts ?? [],
-    } : undefined)
+    this.projectContextDocumentEngine = options.initialProjectContext
+      ? new ContextDocumentEngine(
+        options.initialProjectContext.document,
+        options.initialProjectContext.receipts,
+        options.initialProjectContext.projections,
+        options.initialProjectContext.reviewReceipts,
+        options.initialProjectContext.evidenceReviewReceipts,
+      )
+      : this.projectContextStore.load(options.initialState?.projectContextDocument ? {
+        document: options.initialState.projectContextDocument, receipts: options.initialState.projectContextDocumentReceipts ?? [],
+        projections: options.initialState.projectContextDocumentProjections ?? [], reviewReceipts: options.initialState.projectContextDocumentReviewReceipts ?? [],
+        evidenceReviewReceipts: options.initialState.projectContextDocumentEvidenceReviewReceipts ?? [],
+      } : undefined)
     this.contextScopesState = createContextScopesState({
       document: this.contextDocumentEngine.snapshot(),
       projectDocumentId: this.projectContextDocumentEngine.snapshot().id,
@@ -1394,6 +1408,7 @@ export class RuntimeLoop extends Loop {
 
   private projectObservationGate(observation: RuntimeContextObservation, engine: ContextDocumentEngine): string | undefined {
     if (this.childAgentMode) return 'CHILD_AGENT_PROJECT_CONTEXT_READONLY'
+    if (this.projectContextReadOnly) return 'PROJECT_CONTEXT_READONLY'
     const snapshot = engine.snapshot()
     const existing = snapshot.candidates.find((candidate) => (
       candidate.source.actor === observation.candidate.source.actor
@@ -1407,6 +1422,7 @@ export class RuntimeLoop extends Loop {
 
   private projectProposalGate(proposal: RuntimeContextDiffProposal, engine: ContextDocumentEngine): string | undefined {
     if (this.childAgentMode) return 'CHILD_AGENT_PROJECT_CONTEXT_READONLY'
+    if (this.projectContextReadOnly) return 'PROJECT_CONTEXT_READONLY'
     const snapshot = engine.snapshot()
     const candidate = snapshot.candidates.find((item) => item.id === proposal.candidateId)
     if (!candidate) return 'CANDIDATE_NOT_IN_PROJECT_SCOPE'
@@ -1429,6 +1445,7 @@ export class RuntimeLoop extends Loop {
 
   private promoteSessionCandidateToProject(candidateId: string): void {
     if (this.childAgentMode) throw new CommandError('FORBIDDEN', 'CHILD_AGENT_PROJECT_CONTEXT_READONLY')
+    if (this.projectContextReadOnly) throw new CommandError('FORBIDDEN', 'PROJECT_CONTEXT_READONLY')
     const sessionSnapshot = this.contextDocumentEngine.snapshot()
     const candidate = sessionSnapshot.candidates.find((item) => item.id === candidateId)
     if (!candidate) throw new CommandError('INVALID_PAYLOAD', 'CANDIDATE_NOT_FOUND_IN_SESSION_SCOPE')
@@ -1494,6 +1511,7 @@ export class RuntimeLoop extends Loop {
 
   private persistProjectContext(previousRevision: number, outcomes: ContextOutcome[] = []): void {
     if (this.childAgentMode) throw new CommandError('FORBIDDEN', 'CHILD_AGENT_PROJECT_CONTEXT_READONLY')
+    if (this.projectContextReadOnly) throw new CommandError('FORBIDDEN', 'PROJECT_CONTEXT_READONLY')
     this.projectContextStore.save(this.projectContextDocumentEngine, previousRevision, this.sessionId, outcomes)
     if (this.projectContextStore.mirrorError) this.createArtifact('runtime-error', 'Context mirror export delayed', { canonicalStore: 'committed', error: this.projectContextStore.mirrorError })
   }
@@ -4703,7 +4721,7 @@ export class RuntimeLoop extends Loop {
           const promptBindings = v2PromptManifest(referenceBinding ? ['context-organizer'] : ['constitution', 'context-organizer'])
           const artifact = this.createArtifact('model-request', 'Context organizer input', toJsonValue({ ...bounded,
             provider, protocol, model, ...(referenceBinding ? { referenceBinding } : {}), promptBindings, documentView }), correlationId)
-          const budgetScope = this.modelBudgetScope()
+          const budgetScope = this.modelBudgetScope('organize')
           const actorSessionId = this.sessionId ?? budgetScope.sessionId
           const attempt: RecordedOrganizationAttempt = { messages: clone(bounded.messages), rawOutput: '',
             ...(referenceBinding ? { referenceBinding } : {}), requestEvidence: {
@@ -4728,7 +4746,9 @@ export class RuntimeLoop extends Loop {
           rawArtifactId: sourceMessage.sourceArtifactId ?? sourceMessage.id, normalizedContent: sourceMessage.message.content,
           ...(classification ? { classification } : {}),
         }, evidence: { kind: sourceMessage.origin === 'user' ? 'message' : 'artifact', referenceId: sourceMessage.sourceArtifactId ?? sourceMessage.id } }, engine),
-        projectCandidateGate: ({ classification, evidenceRefs, engine }) => this.childAgentMode ? 'CHILD_AGENT_PROJECT_CONTEXT_READONLY' : this.projectAnchorAuthenticity(classification, evidenceRefs, engine.snapshot().evidence),
+        projectCandidateGate: ({ classification, evidenceRefs, engine }) => (this.childAgentMode || this.projectContextReadOnly)
+          ? (this.childAgentMode ? 'CHILD_AGENT_PROJECT_CONTEXT_READONLY' : 'PROJECT_CONTEXT_READONLY')
+          : this.projectAnchorAuthenticity(classification, evidenceRefs, engine.snapshot().evidence),
       })
       if (!result) {
         this.recordOrganizationTrainingSafely(sampleId, history, attempts, undefined, 'NO_CONTEXT_UPDATE_PROPOSED')
@@ -4742,6 +4762,7 @@ export class RuntimeLoop extends Loop {
         || this.contextDocumentEngine.snapshot().revision !== before.session.document.revision
         || this.projectContextDocumentEngine.snapshot().revision !== before.project.document.revision) throw new Error('CONTEXT_ORGANIZATION_SNAPSHOT_STALE')
       const projectChanged = result.project.document.revision !== before.project.document.revision
+      if (this.projectContextReadOnly && projectChanged) throw new Error('PROJECT_CONTEXT_READONLY')
       this.projectContextStore.commits.commit({ ...result, sessionId, expectedProjectRevision: before.project.document.revision,
         expectedSessionRevision, projectChanged, receiptIds: [...result.receipts.map((item) => item.id), ...result.archives.map((item) => item.receiptId)] })
       committed = true
@@ -8227,18 +8248,22 @@ export class RuntimeLoop extends Loop {
     return configured.includes(mode) && (!this.childAgentMode || mode === 'normalize' || mode === 'recall')
   }
 
-  private modelBudgetScope(): ModelBudgetScope {
-    return this.childExecution?.parent ?? {
+  private modelBudgetScope(role?: ModelBudgetRole): ModelBudgetScope {
+    const base = this.childExecution?.parent ?? {
       sessionId: this.sessionId ?? this.contextDocumentEngine.snapshot().sessionId,
       taskId: this.taskControl.taskId || 'idle-context',
       runId: this.run.runId ?? 'idle-context',
     }
+    return role === 'organize' ? { ...base, runId: `${base.runId}:organize` } : base
   }
 
   getModelBudgetSummary() {
     if (this.closed || (!this.modelMeter && !this.run.runId)) return undefined
     const meter = this.modelMeter ??= new RuntimeModelMeter(this.projectDir)
-    return meter.store.totals(this.modelBudgetScope())
+    const primary = meter.store.totals(this.modelBudgetScope())
+    if (!primary) return undefined
+    const organizer = meter.store.totals(this.modelBudgetScope('organize'))
+    return organizer ? { ...primary, organizer } : primary
   }
 
   private resolveModelBudgetLimits(context: ReturnType<ProjectResources['readSettings']>['context']): ModelBudgetLimits {

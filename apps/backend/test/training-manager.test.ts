@@ -7,11 +7,13 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 
 import { DatasetStore } from '#core/datasets/dataset-store'
+import { ContextDocumentEngine } from '#core/context-document-engine'
 import { ExperimentManager } from '#core/experiments/experiment-manager'
 import { EMPTY_EXPERIMENT_METRICS, ExperimentStore } from '#core/experiments/experiment-store'
 import { compareTrainingRuns, createTrainingVariableDiff } from '#core/experiments/training/training-analysis'
 import { TrainingManager } from '#core/experiments/training/training-manager'
 import { applyUnifiedDiff } from '#core/experiments/training/unified-diff'
+import { ProjectContextStore } from '#core/project-context-store'
 import { initializeProjectDirectory } from '#core/project-initializer'
 import { ProjectResources } from '#core/project-resources'
 import { RuntimeLoop, type RuntimeLlm } from '#core/runtime-loop'
@@ -43,6 +45,51 @@ test('training rejects datasets marked as closed-book evaluation data', async (c
     trainDatasetId: train.id,
     testDatasetId: testDataset.id,
   }), /evaluation-only and cannot be used for training/)
+})
+
+test('training imports a child Project Context trace into the canonical project store', async (context) => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capybara-training-project-context-'))
+  initializeProjectDirectory(projectDir)
+  const manager = new TrainingManager(projectDir, undefined as unknown as ExperimentManager)
+  const now = '2026-11-23T00:00:00.000Z'
+  const runId = 'training-project-context-merge'
+  const caseId = 'training-project-context-case'
+  const config = {
+    trainDatasetId: 'train', testDatasetId: 'test', trainLimit: 1, testLimit: 0,
+    learningMode: 'auto', reviewScope: 'failed', pauseOnFailure: false, variableSource: 'project',
+    maxCorrectionAttempts: 1, maxCorrectionTokens: 10_000, maxCorrectionWallTimeMs: 10_000,
+    maxReplayRevisions: 1, experienceExtractorHook: { hookId: 'none', parameters: {} }, timeoutMs: 10_000, concurrency: 1,
+  }
+  const run = manager.store.createRun({
+    id: runId, name: 'Project Context merge', status: 'queued', config,
+    createdAt: now, updatedAt: now,
+  } as any, [{
+    id: caseId, runId, phase: 'training', datasetId: 'train', sampleId: 'sample', ordinal: 0, status: 'queued',
+    question: 'question', thinking: '', expectedAnswer: '', actualAnswer: '', expectedTools: [], actualTools: [],
+    toolCalls: [], usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0 },
+    failurePauseHandled: false, attempt: 0, createdAt: now, updatedAt: now,
+  } as any])
+  const child = ContextDocumentEngine.create({ sessionId: 'project-context', projectId: projectDir, constitutionRevision: 'test' })
+  child.observe({
+    candidate: {
+      source: { actor: 'memory', sourceId: 'training-methodology', capturedAt: now },
+      rawArtifactId: 'training-methodology', normalizedContent: '训练项目规则来自可验证的失败反思。',
+      classification: { durability: 'project', target: 'project', confidence: 'high', reason: '跨任务方法论', projectAnchors: ['project:file:main.j2'] },
+    },
+    evidence: { kind: 'artifact', referenceId: 'training-methodology', confidence: 'high' },
+  })
+  try {
+    const merge = (manager as unknown as { mergeTrainingProjectContext(run: unknown, item: unknown, detail: unknown): void }).mergeTrainingProjectContext
+    merge.call(manager, run, { id: caseId, phase: 'training' }, { trace: { projectContext: child.exportState() } })
+    const store = new ProjectContextStore(projectDir, projectDir, 'test')
+    try {
+      assert.ok(store.load().snapshot().candidates.some((candidate) => candidate.source.sourceId === 'training-methodology'))
+      assert.ok(manager.store.listRuns().some((item) => item.id === runId))
+    } finally { store.close() }
+  } finally {
+    await manager.close()
+    context.after(() => fs.rmSync(projectDir, { recursive: true, force: true }))
+  }
 })
 
 test('interrupted experiments retain completed cases and requeue only the active case', (context) => {
@@ -533,8 +580,25 @@ test('training runs evaluation, Hook extraction, replay, snapshot, and held-out 
     assert.equal(training.list().some((item) => item.id === created.id), true)
     assert.match(training.experiences(created.id)[0]?.rationale ?? '', /observable tool calls/)
 
+    const projectContextStore = new ProjectContextStore(projectDir, projectDir, 'test-training-context')
+    const projectContextEngine = projectContextStore.load()
+    projectContextEngine.observe({
+      candidate: {
+        source: { actor: 'user', sourceId: 'training-project-rule', capturedAt: '2026-11-20T00:00:00.000Z' },
+        rawArtifactId: 'training-project-rule',
+        normalizedContent: '训练快照必须冻结项目级上下文。',
+        classification: { durability: 'project', target: 'project', confidence: 'high', reason: '训练运行的项目规则', projectAnchors: ['project:file:main.j2'] },
+      },
+      evidence: { kind: 'message', referenceId: 'training-project-rule', confidence: 'high' },
+    })
+    projectContextStore.save(projectContextEngine, 0, 'training-project-rule')
+    projectContextStore.close()
+
     const snapshot = training.freeze(created.id)
     assert.match(snapshot.variables.agent_identity ?? '', /learned replay rule/)
+    assert.equal(snapshot.projectContext?.document.projectId, projectDir)
+    assert.ok(snapshot.projectContext?.document.candidates.some((candidate) => candidate.source.sourceId === 'training-project-rule'))
+    assert.deepEqual(training.store.getSnapshot(created.id)?.projectContext, snapshot.projectContext)
     assert.equal(training.cases(created.id).find((item) => item.phase === 'testing')?.reference.status, 'locked')
     const repeatedEvaluation = training.createSnapshotEvaluation(created.id, {
       name: 'Repeat held-out from frozen snapshot',

@@ -61,6 +61,7 @@ export interface ExperimentAdapterSnapshot {
   revision: string
   timeoutMs: number
   phases: Array<'prepare' | 'evaluate' | 'cleanup' | 'aggregate' | 'reference'>
+  evaluateOnRuntimeFailure?: boolean
 }
 
 export type ExperimentEvaluatorSnapshot =
@@ -213,6 +214,8 @@ export interface ExperimentTrace {
   effectiveContexts: RuntimeEffectiveContextRevision[]
   artifacts: Array<{ meta: RuntimeArtifactMeta; value: unknown }>
   renderedMessages: Array<{ role: string; content: string }>
+  projectContext?: import('#core/context-document-engine').ContextDocumentEngineState
+  contextTrainingSamples?: import('#core/context-training-recorder').ContextTrainingSample[]
   scoring?: {
     prompt: string
     response: string

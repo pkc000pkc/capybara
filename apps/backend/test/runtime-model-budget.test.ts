@@ -217,3 +217,29 @@ test('durable reservations bind all roles across connections and cannot be resto
     assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM runtime_model_budget_attempts').get()?.count, 0)
   } finally { reopened.close(); f.close() }
 })
+
+test('organizer reservations use an isolated budget scope from the actor run', async () => {
+  const f = fixture()
+  const calls: string[] = []
+  const base: RuntimeLlm = {
+    getConfig: () => config,
+    chat: async () => {
+      calls.push('model')
+      return { provider: 'custom', model: config.model, text: 'ok', finishReason: 'stop', raw: {}, usage: { inputTokens: 20, outputTokens: 2, totalTokens: 22 } }
+    },
+  }
+  const organizerScope = { ...scope, runId: `${scope.runId}:organize` }
+  try {
+    await f.meter.wrap(base, { ...options, limits: { maxAttempts: 1, maxTokens: 500 }, role: 'main' }).chat(request)
+    await f.meter.wrap(base, { ...options, scope: organizerScope, actorSessionId: scope.sessionId, limits: { maxAttempts: 1, maxTokens: 500 }, role: 'organize' }).chat(request)
+    assert.equal(calls.length, 2)
+    assert.equal(f.meter.store.totals(scope)?.attempts, 1)
+    assert.equal(f.meter.store.totals(scope)?.remainingAttempts, 0)
+    assert.equal(f.meter.store.totals(organizerScope)?.attempts, 1)
+    assert.equal(f.meter.store.totals(organizerScope)?.remainingAttempts, 0)
+    await assert.rejects(
+      f.meter.wrap(base, { ...options, scope, limits: { maxAttempts: 1, maxTokens: 500 }, role: 'main' }).chat(request),
+      code('RUNTIME_MODEL_BUDGET_EXHAUSTED'),
+    )
+  } finally { f.close() }
+})

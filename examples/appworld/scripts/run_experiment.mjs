@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { validateProjectContextLeak } from './validate_project_context_leak.mjs'
 
 function parseArgs(argv) {
   const options = {
@@ -26,6 +27,7 @@ function parseArgs(argv) {
       else if (key === 'name') options.name = value
       else if (key === 'run-id') options.runId = value
       else if (key === 'output') options.output = value
+      else if (key === 'project-context') options.projectContext = value
       else if (key === 'concurrency') options.concurrency = Number(value)
       else if (key === 'repetitions') options.repetitions = Number(value)
       else if (key === 'timeout-ms') options.timeoutMs = Number(value)
@@ -40,6 +42,9 @@ function usage() {
   return `Usage:
   node scripts/run_experiment.mjs --dataset <id> [--name <name>] [--concurrency 1-4]
   node scripts/run_experiment.mjs --run-id <id>
+
+  Add --project-context <path> to validate the frozen project context against
+  AppWorld training or test references before starting a new run.
 
 The project must be committed and clean before a new experiment starts.`
 }
@@ -78,6 +83,26 @@ async function allCases(options, runId) {
   }
 }
 
+async function validateProjectContext(options) {
+  if (!options.projectContext || !options.datasetId) return undefined
+  const registry = JSON.parse(await fs.readFile(path.join(path.resolve(options.project), '.capybara', 'datasets.json'), 'utf8'))
+  const dataset = registry.items?.find(item => item.id === options.datasetId)
+  if (!dataset) throw new Error(`dataset ${options.datasetId} was not found in .capybara/datasets.json`)
+  const datasetDir = path.resolve(options.project, dataset.path)
+  const dataDir = path.join(datasetDir, 'data')
+  const files = (await fs.readdir(dataDir)).filter(file => file.endsWith('.jsonl')).sort()
+  if (files.length !== 1) throw new Error(`expected exactly one JSONL file in ${dataDir}`)
+  const contextFile = path.resolve(options.project, options.projectContext)
+  const result = validateProjectContextLeak({
+    context: JSON.parse(await fs.readFile(contextFile, 'utf8')),
+    dataset: path.join(dataDir, files[0]),
+    tasksRoot: path.join(path.resolve(options.project), '.venv', 'appworld-root', 'data', 'tasks'),
+  })
+  console.log(JSON.stringify({ projectContext: contextFile, dataset: options.datasetId, leakCheck: result }, null, 2))
+  if (!result.ok) throw new Error(`project context leak check failed with ${result.leaks.length} match(es)`)
+  return result
+}
+
 async function report(options, run) {
   const cases = await allCases(options, run.id)
   const tools = await request(projectUrl(options, `/api/experiments/${run.id}/tools`))
@@ -89,6 +114,7 @@ async function report(options, run) {
   const value = {
     generatedAt: new Date().toISOString(),
     run,
+    ...(options.projectContextValidation ? { projectContextValidation: options.projectContextValidation } : {}),
     statusCounts,
     cases,
     tools: tools.items,
@@ -121,6 +147,7 @@ async function main() {
   if (options.runId) {
     run = await request(projectUrl(options, `/api/experiments/${options.runId}`))
   } else {
+    options.projectContextValidation = await validateProjectContext(options)
     run = await request(projectUrl(options, '/api/experiments'), {
       method: 'POST',
       body: JSON.stringify({

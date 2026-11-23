@@ -141,7 +141,7 @@ function commitProject(projectDir: string, message: string): void {
   git(projectDir, 'commit', '-m', message)
 }
 
-function writeExperimentAdapter(projectDir: string, evaluationStatus: 'passed' | 'unscored' = 'passed'): void {
+function writeExperimentAdapter(projectDir: string, evaluationStatus: 'passed' | 'unscored' = 'passed', evaluateOnRuntimeFailure = false): void {
   const manifestFile = path.join(projectDir, '.capybara', 'experiment-adapter.json')
   const entryFile = path.join(projectDir, 'experiments', 'deterministic-adapter.mjs')
   fs.mkdirSync(path.dirname(manifestFile), { recursive: true })
@@ -150,6 +150,7 @@ function writeExperimentAdapter(projectDir: string, evaluationStatus: 'passed' |
     version: 1,
     runner: { type: 'stdio', entry: 'experiments/deterministic-adapter.mjs' },
     timeout_ms: 10_000,
+    ...(evaluateOnRuntimeFailure ? { evaluate_on_runtime_failure: true } : {}),
     phases: ['prepare', 'evaluate', 'cleanup', 'aggregate'],
   }, null, 2)}\n`, 'utf8')
   fs.writeFileSync(entryFile, `import fs from 'node:fs'
@@ -684,6 +685,7 @@ test('project experiment adapters own case lifecycle, deterministic evaluation, 
   assert.equal(detail.evaluation.reference.displayValue, 'Official fixture answer')
   assert.equal(detail.trace.adapter.prepare.taskId, 'scenario_1')
   assert.equal(detail.trace.adapter.evaluation.details.task_id, 'scenario_1')
+  assert.ok(detail.trace.projectContext?.document)
   assert.equal(detail.trace.scoring, undefined)
 
   const caseFile = path.join(projectDir, '.capybara', 'worktrees', run.id, caseId, '.capybara', 'experiment-case.json')
@@ -747,4 +749,50 @@ test('project adapters persist unscored as a terminal case without a false score
   assert.equal(item.status, 'unscored')
   assert.equal(item.score, undefined)
   assert.equal(item.passed, undefined)
+})
+
+test('project adapters may evaluate completed environment state after runtime failure', async (context) => {
+  const projectDir = temporaryExperimentProject()
+  let app: Awaited<ReturnType<typeof buildApp>> | undefined
+  context.after(async () => {
+    await app?.close()
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  })
+  writeExperimentAdapter(projectDir, 'passed', true)
+  const datasets = new DatasetStore(projectDir)
+  const dataset = datasets.create({ name: 'Runtime failure evaluation', storage: 'jsonl', path: 'datasets/runtime-failure.jsonl', scoringPrompt: '' })
+  datasets.createRecord(dataset.id, {
+    question: 'Evaluate the environment even when the actor fails.',
+    answer: '',
+    metadata: { public: { task_id: 'runtime-failure-1' } },
+  })
+  commitProject(projectDir, 'test: adapter evaluates runtime failure')
+  const llm: RuntimeLlm = {
+    async chat() { throw new Error('actor model unavailable after environment mutation') },
+    getConfig: () => ({
+      provider: 'custom', protocol: 'responses', model: 'adapter-test-model',
+      baseUrl: 'http://127.0.0.1/unused', timeoutMs: 1_000, maxRetries: 0,
+    }),
+  }
+  app = await buildApp({ runtimeLoop: { projectDir, llm, streamDelayMs: 0, stepDelayMs: 0 } })
+  const projectQuery = `projectPath=${encodeURIComponent(projectDir)}`
+  const started = await app.inject({
+    method: 'POST',
+    url: `/api/experiments?${projectQuery}`,
+    payload: { datasetId: dataset.id, concurrency: 1, repetitions: 1, timeoutMs: 10_000, keepWorkspaces: true },
+  })
+  assert.equal(started.statusCode, 202, started.body)
+  const run = await waitForRun(app, projectQuery, started.json().id)
+  assert.equal(run.status, 'completed', JSON.stringify(run.failure))
+  const cases = await app.inject({ method: 'GET', url: `/api/experiments/${run.id}/cases?${projectQuery}` })
+  const item = cases.json().items[0]
+  assert.equal(item.status, 'passed')
+  const detail = await app.inject({ method: 'GET', url: `/api/experiments/${run.id}/cases/${item.id}?${projectQuery}` })
+  const value = detail.json()
+  assert.equal(value.evaluation.source, 'project')
+  assert.equal(value.evaluation.details.task_id, 'runtime-failure-1')
+  assert.equal(value.trace.adapter.evaluation.details.task_id, 'runtime-failure-1')
+  assert.match(value.trace.failure.message, /actor model unavailable/u)
+  const events = fs.readFileSync(path.join(projectDir, '.capybara', 'worktrees', run.id, item.id, '.capybara', 'adapter-events.jsonl'), 'utf8')
+  assert.match(events, /"phase":"evaluate"/u)
 })
