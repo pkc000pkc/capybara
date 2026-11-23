@@ -530,6 +530,20 @@ test('organizer creates evidence-bound document diffs and preserves both conflic
   assert.equal(result.history.messages[2]?.rawContent, history.snapshot().messages[2]?.rawContent)
 })
 
+test('organizer uses the caller-provided output budget and a non-truncating default', async () => {
+  const run = async (maxOutputTokens?: number) => {
+    const { history, project, session } = fixture()
+    let observed: number | undefined
+    const result = await organizeContext({ history: history.snapshot(), project: project.exportState(), session: session.exportState(), runtimeState: {},
+      originalSystemPrompt: '客服解题助手', ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+      chat: async request => { observed = request.maxTokens; return organizeResponse(request) }, projectGate: () => undefined })
+    assert.ok(result)
+    return observed
+  }
+  assert.equal(await run(), 8192)
+  assert.equal(await run(1234), 1234)
+})
+
 test('reference drafts resolve a heading edit from visible nodes and attach genuine source evidence', async () => {
   const { history, project, session } = fixture()
   const result = await organizeContext({ version: 2, history: history.snapshot(), project: project.exportState(),

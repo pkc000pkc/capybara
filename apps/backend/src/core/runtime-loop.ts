@@ -309,7 +309,7 @@ export interface RuntimeLoopOptions {
   planningRequired?: boolean
   contextAssistant?: { llm?: RuntimeLlm; budget?: Partial<AuxiliaryBudget>; modes?: readonly ContextAssistantMode[] }
   sessionId?: string
-  contextOrganization?: { enabled?: boolean; minGroups?: number; chunkCharacters?: number; llm?: RuntimeLlm }
+  contextOrganization?: { enabled?: boolean; minGroups?: number; chunkCharacters?: number; maxOutputTokens?: number; llm?: RuntimeLlm }
   /** Prevents project-context writes while retaining session-local organization. */
   projectContextReadOnly?: boolean
   projectDir?: string
@@ -4705,7 +4705,9 @@ export class RuntimeLoop extends Loop {
           archivedSpanReceipt: span => commits.archivedSpanReceipt(sessionId, span.messageId, span.start, span.end, span.sourceHash) } : {}),
         ...(retainedObservationIds.size ? { retainedObservationIds } : {}),
         protectedMessageIds: history.messages.filter((item) => item.message.role === 'tool' && this.timeline.some((step) => hasUnknownToolOutcome(step) && step.detail?.callId === item.message.toolCallId)).map((item) => item.id),
-        chunkCharacters: this.contextOrganization.chunkCharacters, signal: controller.signal,
+        chunkCharacters: this.contextOrganization.chunkCharacters,
+        maxOutputTokens: this.contextOrganization.maxOutputTokens ?? this.reservedOutputTokens,
+        signal: controller.signal,
         ...(this.contextAssistantEnabled('normalize') && this.sessionId && this.run.runId ? {
           normalize: async (_snapshotId, sources) => {
             const input = { visibleSources: sources, sourceIds: sources.map(source => source.id),

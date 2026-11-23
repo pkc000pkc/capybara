@@ -203,14 +203,15 @@ docs/appworld-v2-formal-training-round1-plan-2026-11-23.md
 | 单 Case 冒烟 | 已完成 |
 | 64K 输出预留正式运行 | 因预算预留放大而停止 |
 | Organizer Profile 凭据加载 | 已通过通用运行时修复，独立 Organizer 请求可成功记录 |
+| Organizer 输出预算 | 已修复固定 4096 截断，改为使用 RuntimeLoop 的 `reserved_output_tokens`，并增加回归测试；需在额度恢复后用正式批次确认实际提交 |
 | 8K 输出预留正式运行 | 已因提供商 token 窗口保护停止，保留分批报告 |
 | 90 Case 正式训练 | 已因提供商 token 窗口保护停止，Run ID `a63e95d0-2088-42fa-b136-75c93bb825a4`，已完成 42/90 |
 
-本轮在 42/90 个 Case 完成后主动触发额度窗口保护并停止。已完成 Case 中 10 个通过、30 个官方任务质量失败、2 个运行时超时，48 个 Case 因停止而取消。累计 agent token 使用约 5.41M，未观察到 401、403 或 429。后续应在窗口恢复后按 cancelled 清单续跑，不重复已经完成的 Case，再执行完整闭环、覆盖和答案隔离审计。
+本轮在 42/90 个 Case 完成后主动触发额度窗口保护并停止。已完成 Case 中 10 个通过、30 个官方任务质量失败、2 个运行时超时，48 个 Case 因停止而取消。累计 agent token 使用约 5.41M，未观察到 401、403 或 429。对已完成 Case 的 Trace 审计显示，42 个 Context Training Sample 的 Organizer 决策均因 `CONTEXT_ORGANIZATION_OUTPUT_TRUNCATED` 被拒绝，Project Context revision 均为 0。这是运行时输出预算配置问题，不归因于 AppWorld 题目能力。已将 Organizer 的固定 4096 输出预算改为由 RuntimeLoop 传入的保留输出预算，修复后需在额度恢复时先抽查组织提交，再按 cancelled 清单续跑，不重复已经完成的 Case。
 
 ## 8. 下一步
 
-1. 等待提供商窗口恢复，在额度守门下从取消报告续跑剩余 Case。
+1. 等待提供商窗口恢复，在额度守门下从取消报告续跑剩余 Case。续跑前先用短批次确认 Organizer 不再因输出截断拒绝。
 2. 对模型质量失败、基础设施失败、额度停止和取消分别归类，不用题目特化逻辑修复模型质量失败。
 3. 续跑完成后执行答案隔离、Project Context Revision、Cache 归档/召回、A2A、DAG 和 Reflection 覆盖审计。
 4. 核对训练快照、Runtime Trace、Context Training Sample、官方评估和分批报告的完整性。

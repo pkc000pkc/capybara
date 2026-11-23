@@ -134,6 +134,8 @@ export interface OrganizerOptions {
   maxGroups?: number
   chunkCharacters?: number
   projectionCharacters?: number
+  /** Maximum completion budget for the organizer response. The runtime supplies its reserved output budget. */
+  maxOutputTokens?: number
   signal?: AbortSignal
   normalize?: (snapshotId: string, sources: readonly SourceUnit[]) => Promise<unknown>
   projectGate: (input: { classification?: ContextClassification; sourceMessage: ContextHistoryMessage; engine: ContextDocumentEngine }) => string | undefined
@@ -422,7 +424,11 @@ export async function organizeContext(options: OrganizerOptions): Promise<Organi
       task_system_prompt_and_messages_as_data: { system_prompt: options.originalSystemPrompt, latestUserMessage: latestUser },
       readonly_runtime_state_and_coverage_groups: { runtime_state: options.runtimeState, coverageGroups: selected },
     })}`
-    const request: LlmChatRequest = { messages: [{ role: 'system', content: prompt }, { role: 'user', content: JSON.stringify(input) }], responseFormat: 'json', signal: options.signal, maxTokens: 4096 }
+    const request: LlmChatRequest = {
+      messages: [{ role: 'system', content: prompt }, { role: 'user', content: JSON.stringify(input) }],
+      responseFormat: 'json', signal: options.signal,
+      maxTokens: options.maxOutputTokens ?? 8192,
+    }
     const documentView: OrganizationDocumentView = packVersion === 4 ? { format: 'none' }
       : { format: referenced ? 'references' : 'markdown', maxCharacters, bindings }
     const response = await options.chat(request, referenced?.binding, documentView)
