@@ -117,6 +117,14 @@ project context: writable during training
 
 汇总任务完成率、TGC、SGC、工具指标和 Runtime 失败，统计 A2A、DAG、Cache、Archive、Recall 和 Reflection 的实际覆盖，对 Project Context 执行答案泄露检查，校验每个 Revision 的 Candidate、Evidence 和 Apply Receipt，抽查失败、拒绝、冲突和归档样本，导出训练快照、Trace、数据库摘要和评估结果。
 
+## 4.1 提供商额度窗口处理
+
+AppWorld 的批量运行必须显式配置提供商的窗口 token 上限和安全余量。运行器每轮读取已完成 Case 的 `usage.totalTokens`，达到 `窗口上限 - 安全余量` 后停止继续消耗并取消当前 Run。当前 Case 的结果和已完成 Case 的报告先落盘，未执行 Case 保留为 cancelled 清单。
+
+额度停止属于外部资源边界，不改变 Case 输入、评估器或任务逻辑。下一次窗口恢复后，运行器从上一份报告中提取 cancelled、queued 和 running 的 sample id 建立新的批次。已完成的 passed、failed 和 error Case 不重复执行，除非显式指定新的样本集合。
+
+额度守门记录窗口上限、安全余量、触发时已观测 token、Run ID、停止时间和恢复批次来源。额度耗尽、模型质量失败、Case 超时和官方评估失败分别统计，不能合并成同一种失败。
+
 ## 5. 验收标准
 
 ### 5.1 运行完整性
@@ -181,15 +189,15 @@ docs/appworld-v2-formal-training-round1-plan-2026-11-23.md
 | 64K 输出预留正式运行 | 因预算预留放大而停止 |
 | Organizer Profile 凭据加载 | 已通过通用运行时修复，独立 Organizer 请求可成功记录 |
 | 8K 输出预留正式运行 | 已启动，当前运行中 |
-| 90 Case 正式训练 | 运行中，Run ID `a63e95d0-2088-42fa-b136-75c93bb825a4`，已完成 30/90 |
+| 90 Case 正式训练 | 已因提供商 token 窗口保护停止，Run ID `a63e95d0-2088-42fa-b136-75c93bb825a4`，已完成 42/90 |
 
-当前正式运行没有检测到 401、403、429 或额度拒绝。已完成 30/90 个 Case，其中 10 个通过、18 个为官方任务质量失败、2 个达到单 Case 运行时限。后续 Case 仍能继续启动，新增失败抽查均为任务目标未完成，未伴随 Runtime、HTTP、Organizer 或额度异常。超时仍按 Case 级活动运行时事件观察，若继续出现连续运行时超时，将按停止条件终止本轮。模型质量失败和超时均没有转化为题目特化逻辑。正式运行结束后仍需进行闭环、覆盖和答案隔离审计。
+本轮在 42/90 个 Case 完成后主动触发额度窗口保护并停止。已完成 Case 中 10 个通过、30 个官方任务质量失败、2 个运行时超时，48 个 Case 因停止而取消。累计 agent token 使用约 5.41M，未观察到 401、403 或 429。后续应在窗口恢复后按 cancelled 清单续跑，不重复已经完成的 Case，再执行完整闭环、覆盖和答案隔离审计。
 
 ## 8. 下一步
 
-1. 持续监控 90 Case 第一轮正式训练，记录进度、预算、HTTP 状态、工具结果和上下文审计事件。
-2. 对模型质量失败、基础设施失败、取消和重试分别归类，不用题目特化逻辑修复模型质量失败。
-3. 训练结束后执行答案隔离、Project Context Revision、Cache 归档/召回、A2A、DAG 和 Reflection 覆盖审计。
-4. 核对训练快照、Runtime Trace、Context Training Sample、官方评估和最终报告的完整性。
-5. 仅在终态和审计均满足验收条件后，决定是否进入验证集。
+1. 等待提供商窗口恢复，在额度守门下从取消报告续跑剩余 Case。
+2. 对模型质量失败、基础设施失败、额度停止和取消分别归类，不用题目特化逻辑修复模型质量失败。
+3. 续跑完成后执行答案隔离、Project Context Revision、Cache 归档/召回、A2A、DAG 和 Reflection 覆盖审计。
+4. 核对训练快照、Runtime Trace、Context Training Sample、官方评估和分批报告的完整性。
+5. 仅在所有批次终态和审计均满足验收条件后，决定是否进入验证集。
 

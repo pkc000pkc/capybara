@@ -10,6 +10,7 @@ function parseArgs(argv) {
     repetitions: 1,
     timeoutMs: 900000,
     pollMs: 10000,
+    quotaSafetyMarginTokens: 250000,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -32,6 +33,10 @@ function parseArgs(argv) {
       else if (key === 'repetitions') options.repetitions = Number(value)
       else if (key === 'timeout-ms') options.timeoutMs = Number(value)
       else if (key === 'poll-ms') options.pollMs = Number(value)
+      else if (key === 'quota-window-tokens') options.quotaWindowTokens = Number(value)
+      else if (key === 'quota-safety-margin-tokens') options.quotaSafetyMarginTokens = Number(value)
+      else if (key === 'sample-ids-file') options.sampleIdsFile = value
+      else if (key === 'resume-from-report') options.resumeFromReport = value
       else throw new Error(`unknown option: ${argument}`)
     }
   }
@@ -43,10 +48,53 @@ function usage() {
   node scripts/run_experiment.mjs --dataset <id> [--name <name>] [--concurrency 1-4]
   node scripts/run_experiment.mjs --run-id <id>
 
+  Add --quota-window-tokens <n> to stop before a provider token window is exhausted.
+  Add --quota-safety-margin-tokens <n> to keep room for the active case to settle.
+  Add --resume-from-report <path> to run only cases cancelled by an earlier run.
+
   Add --project-context <path> to validate the frozen project context against
   AppWorld training or test references before starting a new run.
 
 The project must be committed and clean before a new experiment starts.`
+}
+
+async function sampleIdsFromOptions(options) {
+  if (options.sampleIdsFile && options.resumeFromReport) {
+    throw new Error('--sample-ids-file and --resume-from-report cannot be used together')
+  }
+  if (options.sampleIdsFile) {
+    const text = await fs.readFile(path.resolve(options.project, options.sampleIdsFile), 'utf8')
+    const values = text.split(/\r?\n/).map(value => value.trim()).filter(Boolean)
+    if (values.length === 0) throw new Error('--sample-ids-file must contain at least one sample id')
+    return [...new Set(values)]
+  }
+  if (options.resumeFromReport) {
+    const report = JSON.parse(await fs.readFile(path.resolve(options.project, options.resumeFromReport), 'utf8'))
+    const values = (Array.isArray(report.cases) ? report.cases : [])
+      .filter(item => item && ['cancelled', 'queued', 'running'].includes(item.status))
+      .map(item => item.sampleId)
+      .filter(value => typeof value === 'string' && value.trim())
+    if (values.length === 0) throw new Error('--resume-from-report contains no cancelled or interrupted cases')
+    return [...new Set(values)]
+  }
+  return undefined
+}
+
+function usageTotal(cases) {
+  return cases.reduce((total, item) => total + (Number(item.usage?.totalTokens) || 0), 0)
+}
+
+function validateQuotaOptions(options) {
+  if (options.quotaWindowTokens === undefined) return
+  if (!Number.isSafeInteger(options.quotaWindowTokens) || options.quotaWindowTokens <= 0) {
+    throw new Error('--quota-window-tokens must be a positive integer')
+  }
+  if (!Number.isSafeInteger(options.quotaSafetyMarginTokens) || options.quotaSafetyMarginTokens < 0) {
+    throw new Error('--quota-safety-margin-tokens must be a non-negative integer')
+  }
+  if (options.quotaSafetyMarginTokens >= options.quotaWindowTokens) {
+    throw new Error('--quota-safety-margin-tokens must be smaller than --quota-window-tokens')
+  }
 }
 
 async function request(url, options = {}) {
@@ -103,7 +151,7 @@ async function validateProjectContext(options) {
   return result
 }
 
-async function report(options, run) {
+async function report(options, run, quotaGuard) {
   const cases = await allCases(options, run.id)
   const tools = await request(projectUrl(options, `/api/experiments/${run.id}/tools`))
   const statusCounts = Object.fromEntries(
@@ -115,6 +163,7 @@ async function report(options, run) {
     generatedAt: new Date().toISOString(),
     run,
     ...(options.projectContextValidation ? { projectContextValidation: options.projectContextValidation } : {}),
+    ...(quotaGuard ? { quotaGuard } : {}),
     statusCounts,
     cases,
     tools: tools.items,
@@ -141,6 +190,7 @@ async function main() {
     console.log(usage())
     return
   }
+  validateQuotaOptions(options)
   if (!options.runId && !options.datasetId) throw new Error('--dataset or --run-id is required')
   await request(new URL('/hello', options.backend))
   let run
@@ -148,6 +198,7 @@ async function main() {
     run = await request(projectUrl(options, `/api/experiments/${options.runId}`))
   } else {
     options.projectContextValidation = await validateProjectContext(options)
+    const sampleIds = await sampleIdsFromOptions(options)
     run = await request(projectUrl(options, '/api/experiments'), {
       method: 'POST',
       body: JSON.stringify({
@@ -157,6 +208,7 @@ async function main() {
         repetitions: options.repetitions,
         timeoutMs: options.timeoutMs,
         keepWorkspaces: options.keepWorkspaces ?? false,
+        ...(sampleIds ? { sampleIds } : {}),
       }),
       timeoutMs: 60000,
     })
@@ -164,14 +216,36 @@ async function main() {
   }
 
   let previous = ''
+  let quotaStopRequested = false
+  const quotaGuard = options.quotaWindowTokens === undefined ? undefined : {
+    windowTokens: options.quotaWindowTokens,
+    safetyMarginTokens: options.quotaSafetyMarginTokens,
+    stopAtTokens: options.quotaWindowTokens - options.quotaSafetyMarginTokens,
+    observedTokens: 0,
+    stoppedAtTokens: undefined,
+    reason: undefined,
+  }
   while (['queued', 'running'].includes(run.status)) {
     const progress = `${run.status} ${run.progress.completed}/${run.progress.total}`
     if (progress !== previous) console.log(`${new Date().toISOString()} ${progress}`)
     previous = progress
     await new Promise((resolve) => setTimeout(resolve, options.pollMs))
     run = await request(projectUrl(options, `/api/experiments/${run.id}`))
+    if (quotaGuard && run.status === 'running') {
+      quotaGuard.observedTokens = usageTotal(await allCases(options, run.id))
+      if (!quotaStopRequested && quotaGuard.observedTokens >= quotaGuard.stopAtTokens) {
+        quotaStopRequested = true
+        quotaGuard.stoppedAtTokens = quotaGuard.observedTokens
+        quotaGuard.reason = 'provider_token_window_safety_margin_reached'
+        console.log(JSON.stringify({ quotaGuard: { ...quotaGuard, action: 'cancel_run' } }))
+        await request(projectUrl(options, `/api/experiments/${run.id}/cancel`), {
+          method: 'POST',
+          body: JSON.stringify({ reason: quotaGuard.reason }),
+        })
+      }
+    }
   }
-  await report(options, run)
+  await report(options, run, quotaGuard)
   if (run.status !== 'completed') process.exitCode = 1
 }
 
