@@ -234,7 +234,8 @@ export class RuntimeModelMeter {
       const config = base.getConfig()
       const settle = admit({ provider: config.provider, protocol: config.protocol, model: prepared.model ?? config.model,
         serializedBody: JSON.stringify({ messages: prepared.messages, tools: prepared.tools, responseFormat: prepared.responseFormat,
-          clientMetadata: prepared.clientMetadata, temperature: prepared.temperature, maxTokens: prepared.maxTokens }),
+          clientMetadata: prepared.clientMetadata, temperature: prepared.temperature, reasoningEffort: prepared.reasoningEffort,
+          thinking: prepared.thinking, maxTokens: prepared.maxTokens }),
         maxOutputTokens: prepared.maxTokens! })
       try {
         const response = await send(prepared)

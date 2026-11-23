@@ -426,7 +426,8 @@ export async function organizeContext(options: OrganizerOptions): Promise<Organi
     })}`
     const request: LlmChatRequest = {
       messages: [{ role: 'system', content: prompt }, { role: 'user', content: JSON.stringify(input) }],
-      responseFormat: 'json', signal: options.signal,
+      responseFormat: 'json', signal: options.signal, temperature: 0,
+      reasoningEffort: 'none', thinking: { type: 'disabled' },
       maxTokens: options.maxOutputTokens ?? 8192,
     }
     const documentView: OrganizationDocumentView = packVersion === 4 ? { format: 'none' }

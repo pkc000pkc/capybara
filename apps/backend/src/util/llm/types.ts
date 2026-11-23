@@ -103,6 +103,10 @@ export interface LlmChatRequest {
   model?: string
   temperature?: number
   maxTokens?: number
+  /** Provider-compatible reasoning control. Omitted means provider default. */
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high'
+  /** Provider-compatible thinking control used by models that expose hidden reasoning. */
+  thinking?: { type: 'enabled' | 'disabled' }
   responseFormat?: 'text' | 'json'
   tools?: LlmToolDefinition[]
   clientMetadata?: LlmClientMetadata

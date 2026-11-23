@@ -123,9 +123,11 @@ function completionTokenParameter(model: string, maxTokens: number | undefined):
     : { max_tokens: maxTokens }
 }
 
-function chatModelCompatibilityParameters(model: string, maxTokens: number | undefined): Record<string, unknown> {
-  const parameters: Record<string, unknown> = completionTokenParameter(model, maxTokens)
-  if (/^(?:gpt-[56]|o\d)/i.test(model)) parameters.reasoning_effort = 'none'
+function chatModelCompatibilityParameters(model: string, request: Pick<LlmChatRequest, 'maxTokens' | 'reasoningEffort' | 'thinking'>): Record<string, unknown> {
+  const parameters: Record<string, unknown> = completionTokenParameter(model, request.maxTokens)
+  if (request.reasoningEffort !== undefined) parameters.reasoning_effort = request.reasoningEffort
+  else if (/^(?:gpt-[56]|o\d)/i.test(model)) parameters.reasoning_effort = 'none'
+  if (request.thinking !== undefined) parameters.thinking = request.thinking
   return parameters
 }
 
@@ -1096,7 +1098,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         messages: chatMessages(request.messages, request.responseFormat === 'json'),
         tools: chatTools(model, request.tools),
         temperature: request.temperature,
-        ...chatModelCompatibilityParameters(model, request.maxTokens),
+        ...chatModelCompatibilityParameters(model, request),
         response_format:
           request.responseFormat === 'json' ? { type: 'json_object' } : undefined,
         stream: false,
@@ -1171,7 +1173,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         messages: chatMessages(request.messages, request.responseFormat === 'json'),
         tools: chatTools(model, request.tools),
         temperature: request.temperature,
-        ...chatModelCompatibilityParameters(model, request.maxTokens),
+        ...chatModelCompatibilityParameters(model, request),
         response_format:
           request.responseFormat === 'json' ? { type: 'json_object' } : undefined,
         stream: true,

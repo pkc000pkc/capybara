@@ -974,6 +974,24 @@ test('Chat Completions uses the current completion-token field for gpt-6-luna', 
   assert.equal(requestBody.reasoning_effort, 'none')
 })
 
+test('Chat Completions forwards explicit reasoning controls for provider-compatible models', async () => {
+  let requestBody: any
+  await withApi((body, path) => {
+    assert.equal(path, '/v1/chat/completions')
+    requestBody = body
+    return { model: body.model, choices: [{ finish_reason: 'stop', message: { content: '{"ok":true}' } }] }
+  }, async (baseUrl) => {
+    await createLlmService({
+      provider: 'custom', protocol: 'chat-completions', baseUrl, model: 'glm-5.3-flash', maxRetries: 0,
+    }).chat({
+      messages: [{ role: 'user', content: 'Return JSON.' }], responseFormat: 'json', maxTokens: 32,
+      reasoningEffort: 'none', thinking: { type: 'disabled' },
+    })
+  })
+  assert.equal(requestBody.reasoning_effort, 'none')
+  assert.deepEqual(requestBody.thinking, { type: 'disabled' })
+})
+
 test('Chat Completions normalizes root JSON-Schema combinators for gpt-6-luna tools', async () => {
   let requestBody: any
   await withApi((body, path) => {
