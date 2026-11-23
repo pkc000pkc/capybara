@@ -45,7 +45,7 @@ Project Context 候选与受控更新
 | 项目 | 第一轮固定值 |
 | --- | --- |
 | Git 工作树 | `tmp/appworld-formal-round1` |
-| 运行代码 | Commit `09f93662` |
+| 运行代码 | Commit `9b42fec4` |
 | 训练数据 | `appworld-train-all-scenarios` |
 | 训练样本数 | 90 |
 | 并发数 | 1 |
@@ -179,17 +179,17 @@ docs/appworld-v2-formal-training-round1-plan-2026-11-23.md
 | AppWorld 泄露检查入口 | 已实现 |
 | 单 Case 冒烟 | 已完成 |
 | 64K 输出预留正式运行 | 因预算预留放大而停止 |
-| 8K 输出预留正式运行 | 因 Organizer Profile HTTP 401 停止排查 |
-| 90 Case 正式训练 | 待通用 Profile 问题修复后继续 |
+| Organizer Profile 凭据加载 | 已通过通用运行时修复，独立 Organizer 请求可成功记录 |
+| 8K 输出预留正式运行 | 已启动，当前运行中 |
+| 90 Case 正式训练 | 运行中，Run ID `a63e95d0-2088-42fa-b136-75c93bb825a4` |
 
-当前阻塞属于通用模型 Profile 凭据加载或请求配置问题。主模型 GLM-5.3-Flash 的 AppWorld 工具调用已经能够返回成功，Organizer 运行链路仍需单独验证。
+当前正式运行没有检测到 401、403、429、额度拒绝或 Runtime 错误。已完成 7/90 个 Case，其中 6 个通过、1 个为模型任务质量失败，当前没有将该失败转化为题目特化逻辑。正式运行仍需持续到 90 个 Case 结束，再进行闭环、覆盖和答案隔离审计。
 
 ## 8. 下一步
 
-1. 修复并验证 `organizer-glm` Profile 的通用凭据加载。
-2. 用最小 Organizer 请求验证 HTTP 200、结构化输出和独立预算记录。
-3. 重新执行单 Case 冒烟。
-4. 确认冒烟同时写出 Runtime Trace、Context Training Sample 和 Project Context 快照。
-5. 启动 90 Case 第一轮正式训练并持续监控。
-6. 训练结束后执行答案隔离和闭环审计，再决定是否进入验证集。
+1. 持续监控 90 Case 第一轮正式训练，记录进度、预算、HTTP 状态、工具结果和上下文审计事件。
+2. 对模型质量失败、基础设施失败、取消和重试分别归类，不用题目特化逻辑修复模型质量失败。
+3. 训练结束后执行答案隔离、Project Context Revision、Cache 归档/召回、A2A、DAG 和 Reflection 覆盖审计。
+4. 核对训练快照、Runtime Trace、Context Training Sample、官方评估和最终报告的完整性。
+5. 仅在终态和审计均满足验收条件后，决定是否进入验证集。
 
