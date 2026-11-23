@@ -122,10 +122,11 @@ test('read-only evaluation rejects actor variable mutation and persists the atte
   }
   app = await buildApp({ runtimeLoop: { projectDir, llm, streamDelayMs: 0, stepDelayMs: 0 } })
   const query = `projectPath=${encodeURIComponent(projectDir)}`
-  const started = await app.inject({ method: 'POST', url: `/api/experiments?${query}`, payload: { datasetId: dataset.id, readonlyAssets: true, timeoutMs: 20000 } })
+  const started = await app.inject({ method: 'POST', url: `/api/experiments?${query}`, payload: { datasetId: dataset.id, readonlyAssets: true, timeoutMs: 20000, maxTotalTokens: 50000 } })
   assert.equal(started.statusCode, 202, started.body)
   const run = await waitForRun(app, query, started.json().id)
   assert.equal(run.status, 'completed', JSON.stringify(run.failure))
+  assert.equal(run.config.maxTotalTokens, 50000)
   const cases = await app.inject({ method: 'GET', url: `/api/experiments/${run.id}/cases?${query}` })
   const detail = await app.inject({ method: 'GET', url: `/api/experiments/${run.id}/cases/${cases.json().items[0].id}?${query}` })
   assert.ok(detail.json().trace.assetWrites.some((event: { status: string }) => event.status === 'blocked'))

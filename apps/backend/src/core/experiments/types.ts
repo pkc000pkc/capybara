@@ -146,6 +146,8 @@ export interface ExperimentConfig {
   timeoutMs: number
   keepWorkspaces: boolean
   sampleIds: string[]
+  /** Optional per-case actor model token ceiling used by long-running benchmark jobs. */
+  maxTotalTokens?: number
 }
 
 export interface ExperimentRunSummary {

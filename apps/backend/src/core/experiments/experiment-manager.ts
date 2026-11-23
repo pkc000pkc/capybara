@@ -46,6 +46,7 @@ export interface CreateExperimentInput {
   concurrency?: unknown
   repetitions?: unknown
   timeoutMs?: unknown
+  maxTotalTokens?: unknown
   keepWorkspaces?: unknown
   sampleIds?: unknown
   readonlyAssets?: unknown
@@ -237,6 +238,9 @@ export class ExperimentManager {
     const concurrency = boundedInteger(input.concurrency, 1, 1, 4, 'concurrency')
     const repetitions = boundedInteger(input.repetitions, 1, 1, 20, 'repetitions')
     const timeoutMs = boundedInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, 1_000, MAX_TIMEOUT_MS, 'timeoutMs')
+    const maxTotalTokens = input.maxTotalTokens === undefined
+      ? undefined
+      : boundedInteger(input.maxTotalTokens, 1_000, 1_000, 4_000_000, 'maxTotalTokens')
     const keepWorkspaces = input.keepWorkspaces === undefined ? false : input.keepWorkspaces
     if (typeof keepWorkspaces !== 'boolean') throw new Error('keepWorkspaces must be a boolean')
     const readonlyAssets = input.readonlyAssets ?? false
@@ -276,7 +280,15 @@ export class ExperimentManager {
       expectedTools: record.expectedTools,
       metadata: record.metadata,
     })))
-    const runConfig = { concurrency, repetitions, timeoutMs, keepWorkspaces, readonlyAssets, sampleIds: selected.map((record) => record.id) }
+    const runConfig = {
+      concurrency,
+      repetitions,
+      timeoutMs,
+      keepWorkspaces,
+      readonlyAssets,
+      sampleIds: selected.map((record) => record.id),
+      ...(maxTotalTokens === undefined ? {} : { maxTotalTokens }),
+    }
     const cases: CreateExperimentCase[] = []
     let ordinal = 0
     for (let repetition = 1; repetition <= repetitions; repetition += 1) {
@@ -328,6 +340,7 @@ export class ExperimentManager {
       totalCases,
       createdAt,
     }, cases)
+    const configuredMaxTotalTokens = execution.maxTotalTokens ?? maxTotalTokens
     const active: ActiveExperiment = {
       controller: new AbortController(),
       loops: new Set<RuntimeLoop>(),
@@ -336,7 +349,7 @@ export class ExperimentManager {
       ...(execution.variableOverrides ? { variableOverrides: { ...execution.variableOverrides } } : {}),
       ...(execution.initialProjectContext ? { initialProjectContext: execution.initialProjectContext } : {}),
       ...(execution.projectContextReadOnly ? { projectContextReadOnly: true } : {}),
-      ...(execution.maxTotalTokens ? { maxTotalTokens: execution.maxTotalTokens } : {}),
+      ...(configuredMaxTotalTokens === undefined ? {} : { maxTotalTokens: configuredMaxTotalTokens }),
     }
     this.active.set(id, active)
     active.done = Promise.resolve().then(() => this.executeRun(run, cases, active))
