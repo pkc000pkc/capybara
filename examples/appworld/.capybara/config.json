@@ -6,7 +6,8 @@
   "llm": {
     "model": "glm-5.3-flash",
     "base_url": "https://open.bigmodel.cn/api/paas/v4",
-    "protocol": "chat-completions"
+    "protocol": "chat-completions",
+    "provider": "custom"
   },
   "context": {
     "max_input_tokens": 128000,
