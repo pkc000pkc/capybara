@@ -70,6 +70,9 @@ async function sampleIdsFromOptions(options) {
   }
   if (options.resumeFromReport) {
     const report = JSON.parse(await fs.readFile(path.resolve(options.project, options.resumeFromReport), 'utf8'))
+    if (Number(report.run?.config?.repetitions ?? 1) !== 1) {
+      throw new Error('--resume-from-report currently requires the source run to use repetitions=1')
+    }
     const values = (Array.isArray(report.cases) ? report.cases : [])
       .filter(item => item && ['cancelled', 'queued', 'running'].includes(item.status))
       .map(item => item.sampleId)

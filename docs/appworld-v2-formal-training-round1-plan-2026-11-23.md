@@ -121,7 +121,7 @@ project context: writable during training
 
 AppWorld 的批量运行必须显式配置提供商的窗口 token 上限和安全余量。运行器每轮读取已完成 Case 的 `usage.totalTokens`，达到 `窗口上限 - 安全余量` 后停止继续消耗并取消当前 Run。当前 Case 的结果和已完成 Case 的报告先落盘，未执行 Case 保留为 cancelled 清单。
 
-额度停止属于外部资源边界，不改变 Case 输入、评估器或任务逻辑。下一次窗口恢复后，运行器从上一份报告中提取 cancelled、queued 和 running 的 sample id 建立新的批次。已完成的 passed、failed 和 error Case 不重复执行，除非显式指定新的样本集合。
+额度停止属于外部资源边界，不改变 Case 输入、评估器或任务逻辑。下一次窗口恢复后，运行器从上一份报告中提取 cancelled、queued 和 running 的 sample id 建立新的批次。第一轮使用 `repetitions=1`，因此 sample id 可以无歧义地恢复。已完成的 passed、failed 和 error Case 不重复执行，除非显式指定新的样本集合。
 
 额度守门记录窗口上限、安全余量、触发时已观测 token、Run ID、停止时间和恢复批次来源。额度耗尽、模型质量失败、Case 超时和官方评估失败分别统计，不能合并成同一种失败。
 
