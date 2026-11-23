@@ -6,7 +6,7 @@ import path from 'node:path'
 import nunjucks from 'nunjucks'
 
 import { DatasetStore, type DatasetRecord } from '#core/datasets/dataset-store'
-import { budgetedLlm } from '#core/experiments/llm-budget'
+import { budgetedLlm, type LlmTokenBudget } from '#core/experiments/llm-budget'
 import { auditedLlm, type ExperimentLlmAudit } from '#core/experiments/llm-audit'
 import { ExperimentAdapterRunner } from '#core/experiments/experiment-adapter'
 import {
@@ -563,8 +563,12 @@ export class ExperimentManager {
     const workspaceDir = this.prepareWorkspace(run.id, item.id)
     const assetWrites: AssetWriteAudit[] = []
     const llmRequests: ExperimentLlmAudit[] = []
-    const runtimeLlm = auditedLlm(active.llm, 'actor', llmRequests)
-    const contextLlm = active.contextLlm ? auditedLlm(active.contextLlm, 'organizer', llmRequests) : undefined
+    const sharedTokenBudget: LlmTokenBudget | undefined = active.maxTotalTokens === undefined ? undefined : { used: 0 }
+    const budgeted = (llm: RuntimeLlm): RuntimeLlm => active.maxTotalTokens === undefined
+      ? llm
+      : budgetedLlm(llm, active.maxTotalTokens, sharedTokenBudget!)
+    const runtimeLlm = auditedLlm(budgeted(active.llm), 'actor', llmRequests)
+    const contextLlm = active.contextLlm ? auditedLlm(budgeted(active.contextLlm), 'organizer', llmRequests) : undefined
     if (active.variableOverrides && Object.keys(active.variableOverrides).length > 0) {
       const resources = new ProjectResources(workspaceDir)
       const projectKeys = new Set(resources.readSystemVariables().variables.map(variable => variable.key))
@@ -846,7 +850,7 @@ export class ExperimentManager {
         return
       }
       if (!actualAnswer) throw new Error('runtime completed without an assistant answer')
-      const score = await this.score(auditedLlm(active.llm, 'scorer', llmRequests), run, item, actualAnswer, actualTools, timeoutController.signal)
+      const score = await this.score(budgeted(auditedLlm(active.llm, 'scorer', llmRequests)), run, item, actualAnswer, actualTools, timeoutController.signal)
       const scoringUsage = usage(score.response.usage)
       trace.scoring = { prompt: score.prompt, response: score.response.text, usage: scoringUsage }
       this.store.completeCase(item.id, {

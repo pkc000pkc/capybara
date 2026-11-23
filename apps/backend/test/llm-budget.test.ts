@@ -31,3 +31,19 @@ test('budget prevents the next request and clamps output without discarding repo
   await assert.rejects(guarded.chat({ messages: [{ role: 'user', content: 'again' }] }), /TOKEN_BUDGET_EXHAUSTED/)
   assert.equal(calls, 1)
 })
+
+test('independent wrappers can share one case token budget', async () => {
+  const llm = {
+    getConfig: () => ({}),
+    chat: async () => ({ text: 'ok', usage: { totalTokens: 60 }, raw: {} }),
+  } as unknown as RuntimeLlm
+  const budget = { used: 0 }
+  const actor = budgetedLlm(llm, 100, budget)
+  const organizer = budgetedLlm(llm, 100, budget)
+  await actor.chat({ messages: [{ role: 'user', content: 'a' }] })
+  await assert.rejects(
+    organizer.chat({ messages: [{ role: 'user', content: 'b'.repeat(200) }] }),
+    /TOKEN_BUDGET_EXHAUSTED/,
+  )
+  assert.equal(budget.used, 60)
+})
