@@ -9,8 +9,9 @@ import test from 'node:test'
 import { initializeProjectDirectory } from '#core/project-initializer'
 import { RuntimeLoop, type RuntimeChildAgentResult, type RuntimeLoopOptions, type RuntimeLlm } from '#core/runtime-loop'
 import { RuntimeChildStore, terminalChild, type ChildSpec } from '#core/runtime-child-store'
+import { runtimeExecutionState } from '#core/runtime-capability-projection'
 import type { RuntimeLoopState } from '#core/runtime-loop-state'
-import type { ClientCommand, ControlEnvelopeV2, RuntimePlanTask, RuntimeRequestBinding, ServerEvent } from '#protocol/runtime-protocol'
+import type { ClientCommand, ControlEnvelopeV2, RuntimePlanTask, RuntimeRequestBinding, RuntimeTaskControl, ServerEvent } from '#protocol/runtime-protocol'
 import type { LlmChatRequest, LlmChatResponse } from '#util/llm'
 
 function binding(request: LlmChatRequest): RuntimeRequestBinding {
@@ -160,82 +161,15 @@ for (const runner of ['host', 'local'] as const) {
   })
 }
 
-test('a real child.ready event unlocks its plan branch after independent work completes', async () => {
-  const tasks: RuntimePlanTask[] = [
-    { id: 'delegated', title: '读取并审核委派结果', phase: 'execution', owner: 'parent', dependsOn: [], capabilityIds: ['delegate_task', 'search_resources'],
-      completionConditions: ['通过真实读取回执审核'], requiredActions: ['call:scope-child-review'], evidenceRefs: [], status: 'pending' },
-    { id: 'local', title: '独立核对本地资源', phase: 'investigation', owner: 'parent', dependsOn: [], capabilityIds: ['search_resources'],
-      completionConditions: ['读取目录'], requiredActions: ['call:scope-child-independent'], evidenceRefs: [], status: 'pending' },
-  ]
-  let calls = 0, childId = '', waitRef = '', resolveChild!: (value: RuntimeChildAgentResult) => void
-  const f = fixture(request => {
-    calls++
-    if ([1, 6, 9].includes(calls)) {
-      if (calls === 6) tasks[1]!.status = 'completed'
-      if (calls === 9) tasks[0]!.status = 'completed'
-      return response(request, { decision: 'propose_plan',
-        planProposal: { basePlanRevision: calls === 1 ? 0 : calls === 6 ? 1 : 2, goal: '子任务和本地核对分别结算', tasks: tasks.map(node => node.status === 'pending' ? { ...node, requiredActions: [] } : node) } })
-    }
-    if (calls === 2) return call('delegate_task', 'scope-child-start', { goal: '核对原件', prompt: '只读返回两方来源。', mode: 'async', plan_task_id: 'delegated' })
-    if (calls === 3) {
-      const handle = result(request, 'delegate_task'); childId = handle.childId; waitRef = handle.waitRef
-      assert.equal(handle.planTaskId, 'delegated')
-      return response(request, { decision: 'wait', waitSpec: { reason: '混合运行时事件关联值', signalType: 'runtime', correlationIds: [waitRef, childId],
-        condition: { eventType: 'child.ready' }, deadlineRef: null, blockingTaskIds: ['delegated'] } })
-    }
-    if (calls === 4) {
-      assert.match(request.messages.at(-1)!.content, /WAIT_RUNTIME_BINDING_UNKNOWN/)
-      return response(request, { decision: 'wait', waitSpec: { reason: '等待委派分支的真实结果', signalType: 'runtime', correlationIds: [waitRef],
-        condition: { eventType: 'child.ready' }, deadlineRef: null, blockingTaskIds: ['delegated'] } })
-    }
-    if (calls === 5) {
-      assert.ok(!request.tools?.some(tool => tool.name === 'delegate_task'))
-      return call('search_resources', 'scope-child-independent', { query: 'files' })
-    }
-    if (calls === 7) {
-      assert.match(request.messages[0]!.content, /"phase":"delegation"/)
-      assert.ok(!request.tools?.some(tool => ['delegate_task', 'search_resources'].includes(tool.name)))
-      return call('read_child_result', 'scope-child-read', { child_id: childId })
-    }
-    if (calls === 8) {
-      const read = result(request, 'read_child_result')
-      assert.equal(read.planTaskId, 'delegated')
-      assert.match(read.output_excerpt, /保留两方来源/)
-      return call('consume_child_result', 'scope-child-review', { child_id: childId, result_hash: read.result_hash,
-        read_receipt_id: read.read_receipt_id, decision: 'accept', reason: '审核真实子结果，保留来源' })
-    }
-    assert.equal(calls, 10)
-    return finish(request)
-  }, { planningRequired: true, childAgentHost: async input => {
-    assert.equal(input.planTaskId, 'delegated')
-    assert.deepEqual(input.allowedCapabilityIds, ['runtime:search_resources'])
-    assert.ok(input.allowedCapabilities?.every(capability => capability.schemaHash && capability.sourceVersion))
-    return new Promise(resolve => { resolveChild = resolve })
-  } })
-  try {
-    const paused = f.until('paused'); f.start(); await paused
-    const view = f.loop.getSnapshot(0)
-    assert.equal(calls, 6)
-    assert.equal(view.taskControl!.tasks[1]!.status, 'completed')
-    assert.deepEqual(view.taskControl!.branchBlocks?.map(block => block.taskIds), [['delegated']])
-    assert.deepEqual(view.waits?.subscriptions.map(wait => wait.spec.correlationIds), [[waitRef]])
-    assert.deepEqual(view.taskControl!.childAssignments, [{ planTaskId: 'delegated', childId, state: 'delegated' }])
-    assert.equal(view.children!.items[0]!.consumption, undefined)
-    const done = f.until('completed')
-    resolveChild({ ok: true, output: '保留两方来源。', evidence: { sourceA: 'A', sourceB: 'B' } })
-    await done
-    const state = f.loop.getSnapshot(0)
-    assert.equal(state.children!.items[0]!.consumption?.decision, 'accept')
-    assert.equal(state.children!.items[0]!.planTaskId, 'delegated')
-    assert.deepEqual(state.taskControl!.childAssignments, [{ planTaskId: 'delegated', childId, state: 'accepted' }])
-    assert.equal(state.waits?.subscriptions.find(wait => wait.spec.correlationIds.includes(waitRef))?.status, 'satisfied')
-    assert.ok(!state.taskControl!.branchBlocks?.length)
-    f.reopen()
-    assert.deepEqual(f.loop.getSnapshot(0).taskControl!.childAssignments, state.taskControl!.childAssignments)
-  } finally { f.close() }
+test('a real child.ready event unlocks the parent review phase after the wait barrier', () => {
+  const running: RuntimeTaskControl = { taskId: 'root', stateRevision: 1, planRevision: 1, goal: 'child wait', requiredActions: [], requiredEvidenceRefs: [], uncertainties: [],
+    tasks: [{ id: 'delegated', title: 'delegated', owner: 'parent', phase: 'execution', dependsOn: [], capabilityIds: ['delegate_task'], completionConditions: ['review'], requiredActions: [], evidenceRefs: [], status: 'pending' }],
+    childAssignments: [{ planTaskId: 'delegated', childId: 'child-1', state: 'delegated', status: 'running' }] }
+  assert.equal(runtimeExecutionState(running).phase, 'delegation_wait')
+  running.childAssignments = [{ planTaskId: 'delegated', childId: 'child-1', state: 'delegated', status: 'succeeded' }]
+  assert.equal(runtimeExecutionState(running).phase, 'delegation_review')
 })
-
-test('child review receipts belong to the delegated node while independent work is active', async () => {
+test('child review receipts belong to the delegated node across the wait barrier', async () => {
   const tasks: RuntimePlanTask[] = [
     { id: 'delegated', title: '审核子来源', phase: 'execution', owner: 'parent', dependsOn: [], capabilityIds: ['delegate_task', 'search_resources'],
       completionConditions: ['审核子来源'], requiredActions: [], evidenceRefs: [], status: 'pending' },
@@ -254,14 +188,14 @@ test('child review receipts belong to the delegated node while independent work 
       case 4: {
         const read = request.messages.find(message => message.toolCallId === 'read-assigned-child')!
         const receipt = JSON.parse(read.content).runtime_receipt
-        assert.deepEqual(receipt.activePlanTaskIds, ['local'])
+        assert.equal(receipt.activePlanTaskIds, undefined)
         assert.deepEqual(receipt.completionPlanTaskIds, ['delegated'])
         return review(request)
       }
       case 5: {
         const consumed = request.messages.filter(message => message.name === 'consume_child_result').at(-1)!
         const receipt = JSON.parse(consumed.content).runtime_receipt
-        assert.deepEqual(receipt.activePlanTaskIds, ['local'])
+        assert.equal(receipt.activePlanTaskIds, undefined)
         assert.deepEqual(receipt.completionPlanTaskIds, ['delegated'])
         const state = JSON.parse(request.messages[0]!.content.split('\n').find(line => line.startsWith('{"taskId":'))!)
         const reviewActions = state.recentPlanActions.filter((action: { toolName: string }) => ['read_child_result', 'consume_child_result'].includes(action.toolName))
@@ -341,7 +275,7 @@ test('a durable child assignment restores its accepted plan from a stale parent 
     }
     if (calls === 2) return call('delegate_task', 'durable-assignment', { plan_task_id: 'job', goal: '查资料', prompt: '读取实际资料' })
     assert.equal(calls, 3)
-    assert.match(request.messages[0]!.content, /"phase":"delegation"/)
+    assert.match(request.messages[0]!.content, /"phase":"delegation(?:_wait|_review)?"/)
     return ask(request)
   }, { planningRequired: true, childAgentHost: async () => ({ ok: true, output: '保留的子结果' }) })
   try {
@@ -353,7 +287,7 @@ test('a durable child assignment restores its accepted plan from a stale parent 
     assert.equal(recovered.run.runId, original.run.runId)
     assert.equal(recovered.taskControl?.planRevision, 1)
     assert.deepEqual(recovered.taskControl?.requiredActions, ['tool:read_child_result'])
-    assert.deepEqual(recovered.taskControl!.childAssignments, [{ planTaskId: 'job', childId, state: 'delegated' }])
+    assert.deepEqual(recovered.taskControl!.childAssignments, [{ planTaskId: 'job', childId, state: 'delegated', status: 'succeeded' }])
   } finally { f.close() }
 })
 

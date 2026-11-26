@@ -973,7 +973,7 @@ export interface RuntimePlanTask {
   phase?: 'human_input' | 'investigation' | 'execution' | 'verification'
 }
 
-export type RuntimeExecutionPhase = 'direct' | 'planning' | 'human_input' | 'investigation' | 'execution' | 'verification' | 'delegation' | 'evidence' | 'blocked'
+export type RuntimeExecutionPhase = 'direct' | 'planning' | 'human_input' | 'investigation' | 'execution' | 'verification' | 'delegation' | 'delegation_wait' | 'delegation_review' | 'evidence' | 'blocked'
 export type RuntimeSkillPhase = 'direct' | 'investigation' | 'execution' | 'verification'
 
 export interface RuntimeExecutionState {
@@ -1041,6 +1041,7 @@ export interface RuntimeChildAssignment {
   childId: string
   state: 'delegated' | 'accepted' | 'retryable' | 'parent'
   takeoverId?: string
+  status?: RuntimeChildStatus
 }
 
 export interface RuntimeChildTakeover {
@@ -1366,7 +1367,7 @@ export interface RuntimeWorkflowNode {
   sourceStepId: string
   parentId?: string
   timelineStepId?: string
-  type: 'tool' | 'filter' | 'foreach'
+  type: 'tool' | 'filter' | 'foreach' | 'transform' | 'assert'
   toolName?: string
   iteration?: number
   status: RuntimeWorkflowNodeStatus
@@ -1388,6 +1389,16 @@ export interface RuntimeWorkflowPlan {
   definitionArtifactId: string
   resultArtifactId?: string
   nodes: RuntimeWorkflowNode[]
+  compile?: {
+    graphHash: string
+    nodeCount: number
+    toolNodeCount: number
+    deterministicNodeCount: number
+    foreachNodeCount: number
+    maxForeachItems: number
+    semanticNodeCount: number
+    estimatedModelRequests: number
+  }
   createdAt: string
   completedAt?: string
   error?: JsonValue
@@ -1408,6 +1419,23 @@ export interface RuntimeWorkflowsState {
 
 export type RuntimeChildStatus = 'delegated' | 'queued' | 'running' | 'waiting' | 'succeeded' | 'failed' | 'unknown' | 'cancelled' | 'timed_out'
 
+export type RuntimeChildActionOutcome = 'succeeded' | 'failed' | 'unknown'
+
+export interface RuntimeChildActionReceipt {
+  leaseId: string
+  attemptId: string
+  childId: string
+  callId: string
+  toolName: string
+  capabilityId: string
+  argumentHash: string
+  outcome: RuntimeChildActionOutcome
+  resultArtifactId?: string
+  resultHash?: string
+  acquiredAt: string
+  completedAt?: string
+}
+
 export interface RuntimeChildSession {
   id: string
   parentSessionId: string
@@ -1427,10 +1455,13 @@ export interface RuntimeChildSession {
   revision?: number
   deadlineAt?: string
   resultHash?: string
+  actionReceipts?: RuntimeChildActionReceipt[]
   waitRef?: string
   question?: string
   inputRequestId?: string
   consumption?: { decision: 'accept' | 'reject' | 'conflict' | 'needs_more_evidence'; reason: string; consumedAt: string; receiptId?: string }
+  delegationMode?: 'readonly' | 'action'
+  attemptId?: string
 }
 
 export interface RuntimeChildrenState {

@@ -160,7 +160,7 @@ function loadWorkspaceResources(projectPath) {
     tools, skills, permissions,
     timeoutMs: Math.max(100, Math.min(600000, Number(settings.tool_timeout_ms) || 150000)),
     maxToolRounds: Math.max(1, Math.min(100, Number(settings.max_tool_rounds) || 32)),
-    maxOutputTokens: Math.max(256, Math.min(16384, Number(settings.llm?.max_output_tokens) || 4096)),
+    maxOutputTokens: Math.max(256, Math.min(131072, Number(settings.llm?.max_output_tokens) || 16384)),
   };
 }
 

@@ -44,10 +44,13 @@ export function runtimeExecutionState(task: RuntimeTaskControl): RuntimeExecutio
   const completed = new Set(task.tasks.filter(node => node.status === 'completed').map(node => node.id))
   const branchBlocks = new Set(task.branchBlocks?.flatMap(block => block.taskIds))
   const assigned = new Set(task.childAssignments?.filter(item => item.state === 'delegated').map(item => item.planTaskId))
+  const delegated = task.childAssignments?.filter(item => item.state === 'delegated') ?? []
+  const waitingChildren = delegated.some(item => !item.status || ['delegated', 'queued', 'running', 'waiting', 'unknown'].includes(item.status))
+  const reviewChildren = delegated.some(item => item.status !== undefined && ['succeeded', 'failed', 'cancelled', 'timed_out'].includes(item.status))
   const unblocked = pending.filter(node => !branchBlocks.has(node.id) && node.dependsOn.every(id => completed.has(id)))
   const ready = unblocked.filter(node => !assigned.has(node.id))
   const collecting = task.branchBlocks?.some(block => block.evidenceRequest?.sourceKinds.some(kind => ['tool', 'memory', 'child-agent'].includes(kind)))
-  const phase = task.planning?.required ? 'planning' : !task.tasks.length ? 'direct' : !pending.length ? 'verification'
+  const phase = task.planning?.required ? 'planning' : waitingChildren ? 'delegation_wait' : reviewChildren ? 'delegation_review' : !task.tasks.length ? 'direct' : !pending.length ? 'verification'
     : !ready.length ? collecting ? 'evidence' : unblocked.length ? 'delegation' : 'blocked' : ready[0]!.phase ?? 'execution'
   const parents = new Map(task.childAssignments?.filter(item => item.state === 'parent' && item.takeoverId).map(item => [item.planTaskId, item]))
   const first = ready[0]
@@ -55,6 +58,8 @@ export function runtimeExecutionState(task: RuntimeTaskControl): RuntimeExecutio
   const active = takeover ? [first!] : ready.filter(node => !parents.has(node.id) && (node.phase ?? 'execution') === phase)
   const allowedDecisions: RuntimeControlDecision[] = phase === 'planning' ? ['continue', 'propose_plan', 'ask_user', 'reflect']
     : phase === 'human_input' ? ['ask_user', 'propose_plan']
+      : phase === 'delegation_wait' ? ['tool_call', 'wait', 'ask_user']
+        : phase === 'delegation_review' ? ['tool_call', 'wait', 'ask_user']
       : phase === 'blocked' ? ['continue', 'propose_plan', 'ask_user', 'wait', 'reflect']
         : phase === 'delegation' || phase === 'evidence' ? ['continue', 'propose_plan', 'tool_call', 'ask_user', 'wait', 'reflect']
           : decisions.filter(decision => decision !== 'finish' || pending.length === 0)
@@ -93,7 +98,7 @@ export function selectRuntimeCapabilities(task: RuntimeTaskControl, capabilities
   return capabilities.filter(capability => {
     if (!capability.available) return false
     if (execution.parentTakeover && capability.name === 'delegate_task') return false
-    if (execution.phase === 'delegation') return delegationTools.has(capability.name)
+    if (execution.phase === 'delegation' || execution.phase === 'delegation_wait' || execution.phase === 'delegation_review') return delegationTools.has(capability.name)
     const readonlyPhase = execution.phase === 'investigation' || execution.phase === 'verification' || execution.phase === 'evidence'
     if (readonlyPhase && (capability.sideEffects !== 'none' || capability.permissions.some(p => mutatingPermissions.has(p)))) return false
     if (execution.phase === 'evidence') return evidenceTools.has(capability.name)

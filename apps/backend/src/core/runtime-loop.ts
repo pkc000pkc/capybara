@@ -60,7 +60,7 @@ import { MCP_INPUT_RESPONDED, type McpInputContinuation, type McpInputData } fro
 import { mcpVerificationOutcome, type McpOperation } from '#core/mcp/operations'
 import { BRANCH_EVIDENCE, BRANCH_HUMAN_REPLY, MCP_OPERATION_SETTLED, RuntimeWaitStore, type PreparedWait } from '#core/runtime-wait-store'
 import { RuntimeChildService, type ChildWorker } from '#core/runtime-child-service'
-import { childAssignment, terminalChild, type ChildBinding, type ChildRecord, type ChildSpec, type ParentTakeoverAction } from '#core/runtime-child-store'
+import { childAssignment, terminalChild, type ChildActionRequest, type ChildActionResult, type ChildBinding, type ChildRecord, type ChildSpec, type ParentTakeoverAction } from '#core/runtime-child-store'
 import { parseClientCommand } from '#protocol/runtime-protocol'
 import type { RuntimeBranchBlock, RuntimeControlDecision, RuntimeEvidenceRequest, RuntimeWaitSpec, RuntimeWaitSubscription, RuntimeWaitsState, RuntimeWaitSignal, RuntimeRequestBinding } from '#protocol/runtime-protocol'
 import type { ToolCallRequest, ToolCallResult } from '#core/tools/types'
@@ -128,7 +128,9 @@ import {
 } from '#core/runtime-loop-utils'
 import {
   filterWorkflowItems,
-  parseGeneratedWorkflow,
+  transformWorkflowItems,
+  assertWorkflowValue,
+  compileGeneratedWorkflow,
   needsWorkflowOutput,
   resolveWorkflowValue,
   workflowCondition,
@@ -298,6 +300,7 @@ export interface RuntimeChildAgentResult {
   output?: JsonValue
   /** Parent-visible evidence package for independently checking the child run. */
   evidence?: JsonValue
+  actionReceipts?: JsonValue
   error?: { code: string; message: string; details?: JsonValue }
   startedAt?: string
   completedAt?: string
@@ -343,11 +346,15 @@ export interface RuntimeLoopOptions {
     signal: AbortSignal
     allowedCapabilityIds: string[]
     allowedCapabilities?: RuntimeCapabilityBinding[]
+    executionMode?: 'readonly' | 'action'
+    attemptId?: string
+    authorizeAction?: (request: ChildActionRequest) => import('#protocol/runtime-protocol').RuntimeChildActionReceipt
+    recordActionResult?: (result: ChildActionResult) => import('#protocol/runtime-protocol').RuntimeChildActionReceipt
     llm: RuntimeLlm
   }) => Promise<RuntimeChildAgentResult>
   childAgentEnabled?: boolean
   childAgentMode?: boolean
-  childExecution?: { childId: string; parent: ChildBinding; capabilityIds: string[]; assignment?: ChildSpec['assignment']; parentContext: string; maxToolRounds: number; assertAuthority: () => void }
+  childExecution?: { childId: string; parent: ChildBinding; capabilityIds: string[]; assignment?: ChildSpec['assignment']; parentContext: string; maxToolRounds: number; executionMode?: 'readonly' | 'action'; attemptId?: string; assertAuthority: () => void; authorizeAction?: (request: ChildActionRequest) => import('#protocol/runtime-protocol').RuntimeChildActionReceipt; recordActionResult?: (result: ChildActionResult) => import('#protocol/runtime-protocol').RuntimeChildActionReceipt }
 }
 
 export interface RuntimeSkillMarketplace {
@@ -537,6 +544,7 @@ export class RuntimeLoop extends Loop {
   private childService?: RuntimeChildService
   private readonly childRecords = new Map<string, ChildRecord>()
   private readonly childAgentMode: boolean
+  private readonly childReadOnly: boolean
   private readonly projectContextReadOnly: boolean
   private readonly hookRegistry: HookRegistry
   private llm: RuntimeLlm
@@ -763,6 +771,7 @@ export class RuntimeLoop extends Loop {
     this.childAgentHost = options.childAgentHost
     this.childAgentEnabled = options.childAgentEnabled === true
     this.childAgentMode = options.childAgentMode === true
+    this.childReadOnly = this.childAgentMode && (options.childExecution?.executionMode ?? 'readonly') === 'readonly'
     this.projectContextReadOnly = options.projectContextReadOnly === true
     this.requireInitialPlanning = options.planningRequired === true
     this.hookRegistry = new HookRegistry(this.projectDir, this.systemDir)
@@ -3863,6 +3872,14 @@ export class RuntimeLoop extends Loop {
       await this.executeWorkflowFilter(step, correlationId)
       return
     }
+    if (nodeType === 'transform') {
+      await this.executeWorkflowTransform(step, correlationId)
+      return
+    }
+    if (nodeType === 'assert') {
+      await this.executeWorkflowAssert(step, correlationId)
+      return
+    }
     if (nodeType === 'foreach') {
       await this.executeWorkflowForeach(step, correlationId)
       return
@@ -3893,14 +3910,17 @@ export class RuntimeLoop extends Loop {
     )
     const planId = `workflow-${this.run.runId}-${this.workflows.items.length + 1}`
     let definition: GeneratedWorkflowDefinition
+    let compile: ReturnType<typeof compileGeneratedWorkflow>['summary']
     try {
-      definition = parseGeneratedWorkflow(
+      const compiled = compileGeneratedWorkflow(
         request.arguments,
         new Map(this.tools.items.filter(tool => request.authorization!.projection.bindings.some(binding => binding.name === tool.name)).flatMap((tool) => [
           [tool.name, tool.name],
           [tool.id, tool.name],
         ])),
       )
+      definition = compiled.definition
+      compile = compiled.summary
     } catch (error) {
       const failed: RuntimeWorkflowPlan = {
         id: planId,
@@ -3963,6 +3983,7 @@ export class RuntimeLoop extends Loop {
       status: 'running',
       definitionArtifactId: definitionArtifact.id,
       nodes,
+      compile,
       createdAt: now(),
     }
     this.workflowDefinitions.set(planId, definition)
@@ -4239,6 +4260,64 @@ export class RuntimeLoop extends Loop {
     }
   }
 
+  private async executeWorkflowTransform(step: TimelineStep, correlationId: string): Promise<void> {
+    const planId = String(step.detail?.workflowPlanId ?? '')
+    const sourceStepId = String(step.detail?.workflowSourceStepId ?? '')
+    const definition = this.workflowDefinitions.get(planId)?.steps.find(item => item.id === sourceStepId && item.type === 'transform')
+    const data = this.workflowData.get(planId)
+    if (!definition || definition.type !== 'transform' || !data) throw new RuntimeStageError('workflow_execution', 'WORKFLOW_STATE_MISSING', 'workflow transform state is missing')
+    const started = Date.now(), startedAt = now()
+    data.steps[sourceStepId] = { status: 'running' }
+    this.updateWorkflowNode(planId, sourceStepId, { status: 'running', timelineStepId: step.id, startedAt }, correlationId)
+    try {
+      if (!(await workflowCondition(definition.when, data))) {
+        data.steps[sourceStepId] = { status: 'skipped', output: [] }
+        step.detail = { ...(step.detail ?? {}), workflowSkipped: true, reason: 'when evaluated to false' }
+        this.updateWorkflowNode(planId, sourceStepId, { status: 'skipped', completedAt: now(), durationMs: Date.now() - started }, correlationId)
+        return
+      }
+      const input = await resolveWorkflowValue(definition.input, data)
+      if (!Array.isArray(input)) throw new Error('workflow transform input must resolve to an array')
+      const output = await transformWorkflowItems(input, definition.operator, definition.expression, definition.fields, data, definition)
+      const artifact = this.createArtifact('workflow-result', `Workflow ${definition.operator} result · ${sourceStepId}`, output, correlationId)
+      data.steps[sourceStepId] = { status: 'completed', output }
+      step.detail = { ...(step.detail ?? {}), operator: definition.operator, inputCount: input.length, resultArtifactId: artifact.id, resultPreview: artifact.preview }
+      this.updateWorkflowNode(planId, sourceStepId, { status: 'completed', outputArtifactId: artifact.id, completedAt: now(), durationMs: Date.now() - started }, correlationId)
+    } catch (error) {
+      this.failGeneratedWorkflow(planId, sourceStepId, error, correlationId)
+      throw new RuntimeStageError('workflow_execution', 'WORKFLOW_TRANSFORM_FAILED', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  private async executeWorkflowAssert(step: TimelineStep, correlationId: string): Promise<void> {
+    const planId = String(step.detail?.workflowPlanId ?? '')
+    const sourceStepId = String(step.detail?.workflowSourceStepId ?? '')
+    const definition = this.workflowDefinitions.get(planId)?.steps.find(item => item.id === sourceStepId && item.type === 'assert')
+    const data = this.workflowData.get(planId)
+    if (!definition || definition.type !== 'assert' || !data) throw new RuntimeStageError('workflow_execution', 'WORKFLOW_STATE_MISSING', 'workflow assert state is missing')
+    const started = Date.now(), startedAt = now()
+    data.steps[sourceStepId] = { status: 'running' }
+    this.updateWorkflowNode(planId, sourceStepId, { status: 'running', timelineStepId: step.id, startedAt }, correlationId)
+    try {
+      if (!(await workflowCondition(definition.when, data))) {
+        data.steps[sourceStepId] = { status: 'skipped', output: false }
+        step.detail = { ...(step.detail ?? {}), workflowSkipped: true, reason: 'when evaluated to false' }
+        this.updateWorkflowNode(planId, sourceStepId, { status: 'skipped', completedAt: now(), durationMs: Date.now() - started }, correlationId)
+        return
+      }
+      const input = await resolveWorkflowValue(definition.input, data)
+      const passed = await assertWorkflowValue(input, definition.expression, data)
+      if (!passed) throw new Error(`workflow assertion failed: ${definition.expression}`)
+      const artifact = this.createArtifact('workflow-result', `Workflow assertion result · ${sourceStepId}`, { passed: true, expression: definition.expression }, correlationId)
+      data.steps[sourceStepId] = { status: 'completed', output: { passed: true } }
+      step.detail = { ...(step.detail ?? {}), expression: definition.expression, resultArtifactId: artifact.id, resultPreview: artifact.preview }
+      this.updateWorkflowNode(planId, sourceStepId, { status: 'completed', outputArtifactId: artifact.id, completedAt: now(), durationMs: Date.now() - started }, correlationId)
+    } catch (error) {
+      this.failGeneratedWorkflow(planId, sourceStepId, error, correlationId)
+      throw new RuntimeStageError('workflow_execution', 'WORKFLOW_ASSERT_FAILED', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   private async executeWorkflowForeach(
     step: TimelineStep,
     correlationId: string,
@@ -4420,6 +4499,7 @@ export class RuntimeLoop extends Loop {
       resultArtifactId: artifact.id,
       resultPreview: artifact.preview,
       nodeCount: this.workflowPlan(planId).nodes.length,
+      ...(this.workflowPlan(planId).compile ? { compile: toJsonValue(this.workflowPlan(planId).compile) } : {}),
     }
     this.appendRuntimeMessage({
       role: 'tool',
@@ -6362,6 +6442,14 @@ export class RuntimeLoop extends Loop {
     this.emit('runtime.processes.updated', this.runtimeActivityState.snapshot().processes, correlationId)
     const projectTool = this.tools.items.find((tool) => tool.name === request.name)
     const internalTool = INTERNAL_RESOURCE_TOOLS.find((tool) => tool.name === request.name)
+    const actionArgumentHash = createHash('sha256').update(JSON.stringify(request.arguments)).digest('hex')
+    const actionCapabilityId = projectTool?.id ?? internalTool?.name ?? request.name
+    const requiresChildActionLease = !!this.childExecution && !this.childReadOnly
+      && (projectTool?.sideEffects ?? internalTool?.sideEffects ?? 'none') !== 'none'
+    if (requiresChildActionLease) {
+      if (!this.childExecution?.authorizeAction) throw new RuntimeStageError('runtime', 'CHILD_ACTION_LEASE_UNAVAILABLE', 'action child has no runtime action lease authority', false)
+      this.childExecution.authorizeAction({ callId: request.id, toolName: request.name, capabilityId: actionCapabilityId, argumentHash: actionArgumentHash })
+    }
     step.detail = {
       ...(step.detail ?? {}),
       callId: request.id,
@@ -6510,6 +6598,15 @@ export class RuntimeLoop extends Loop {
         : { ok: false, ...(result.source ? { source: result.source } : {}), error: result.error ?? null },
       correlationId,
     )
+    if (requiresChildActionLease) {
+      try {
+        this.childExecution?.recordActionResult?.({ callId: request.id, toolName: request.name, capabilityId: actionCapabilityId,
+          argumentHash: actionArgumentHash, outcome: result.source?.outcome === 'unknown' ? 'unknown' : result.ok ? 'succeeded' : 'failed',
+          resultArtifactId: resultArtifact.id, resultHash: resultArtifact.hash })
+      } catch (error) {
+        throw new RuntimeStageError('runtime', 'CHILD_ACTION_RESULT_UNRECORDED', error instanceof Error ? error.message : String(error), false)
+      }
+    }
     if (result.mcpInput && result.ok) {
       const binding = this.waitBinding()
       const raw = this.artifacts.get(resultArtifact.id)!
@@ -9989,7 +10086,7 @@ export class RuntimeLoop extends Loop {
           && (this.workflowFormCompletion(plan) || (plan.recovery.operationId && this.verifiedMcpOperations().some(operation => operation.source.operationId === plan.recovery!.operationId))))) &&
       (tool.name !== 'submit_branch_evidence' || this.taskControl.branchBlocks?.some(block =>
         block.evidenceRequest?.sourceKinds.some(kind => ['tool', 'memory', 'child-agent'].includes(kind)))) &&
-      (tool.name !== 'delegate_task' ? (!this.childAgentMode || CHILD_READABLE_RESOURCE_TOOLS.has(tool.name)) : this.childAgentEnabled && !this.childAgentMode) &&
+      (tool.name !== 'delegate_task' ? (!this.childReadOnly || CHILD_READABLE_RESOURCE_TOOLS.has(tool.name)) : this.childAgentEnabled && !this.childAgentMode) &&
       (tool.name !== 'manage_application' || this.applicationHost !== undefined) &&
       (tool.name !== 'browser_action' || this.browserHost !== undefined)
     )).map(({
@@ -10103,9 +10200,9 @@ export class RuntimeLoop extends Loop {
     const meta = INTERNAL_RESOURCE_TOOLS.find(tool => tool.name === name)
     if (!meta) throw new CommandError('NOT_FOUND', `unknown internal capability: ${name}`)
     const denial = capabilityAccessDenial({ permissions: meta.permissions ?? [], sideEffects: meta.sideEffects },
-      new Set(this.projectResources.readSettings().tool_permissions), this.childAgentMode)
+      new Set(this.projectResources.readSettings().tool_permissions), this.childReadOnly)
     if (denial || (this.childAgentMode && !this.internalResourceTools().some(tool => tool.name === name))) {
-      throw new CommandError('FORBIDDEN', `${name}: ${denial ?? 'child_readonly'}`)
+      throw new CommandError('FORBIDDEN', `${name}: ${denial ?? 'child_capability_unavailable'}`)
     }
     // Arbitrary Node scripts have process authority; they are not a filesystem sandbox.
     if (name === 'run_skill_script') assertAssetWriteAllowed(this.projectDir, 'skill.script.run')
@@ -10140,7 +10237,7 @@ export class RuntimeLoop extends Loop {
       const permissions = [...meta.permissions ?? []]
       let unavailableReason = !enabledInternal.has(definition.name) ? this.childAgentMode ? 'child_readonly'
         : this.childAgentEnabled && PARENT_CHILD_LIFECYCLE_TOOLS.has(definition.name) ? 'child_state_required' : 'not_configured'
-        : capabilityAccessDenial({ permissions, sideEffects: meta.sideEffects }, granted, this.childAgentMode)
+        : capabilityAccessDenial({ permissions, sideEffects: meta.sideEffects }, granted, this.childReadOnly)
       let implementation: unknown
       if (meta.name === 'run_skill_script' && !unavailableReason) {
         try { implementation = this.skillScriptSources(phaseSkills); if (!(implementation as unknown[]).length) unavailableReason = 'not_loaded' }
@@ -10161,7 +10258,7 @@ export class RuntimeLoop extends Loop {
       const definition = { name: tool.name, description: tool.description, parameters: tool.inputSchema }
       const registered = this.toolRegistry.get(tool.name)
       const permissions = [...tool.permissions ?? []]
-      let unavailableReason = capabilityAccessDenial({ permissions, sideEffects: tool.sideEffects }, granted, this.childAgentMode)
+      let unavailableReason = capabilityAccessDenial({ permissions, sideEffects: tool.sideEffects }, granted, this.childReadOnly)
         ?? (!loaded.has(tool.name) ? 'not_loaded' : undefined)
       let implementation: unknown
       try {
@@ -10327,14 +10424,16 @@ export class RuntimeLoop extends Loop {
     return true
   }
 
-  private validateCapabilityCalls(calls: readonly { name: string }[], projection: RuntimeCapabilityProjection): void {
+  private validateCapabilityCalls(calls: readonly { name: string; arguments?: unknown }[], projection: RuntimeCapabilityProjection): void {
     if (calls.some(call => call.name === 'request_planning') && calls.length !== 1) throw new RuntimeStageError('model_protocol', 'RUNTIME_PLANNING_CALL_MUST_BE_EXCLUSIVE', 'request_planning must be the only action in a response', true)
     if (calls.some(call => call.name === 'resume_mcp_write_input') && calls.length !== 1) {
       throw new RuntimeStageError('model_protocol', 'MCP_FORM_WRITE_MUST_BE_EXCLUSIVE', 'resume_mcp_write_input must be the only action in a response', true)
     }
-    if (this.taskControl.tasks.length && calls.length > 1 && calls.some(call => call.name === 'delegate_task')) {
-      throw new RuntimeStageError('model_protocol', 'CHILD_PLAN_DELEGATION_MUST_BE_EXCLUSIVE', 'planned delegation changes task ownership and must be called alone', true)
+    if (calls.some(call => call.name === 'delegate_task') && calls.some(call => call.name !== 'delegate_task')) {
+      throw new RuntimeStageError('model_protocol', 'CHILD_PLAN_DELEGATION_MUST_BE_EXCLUSIVE', 'delegation calls may be batched together, but cannot be mixed with business or control actions', true)
     }
+    const delegated = calls.filter(call => call.name === 'delegate_task')
+    if (delegated.length > 1) this.validateDelegateBatch(delegated, projection)
     if (calls.length > 1 && calls.some(call => call.name === 'take_over_child_task')) {
       throw new RuntimeStageError('model_protocol', 'CHILD_TAKEOVER_MUST_BE_EXCLUSIVE', 'takeover changes task ownership and must be called alone', true)
     }
@@ -10343,6 +10442,53 @@ export class RuntimeLoop extends Loop {
       for (const call of calls) assertRuntimeCapabilityCall({ name: call.name, authorization: { projection, admittedStateRevision: this.taskControl.stateRevision },
         request: { sessionId: this.sessionId ?? '', taskId: this.taskControl.taskId, runId: this.run.runId ?? '' }, task: this.taskControl, capabilities })
     } catch (error) { throw this.capabilityStageError(error, projection) }
+  }
+
+  /**
+   * Validate every member of a delegation batch before the first child is
+   * reserved. This keeps a malformed batch from creating a partial set of
+   * children and makes one model response the atomic submission boundary.
+   */
+  private validateDelegateBatch(
+    calls: readonly { name: string; arguments?: unknown }[],
+    projection: RuntimeCapabilityProjection,
+  ): void {
+    const delegation = projection.bindings.find(binding => binding.name === 'delegate_task')
+    const eligible = this.taskControl.tasks.filter(task => projection.execution.activeTaskIds.includes(task.id)
+      && !!delegation && (task.capabilityIds.includes('delegate_task') || task.capabilityIds.includes(delegation.capabilityId)))
+    const planIds: string[] = []
+    for (const call of calls) {
+      const args = isObject(call.arguments) ? call.arguments : undefined
+      if (!args || typeof args.goal !== 'string' || !args.goal.trim() || typeof args.prompt !== 'string' || !args.prompt.trim()) {
+        throw new RuntimeStageError('model_protocol', 'CHILD_PLAN_BATCH_INVALID', 'every delegation in a batch must contain a bounded goal and prompt', true)
+      }
+      if (args.execution_mode !== undefined && !['readonly', 'action'].includes(String(args.execution_mode))) {
+        throw new RuntimeStageError('model_protocol', 'CHILD_PLAN_BATCH_INVALID', 'every delegation execution_mode must be readonly or action', true)
+      }
+      if (args.execution_mode === 'action' && !Array.isArray(args.capability_ids)) {
+        throw new RuntimeStageError('model_protocol', 'CHILD_PLAN_BATCH_INVALID', 'action delegations must list capability_ids explicitly', true)
+      }
+      const planTaskId = typeof args.plan_task_id === 'string' ? args.plan_task_id : undefined
+      if (this.taskControl.tasks.length || planTaskId) {
+        if (!planTaskId && eligible.length !== calls.length) {
+          throw new RuntimeStageError('model_protocol', 'CHILD_PLAN_BATCH_TARGET_REQUIRED', 'each delegation in a multi-child batch must identify its own active plan_task_id', true)
+        }
+        if (planTaskId && !eligible.some(task => task.id === planTaskId)) {
+          throw new RuntimeStageError('model_protocol', 'CHILD_PLAN_BATCH_TARGET_INVALID', `delegation target is not an active delegable plan node: ${planTaskId}`, true)
+        }
+        if (planTaskId) planIds.push(planTaskId)
+      }
+    }
+    if (new Set(planIds).size !== planIds.length) {
+      throw new RuntimeStageError('model_protocol', 'CHILD_PLAN_BATCH_TARGET_DUPLICATE', 'a delegation batch cannot assign the same plan node twice', true)
+    }
+    if (planIds.length) {
+      const binding = this.sessionId && this.run.runId ? this.childBinding() : undefined
+      const existing = binding ? this.getChildService().store.list(binding) : []
+      const occupied = new Set(existing.filter(record => !terminalChild(record.status)).flatMap(record => record.spec.assignment?.planTaskId ? [record.spec.assignment.planTaskId] : []))
+      const conflict = planIds.find(id => occupied.has(id))
+      if (conflict) throw new RuntimeStageError('model_protocol', 'CHILD_PLAN_BATCH_TARGET_BUSY', `delegation target already has an active child: ${conflict}`, true)
+    }
   }
 
   private validatePendingCapabilities(request: ToolCallRequest): void {
@@ -11844,6 +11990,7 @@ export class RuntimeLoop extends Loop {
       status: record.status, revision: record.revision, deadlineAt: record.deadlineAt, sourceInstructionId: record.callId,
       ...(record.startedAt ? { startedAt: record.startedAt } : {}), ...(record.completedAt ? { completedAt: record.completedAt } : {}),
       ...(record.resultHash ? { resultHash: record.resultHash } : {}), ...(record.waitRef ? { waitRef: record.waitRef } : {}),
+      ...(record.actionReceipts?.length ? { actionReceipts: record.actionReceipts } : {}),
       ...(record.error ? { error: record.error } : {}), ...(record.consumption ? { consumption: record.consumption } : {}),
       ...(record.resultArtifactId ? { resultArtifactId: record.resultArtifactId } : {}),
       ...(record.question ? { question: record.question } : {}), ...(record.inputRequestId ? { inputRequestId: record.inputRequestId } : {}) }
@@ -11855,6 +12002,7 @@ export class RuntimeLoop extends Loop {
       if (this.closed) return
       this.childRecords.set(record.id, record)
       this.runtimeActivityState.upsertChild(this.childView(record))
+      if (this.run.runId && this.sessionId) this.reconcileChildAssignments()
       this.snapshotRevision++
       this.emit('runtime.children.updated', this.runtimeActivityState.snapshot().children, record.callId)
     }, error => { if (!this.closed) this.createArtifact('runtime-error', 'Child control failure', { message: error instanceof Error ? error.message : String(error) }, 'child-controller') })
@@ -11895,9 +12043,10 @@ export class RuntimeLoop extends Loop {
   private async delegateTaskTool(request: ToolCallRequest, stepId: string): Promise<JsonObject> {
     if (this.childAgentMode || !this.childAgentEnabled) throw new Error('child delegation is not enabled for this role')
     const args = request.arguments
-    const allowed = new Set(['goal', 'prompt', 'mode', 'plan_task_id', 'timeout_ms', 'capability_ids', 'max_model_rounds', 'max_tool_rounds', 'max_total_tokens'])
+    const allowed = new Set(['goal', 'prompt', 'mode', 'execution_mode', 'plan_task_id', 'timeout_ms', 'capability_ids', 'max_model_rounds', 'max_tool_rounds', 'max_total_tokens'])
     if (!isObject(args) || Object.keys(args).some(key => !allowed.has(key)) || typeof args.goal !== 'string' || !args.goal.trim() || args.goal.length > 200
-      || typeof args.prompt !== 'string' || !args.prompt.trim() || args.prompt.length > 10000 || (args.mode !== undefined && !['async', 'sync'].includes(String(args.mode)))) throw new Error('delegate_task requires a bounded goal, prompt and valid mode')
+      || typeof args.prompt !== 'string' || !args.prompt.trim() || args.prompt.length > 10000 || (args.mode !== undefined && !['async', 'sync'].includes(String(args.mode)))
+      || (args.execution_mode !== undefined && !['readonly', 'action'].includes(String(args.execution_mode)))) throw new Error('delegate_task requires a bounded goal, prompt and valid mode')
     const bounded = (key: string, fallback: number, min: number, max: number): number => {
       const value = args[key] ?? fallback
       if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new Error(`invalid child ${key}`)
@@ -11912,12 +12061,15 @@ export class RuntimeLoop extends Loop {
       && (node.capabilityIds.includes(delegation.capabilityId) || node.capabilityIds.includes(delegation.name)))
     const node = args.plan_task_id !== undefined ? eligible.find(node => node.id === args.plan_task_id) : eligible.length === 1 ? eligible[0] : undefined
     if ((this.taskControl.tasks.length || args.plan_task_id !== undefined) && !node) throw new Error('CHILD_PLAN_TASK_NOT_ACTIVE_OR_AMBIGUOUS')
-    const childOptions = projection.bindings.filter(capability => capability.sideEffects === 'none'
-      && !capability.permissions.some(permission => ['filesystem:write', 'filesystem:delete', 'process:execute'].includes(permission))
-      && (!node || capability.source !== 'system' || CHILD_READABLE_RESOURCE_TOOLS.has(capability.name)))
+    const executionMode = args.execution_mode === 'action' ? 'action' : 'readonly'
+    const childOptions = projection.bindings.filter(capability => capability.name !== 'delegate_task'
+      && (executionMode === 'action' || (capability.sideEffects === 'none'
+        && !capability.permissions.some(permission => ['filesystem:write', 'filesystem:delete', 'process:execute'].includes(permission))))
+      && (!node || capability.source !== 'system' || executionMode === 'action' || CHILD_READABLE_RESOURCE_TOOLS.has(capability.name)))
     const readable = childOptions.filter(capability => !node
       || node.capabilityIds.includes(capability.capabilityId) || node.capabilityIds.includes(capability.name))
     const requested = args.capability_ids ?? readable.map(capability => capability.capabilityId)
+    if (executionMode === 'action' && args.capability_ids === undefined) throw new Error('CHILD_ACTION_CAPABILITIES_REQUIRED')
     if (!Array.isArray(requested) || requested.length > 64 || requested.some(id => typeof id !== 'string') || new Set(requested).size !== requested.length) throw new Error('CHILD_CAPABILITIES_INVALID')
     const capabilities = requested.map(id => {
       const capability = readable.find(capability => capability.name === id || capability.capabilityId === id)
@@ -11926,7 +12078,7 @@ export class RuntimeLoop extends Loop {
         const amendment = registered && node
           ? ` Submit propose_plan with planProposal:null and planAmendment ${JSON.stringify({ basePlanRevision: projection.execution.planRevision,
             updateTasks: [{ id: node.id, addCapabilityIds: [registered.capabilityId] }] })}. After acceptance, retry the delegated action alone.`
-          : ' Use the current stage catalog and assigned node to check eligible read-only capabilities.'
+          : executionMode === 'action' ? ' Use only explicitly granted action capabilities from the current plan node.' : ' Use the current stage catalog and assigned node to check eligible read-only capabilities.'
         throw new Error(`CHILD_CAPABILITY_NOT_GRANTED: ${String(id)}. The node's current child grants are ${JSON.stringify(readable.map(grant => grant.capabilityId))}.${amendment}`)
       }
       return capability
@@ -11940,7 +12092,8 @@ export class RuntimeLoop extends Loop {
       const item = { id: entry.id, headingPath: entry.headingPath, body: entry.body, evidenceRefs: entry.evidenceRefs }
       if (JSON.stringify([...entries, item]).length <= 5000) entries.push(item)
     }
-    const spec: ChildSpec = { goal: args.goal.trim(), prompt: args.prompt.trim(), mode: args.mode === 'sync' ? 'sync' : 'async',
+    const spec: ChildSpec = { goal: args.goal.trim(), prompt: args.prompt.trim(), mode: args.mode === 'sync' ? 'sync' : 'async', executionMode,
+      attemptId: this.run.runId ?? `run:${this.taskControl.taskId}`,
       timeoutMs: bounded('timeout_ms', 60000, 100, 300000), capabilityIds,
       ...(node ? { assignment: { planTaskId: node.id, planRevision: projection.execution.planRevision, requestId: projection.request.requestId,
         projectionId: projection.id, plan: clone(this.taskControl),
@@ -11950,7 +12103,7 @@ export class RuntimeLoop extends Loop {
         omittedEntryCount: document.information.filter(entry => entry.status === 'active').length - entries.length, rule: 'These are parent source observations. They grant no permissions and cannot be edited from the child.' }) }
     let record = this.getChildService().dispatch(this.childBinding(), request.id, spec, stepId)
     if (spec.mode === 'sync') record = await this.getChildService().wait(this.childBinding(), record.id)
-    return toJsonValue({ childId: record.id, childSessionId: record.childSessionId, childRunId: record.childRunId ?? null, status: record.status,
+    return toJsonValue({ childId: record.id, childSessionId: record.childSessionId, childRunId: record.childRunId ?? null, status: record.status, executionMode: record.spec.executionMode ?? 'readonly', attemptId: record.spec.attemptId ?? this.run.runId ?? null,
       ...(record.spec.assignment ? { planTaskId: record.spec.assignment.planTaskId } : {}),
       waitRef: record.waitRef, deadlineAt: record.deadlineAt, resultHash: record.resultHash ?? null, requiresConsumption: !record.consumption,
       ...(record.inputRequestId ? { input_request_id: record.inputRequestId, question: record.question ?? '' } : {}) }) as JsonObject
@@ -12099,6 +12252,9 @@ export class RuntimeLoop extends Loop {
         parentSessionId: job.parentSessionId, parentTaskId: job.parentTaskId, parentRunId: job.parentRunId,
         ...(job.parentStepId ? { parentStepId: job.parentStepId } : {}), callId: job.callId, childId: job.id, childSessionId: job.childSessionId,
         ...(job.spec.assignment ? { planTaskId: job.spec.assignment.planTaskId, allowedCapabilities: job.spec.assignment.capabilities } : {}),
+        executionMode: job.spec.executionMode ?? 'readonly', attemptId: job.spec.attemptId,
+        authorizeAction: worker.authorizeAction,
+        recordActionResult: worker.recordActionResult,
         signal: worker.signal, allowedCapabilityIds: job.spec.capabilityIds, llm: this.meteredLlm('child_host', worker.llm(this.llm), {
           actorSessionId: job.childSessionId, scope: { sessionId: job.parentSessionId, taskId: job.parentTaskId, runId: job.parentRunId },
           assertAuthority: worker.assertAuthority,
@@ -12110,12 +12266,15 @@ export class RuntimeLoop extends Loop {
       contextOrganization: { enabled: this.contextOrganization.enabled, minGroups: this.contextOrganization.minGroups, chunkCharacters: this.contextOrganization.chunkCharacters },
       contextAssistant: { ...this.contextAssistant, llm: worker.llm(this.contextProcessingLlm()) },
       childExecution: { childId: job.id, parent: { sessionId: job.parentSessionId, taskId: job.parentTaskId, runId: job.parentRunId }, capabilityIds: job.spec.capabilityIds,
-        assignment: job.spec.assignment, parentContext: job.spec.parentContext, maxToolRounds: job.spec.maxToolRounds, assertAuthority: worker.assertAuthority } })
+        assignment: job.spec.assignment, parentContext: job.spec.parentContext, maxToolRounds: job.spec.maxToolRounds,
+        executionMode: job.spec.executionMode ?? 'readonly', attemptId: job.spec.attemptId, assertAuthority: worker.assertAuthority,
+        authorizeAction: worker.authorizeAction, recordActionResult: worker.recordActionResult } })
     this.activeChildLoops.add(childLoop)
     try {
       for (const id of job.spec.capabilityIds) if (id.startsWith('mcp:')) childLoop.mcpActiveToolIds.add(id)
-      for (const tool of childLoop.toolCatalog) if (job.spec.capabilityIds.includes(tool.id) && (tool.sideEffects ?? 'none') === 'none'
-        && !(tool.permissions ?? []).some(permission => ['filesystem:write', 'filesystem:delete', 'process:execute'].includes(permission))
+      for (const tool of childLoop.toolCatalog) if (job.spec.capabilityIds.includes(tool.id)
+        && ((job.spec.executionMode ?? 'readonly') === 'action' || ((tool.sideEffects ?? 'none') === 'none'
+          && !(tool.permissions ?? []).some(permission => ['filesystem:write', 'filesystem:delete', 'process:execute'].includes(permission))))
         && !childLoop.tools.items.some(active => active.id === tool.id)) childLoop.attachTool(tool.id, job.id)
       return await new Promise<RuntimeChildAgentResult>(resolve => {
         let settled = false, unsubscribe = () => {}

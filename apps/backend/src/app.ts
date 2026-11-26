@@ -202,6 +202,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       manager = new ExperimentManager(projectDir, {
         ...(options.runtimeLoop?.llm ? { llm: options.runtimeLoop.llm } : {}),
         runtimeLoop: {
+          // Experiments need the complete parent/child runtime so targeted
+          // benchmark cases can exercise A2A. Individual sessions keep their
+          // own runtime option and are unaffected by this experiment default.
+          childAgentEnabled: options.runtimeLoop?.childAgentEnabled ?? true,
           ...(options.runtimeLoop?.streamDelayMs === undefined ? {} : { streamDelayMs: options.runtimeLoop.streamDelayMs }),
           ...(options.runtimeLoop?.stepDelayMs === undefined ? {} : { stepDelayMs: options.runtimeLoop.stepDelayMs }),
         },

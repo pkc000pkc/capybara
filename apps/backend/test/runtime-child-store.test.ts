@@ -176,6 +176,27 @@ test('model reservations are finite and survive worker replacement', () => {
   } finally { f.close() }
 })
 
+test('action children use one durable writer lease and retain unknown outcomes', () => {
+  const f = fixture()
+  try {
+    const actionSpec: ChildSpec = { ...f.spec, executionMode: 'action', attemptId: 'attempt-1' }
+    const first = f.store.reserve(f.binding, 'action-call-1', actionSpec).record
+    f.store.claim(f.binding, first.id, 'action-owner')
+    const request = { callId: 'write-1', toolName: 'update_order', capabilityId: 'project:update_order', argumentHash: 'a'.repeat(64) }
+    const lease = f.store.acquireActionLease(f.binding, first.id, 'action-owner', request)
+    assert.equal(lease.outcome, 'unknown')
+    assert.throws(() => f.store.acquireActionLease(f.binding, first.id, 'action-owner', { ...request, callId: 'write-2' }), /LEASE_CONFLICT/)
+    const second = f.store.reserve(f.binding, 'action-call-2', actionSpec).record
+    f.store.claim(f.binding, second.id, 'second-owner')
+    assert.throws(() => f.store.acquireActionLease(f.binding, second.id, 'second-owner', { ...request, callId: 'write-3' }), /LEASE_CONFLICT/)
+    const receipt = f.store.recordActionResult(f.binding, first.id, 'action-owner', { ...request, outcome: 'succeeded', resultArtifactId: 'artifact-1', resultHash: 'b'.repeat(64) })
+    assert.equal(receipt.outcome, 'succeeded')
+    assert.equal(f.store.load(f.binding, first.id).actionReceipts?.[0]?.resultHash, 'b'.repeat(64))
+    assert.throws(() => f.store.recordActionResult(f.binding, first.id, 'action-owner', { ...request, outcome: 'failed', resultHash: 'c'.repeat(64) }), /RESULT_IMMUTABLE/)
+    const db = f.db(); try { assert.equal((db.prepare('SELECT COUNT(*) AS n FROM runtime_child_action_leases').get() as { n: number }).n, 1) } finally { db.close() }
+  } finally { f.close() }
+})
+
 test('deadline expiry and cancellation retain their real primary outcome when a result arrives late', async () => {
   const f = fixture()
   try {
@@ -218,7 +239,7 @@ test('project-referenced child originals survive clearing while control jobs and
     project.save(engine, revision)
     const job = f.reserve(); f.store.claim(f.binding, job.id, 'owner')
     db.exec('BEGIN IMMEDIATE'); clearSessionContexts(db); db.exec('COMMIT')
-    for (const table of ['runtime_child_tasks', 'runtime_child_reads', 'runtime_child_reviews', 'runtime_child_late_results']) assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n, 0)
+    for (const table of ['runtime_child_tasks', 'runtime_child_reads', 'runtime_child_reviews', 'runtime_child_late_results', 'runtime_child_action_leases']) assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n, 0)
     assert.equal(project.commits.readArtifactSource(meta.id, f.binding.sessionId)!.body, body)
     assert.throws(() => f.store.reserve(f.binding, 'new-call', f.spec), /CONTEXT_SESSION_CLEARED/)
     assert.throws(() => project.commits.saveArtifactSource(f.binding.sessionId, meta, body), /CONTEXT_SESSION_CLEARED/)

@@ -107,6 +107,7 @@ export const INTERNAL_RESOURCE_TOOLS: InternalResourceToolDefinition[] = [
         goal: { type: 'string', minLength: 1, maxLength: 200 },
         prompt: { type: 'string', minLength: 1, maxLength: 10_000 },
         mode: { enum: ['async', 'sync'] },
+        execution_mode: { enum: ['readonly', 'action'] },
         plan_task_id: { type: 'string', minLength: 1, maxLength: 512 },
         timeout_ms: { type: 'integer', minimum: 100, maximum: 300000 },
         capability_ids: { type: 'array', items: { type: 'string', minLength: 1 }, uniqueItems: true, maxItems: 64 },

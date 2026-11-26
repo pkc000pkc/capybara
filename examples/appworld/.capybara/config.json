@@ -31,8 +31,9 @@
     ]
   },
   "context": {
+    "context_window_tokens": 256000,
     "max_input_tokens": 128000,
-    "reserved_output_tokens": 8192
+    "reserved_output_tokens": 65536
   },
   "tools": [
     "tools/appworld/manifest.json"

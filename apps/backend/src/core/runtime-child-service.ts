@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { RuntimeChildStore, terminalChild, type ChildBinding, type ChildRecord, type ChildSpec } from '#core/runtime-child-store'
+import { RuntimeChildStore, terminalChild, type ChildActionRequest, type ChildActionResult, type ChildBinding, type ChildRecord, type ChildSpec } from '#core/runtime-child-store'
+import type { RuntimeChildActionReceipt } from '#protocol/runtime-protocol'
 import type { RuntimeLoopState } from '#core/runtime-loop-state'
 import type { RuntimeChildAgentResult, RuntimeLlm } from '#core/runtime-loop'
 import type { LlmChatRequest } from '#util/llm'
@@ -12,6 +13,8 @@ export interface ChildWorker {
   assertAuthority(): void
   llm(base: RuntimeLlm): RuntimeLlm
   progress(checkpoint: RuntimeLoopState, waiting?: { question?: string; inputRequestId?: string }): void
+  authorizeAction(request: ChildActionRequest): RuntimeChildActionReceipt
+  recordActionResult(result: ChildActionResult): RuntimeChildActionReceipt
   respond(handler: (humanRequestId: string, message: string) => void): void
 }
 type Active = { lease: string; controller: AbortController; timer?: ReturnType<typeof setTimeout>; respond?: (id: string, message: string) => void }
@@ -76,6 +79,8 @@ export class RuntimeChildService {
           try { this.publish(this.store.progress(binding, record.id, lease, state, waiting)) }
           catch (error) { active.controller.abort(); this.failed(error) }
         },
+        authorizeAction: request => this.store.acquireActionLease(binding, record.id, lease, request),
+        recordActionResult: result => this.store.recordActionResult(binding, record.id, lease, result),
         respond: handler => { active.respond = handler },
         llm: base => ({ admitsTransportAttempts: base.admitsTransportAttempts, getConfig: () => base.getConfig(), chat: async request => {
           worker.assertAuthority()

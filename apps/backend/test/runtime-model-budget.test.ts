@@ -134,6 +134,37 @@ test('configured counters see the full wire body and check the context before se
   } finally { await api.close(); f.close() }
 })
 
+test('a 128K input and 64K output reservation fits the configured 256K model window', async () => {
+  const f = fixture()
+  let calls = 0
+  const base: RuntimeLlm = {
+    getConfig: () => config,
+    chat: async requestValue => {
+      calls += 1
+      assert.equal(requestValue.maxTokens, 65_536)
+      return { provider: 'custom', model: config.model, text: '{}', finishReason: 'stop', raw: {}, usage: { totalTokens: 128_010 } }
+    },
+  }
+  const large: ModelMeterOptions = {
+    ...options,
+    limits: { maxAttempts: 1, maxTokens: 200_000 },
+    maxInputTokens: 128_000,
+    maxOutputTokens: 65_536,
+    contextWindowTokens: 256_000,
+    countTokens: () => 128_000,
+  }
+  try {
+    await f.meter.wrap(base, large).chat(request)
+    assert.equal(calls, 1)
+    const row = f.db.prepare('SELECT input_tokens, output_reserve, charged_tokens FROM runtime_model_budget_attempts').get() as {
+      input_tokens: number
+      output_reserve: number
+      charged_tokens: number
+    }
+    assert.deepEqual({ ...row }, { input_tokens: 128_000, output_reserve: 65_536, charged_tokens: 193_536 })
+  } finally { f.close() }
+})
+
 test('a saved text model profile counts its template on the wire and enforces the model window', async () => {
   const f = fixture()
   const bodies: string[] = []

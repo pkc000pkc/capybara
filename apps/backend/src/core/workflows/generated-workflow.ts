@@ -1,5 +1,6 @@
 import { Ajv, type ValidateFunction } from 'ajv'
 import jsonata from 'jsonata'
+import { createHash } from 'node:crypto'
 import type { RuntimeCapabilityAuthorization } from '#protocol/runtime-protocol'
 
 export interface WorkflowToolStep {
@@ -29,15 +30,48 @@ export interface WorkflowForeachStep {
   when?: string
 }
 
+export interface WorkflowTransformStep {
+  id: string
+  type: 'transform'
+  operator: 'map' | 'flat_map' | 'filter' | 'sort' | 'dedupe' | 'select_fields' | 'group_by' | 'partition' | 'paginate' | 'reduce' | 'normalize'
+  input: unknown
+  expression?: string
+  fields?: string[]
+  initial?: unknown
+  pageSize?: number
+  when?: string
+}
+
+export interface WorkflowAssertStep {
+  id: string
+  type: 'assert'
+  input: unknown
+  expression: string
+  when?: string
+}
+
 export type GeneratedWorkflowStep =
   | WorkflowToolStep
   | WorkflowFilterStep
   | WorkflowForeachStep
+  | WorkflowTransformStep
+  | WorkflowAssertStep
 
 export interface GeneratedWorkflowDefinition {
   version: 1
   goal: string
   steps: GeneratedWorkflowStep[]
+}
+
+export interface WorkflowCompileSummary {
+  graphHash: string
+  nodeCount: number
+  toolNodeCount: number
+  deterministicNodeCount: number
+  foreachNodeCount: number
+  maxForeachItems: number
+  semanticNodeCount: number
+  estimatedModelRequests: number
 }
 
 export interface WorkflowExecutionData {
@@ -63,7 +97,7 @@ export function needsWorkflowOutput(step: GeneratedWorkflowStep, sourceId: strin
   }
   if (expandedIteration) return 'arguments' in step && reads(step.arguments)
   if (step.when || step.type === 'filter') return true
-  return reads(step.arguments) || (step.type === 'foreach' && reads(step.input))
+  return reads('arguments' in step ? step.arguments : 'input' in step ? step.input : undefined)
 }
 
 export const GENERATED_WORKFLOW_PARAMETERS = {
@@ -115,6 +149,34 @@ export const GENERATED_WORKFLOW_PARAMETERS = {
               maxItems: { type: 'integer', minimum: 1, maximum: 100 },
               tool: { type: 'string', minLength: 1 },
               arguments: { type: 'object' },
+              when: { type: 'string', minLength: 1, maxLength: 2000 },
+            },
+          },
+          {
+            type: 'object',
+            required: ['id', 'type', 'operator', 'input'],
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string', pattern: '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$' },
+              type: { const: 'transform' },
+              operator: { enum: ['map', 'flat_map', 'filter', 'sort', 'dedupe', 'select_fields', 'group_by', 'partition', 'paginate', 'reduce', 'normalize'] },
+              input: {},
+              expression: { type: 'string', minLength: 1, maxLength: 2000 },
+              fields: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 200 } },
+              initial: {},
+              pageSize: { type: 'integer', minimum: 1, maximum: 1000 },
+              when: { type: 'string', minLength: 1, maxLength: 2000 },
+            },
+          },
+          {
+            type: 'object',
+            required: ['id', 'type', 'input', 'expression'],
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string', pattern: '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$' },
+              type: { const: 'assert' },
+              input: {},
+              expression: { type: 'string', minLength: 1, maxLength: 2000 },
               when: { type: 'string', minLength: 1, maxLength: 2000 },
             },
           },
@@ -185,7 +247,56 @@ export function parseGeneratedWorkflow(
       step.tool = resolvedToolName
     }
   }
+  const position = new Map(definition.steps.map((step, index) => [step.id, index]))
+  const references = (value: unknown, result: string[] = []): string[] => {
+    if (Array.isArray(value)) { for (const item of value) references(item, result); return result }
+    if (!isObject(value)) return result
+    if (Object.keys(value).length === 1 && typeof value.$ref === 'string') {
+      const [root, id] = value.$ref.split('.')
+      if (root === 'steps' && id) result.push(id)
+      return result
+    }
+    for (const item of Object.values(value)) references(item, result)
+    return result
+  }
+  for (const [index, step] of definition.steps.entries()) {
+    const refs = references(step)
+    for (const ref of refs) {
+      const target = position.get(ref)
+      if (target === undefined) throw new Error(`generated workflow references unknown step: ${ref}`)
+      if (target >= index) throw new Error(`generated workflow reference must point to a prior step: ${step.id} -> ${ref}`)
+    }
+    if (step.type === 'transform' && ['map', 'flat_map', 'filter', 'sort', 'dedupe', 'group_by', 'partition', 'reduce'].includes(step.operator) && !step.expression) {
+      throw new Error(`generated workflow transform ${step.id} requires expression`)
+    }
+    if (step.type === 'transform' && step.operator === 'select_fields' && (!step.fields || step.fields.length === 0)) {
+      throw new Error(`generated workflow transform ${step.id} requires fields`)
+    }
+    if (step.type === 'transform' && step.operator === 'paginate' && !step.pageSize && !step.expression) {
+      throw new Error(`generated workflow transform ${step.id} requires pageSize or expression`)
+    }
+  }
   return definition
+}
+
+export function compileGeneratedWorkflow(
+  value: unknown,
+  availableTools: ReadonlyMap<string, string>,
+): { definition: GeneratedWorkflowDefinition; summary: WorkflowCompileSummary } {
+  const definition = parseGeneratedWorkflow(value, availableTools)
+  const serialized = JSON.stringify(definition)
+  const summary: WorkflowCompileSummary = {
+    graphHash: createHash('sha256').update(serialized).digest('hex'),
+    nodeCount: definition.steps.length,
+    toolNodeCount: definition.steps.filter(step => step.type === 'tool' || step.type === 'foreach').length,
+    deterministicNodeCount: definition.steps.filter(step => step.type === 'filter' || step.type === 'transform' || step.type === 'assert').length,
+    foreachNodeCount: definition.steps.filter(step => step.type === 'foreach').length,
+    maxForeachItems: definition.steps.reduce((max, step) => step.type === 'foreach' ? Math.max(max, step.maxItems ?? 20) : max, 0),
+    semanticNodeCount: 0,
+    estimatedModelRequests: 1,
+  }
+  if (summary.nodeCount > 50 || summary.maxForeachItems > 100) throw new Error('generated workflow exceeds deterministic execution limits')
+  return { definition, summary }
 }
 
 export async function evaluateWorkflowExpression(
@@ -248,4 +359,70 @@ export async function filterWorkflowItems(
     }))) selected.push(items[index])
   }
   return selected
+}
+
+export async function transformWorkflowItems(
+  input: unknown[],
+  operator: WorkflowTransformStep['operator'],
+  expression: string | undefined,
+  fields: string[] | undefined,
+  data: WorkflowExecutionData,
+  options: Pick<WorkflowTransformStep, 'initial' | 'pageSize'> = {},
+): Promise<unknown> {
+  if (operator === 'select_fields') {
+    return input.map(item => {
+      if (!isObject(item)) return item
+      return Object.fromEntries((fields ?? []).filter(field => field in item).map(field => [field, item[field]]))
+    })
+  }
+  if (operator === 'normalize') return input.map(item => normalizeWorkflowValue(item))
+  if (operator === 'paginate') {
+    const evaluatedSize = expression ? Number(await evaluateWorkflowExpression(expression, input, { steps: data.steps })) : undefined
+    const size = options.pageSize ?? evaluatedSize ?? 20
+    if (!Number.isSafeInteger(size) || size < 1 || size > 1000) throw new Error('workflow paginate page size must be between 1 and 1000')
+    const pages: unknown[][] = []
+    for (let index = 0; index < input.length; index += size) pages.push(input.slice(index, index + size))
+    return pages
+  }
+  if (!expression) throw new Error(`workflow ${operator} requires expression`)
+  if (operator === 'filter') return filterWorkflowItems(input, expression, data)
+  if (operator === 'map') return Promise.all(input.map((item, index) => evaluateWorkflowExpression(expression, item, { steps: data.steps, index })))
+  if (operator === 'flat_map') {
+    const mapped = await Promise.all(input.map((item, index) => evaluateWorkflowExpression(expression, item, { steps: data.steps, index })))
+    return mapped.flatMap(item => Array.isArray(item) ? item : [item])
+  }
+  const keyed = await Promise.all(input.map(async (item, index) => ({ item, key: await evaluateWorkflowExpression(expression, item, { steps: data.steps, index }) })))
+  if (operator === 'sort') return keyed.sort((a, b) => String(a.key).localeCompare(String(b.key), undefined, { numeric: true })).map(item => item.item)
+  if (operator === 'dedupe') {
+    const seen = new Set<string>()
+    return keyed.filter(item => { const key = JSON.stringify(item.key); if (seen.has(key)) return false; seen.add(key); return true }).map(item => item.item)
+  }
+  if (operator === 'partition') {
+    const selected: unknown[] = [], rejected: unknown[] = []
+    for (let index = 0; index < input.length; index += 1) {
+      const matches = Boolean(await evaluateWorkflowExpression(expression, input[index], { steps: data.steps, index }))
+      const bucket = matches ? selected : rejected
+      bucket.push(input[index])
+    }
+    return { selected, rejected }
+  }
+  if (operator === 'reduce') {
+    let accumulator: unknown = options.initial ?? 0
+    for (let index = 0; index < input.length; index += 1) accumulator = await evaluateWorkflowExpression(expression, input[index], { steps: data.steps, index, accumulator, value: input[index], $accumulator: accumulator, $value: input[index] })
+    return accumulator
+  }
+  const groups = new Map<string, unknown[]>()
+  for (const item of keyed) { const key = JSON.stringify(item.key); const group = groups.get(key) ?? []; group.push(item.item); groups.set(key, group) }
+  return [...groups].map(([key, items]) => ({ key: JSON.parse(key), items }))
+}
+
+function normalizeWorkflowValue(value: unknown): unknown {
+  if (typeof value === 'string') return value.trim()
+  if (Array.isArray(value)) return value.map(normalizeWorkflowValue)
+  if (isObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key.trim(), normalizeWorkflowValue(item)]))
+  return value
+}
+
+export async function assertWorkflowValue(input: unknown, expression: string, data: WorkflowExecutionData): Promise<boolean> {
+  return Boolean(await evaluateWorkflowExpression(expression, input, { steps: data.steps }))
 }

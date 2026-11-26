@@ -2327,6 +2327,37 @@ test('model-generated workflow chains list, filter, and read without intermediat
   }, { llm })
 })
 
+test('generated workflow executes transform and assert nodes without another model turn', async () => {
+  const requests: LlmChatRequest[] = []
+  const llm = fakeLlm(async (request) => {
+    requests.push(structuredClone({ ...request, signal: undefined }))
+    if (requests.length === 1) return { provider: 'custom', model: 'test-model', text: '', toolCalls: [{ id: 'load-transform-tools', name: 'load_resources', arguments: { ids: ['project-files:list_files'] } }], finishReason: 'tool_calls', raw: {} }
+    if (requests.length === 2) return { provider: 'custom', model: 'test-model', text: '', toolCalls: [{ id: 'execute-transform-workflow', name: 'execute_workflow', arguments: {
+      version: 1, goal: 'List files, select stable fields, and assert the collection is non-empty.', steps: [
+        { id: 'list_documents', type: 'tool', tool: 'project-files:list_files', arguments: { path: 'test-docs', recursive: false, max_entries: 100 } },
+        { id: 'select_fields', type: 'transform', operator: 'select_fields', input: { $ref: 'steps.list_documents.output.entries' }, fields: ['path', 'type'] },
+        { id: 'assert_non_empty', type: 'assert', input: { $ref: 'steps.select_fields.output' }, expression: '$count($) > 0' },
+      ],
+    } }], finishReason: 'tool_calls', raw: {} }
+    const workflowResult = request.messages.find(message => message.toolCallId === 'execute-transform-workflow')
+    assert.match(workflowResult?.content ?? '', /assert_non_empty/)
+    assert.match(workflowResult?.content ?? '', /select_fields/)
+    return { provider: 'custom', model: 'test-model', text: JSON.stringify({ status: 'completed', content: 'The deterministic workflow completed.' }), finishReason: 'stop', raw: {} }
+  })
+  await withRuntime(async (client) => {
+    const start = client.events.length
+    client.send('chat.message.send', { clientMessageId: 'generated-transform-workflow-message', content: [{ type: 'text', text: 'Run the deterministic collection check.' }], autoStart: true })
+    await client.waitFor('run.state.changed', event => event.payload.status === 'completed', start)
+    assert.equal(requests.length, 3)
+    const workflow = client.events.filter((event): event is EventOf<'runtime.workflows.updated'> => event.type === 'runtime.workflows.updated').at(-1)?.payload.items.at(-1)
+    assert.equal(workflow?.status, 'completed')
+    assert.equal(workflow?.compile?.deterministicNodeCount, 2)
+    assert.match(workflow?.compile?.graphHash ?? '', /^[a-f0-9]{64}$/)
+    assert.equal(workflow?.nodes.find(node => node.id === 'select_fields')?.status, 'completed')
+    assert.equal(workflow?.nodes.find(node => node.id === 'assert_non_empty')?.status, 'completed')
+  }, { llm })
+})
+
 test('a failed generated workflow Tool is returned to the model for recovery', async () => {
   const requests: LlmChatRequest[] = []
   const llm = fakeLlm(async (request) => {

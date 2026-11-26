@@ -7,7 +7,7 @@ export function clearSessionContexts(database: DatabaseSync): void {
   if (!tables.has('context_documents') && !tables.has('context_history') && !tables.has('runtime_waits') && !tables.has('runtime_mcp_operations') && !tables.has('runtime_mcp_inputs') && !tables.has('runtime_child_tasks') && !tables.has('context_artifact_sources') && !tables.has('runtime_auxiliary_calls') && !tables.has('runtime_model_budget_runs')) return
   database.exec('CREATE TABLE IF NOT EXISTS context_session_tombstones (session_id TEXT PRIMARY KEY, cleared_at TEXT NOT NULL)')
   const clearedAt = new Date().toISOString()
-  for (const table of ['sessions', 'runtime_trace', 'context_history', 'context_commits', 'context_archives', 'context_frontiers', 'context_recalls', 'context_publications', 'context_outcomes', 'context_outcome_attempts', 'runtime_mcp_operations', 'runtime_mcp_inputs', 'runtime_waits', 'runtime_wait_deadlines', 'runtime_wait_signals', 'runtime_child_tasks', 'runtime_child_reads', 'runtime_child_reviews', 'runtime_child_late_results', 'runtime_child_takeover_actions', 'context_artifact_sources', 'runtime_auxiliary_calls', 'runtime_auxiliary_events', 'runtime_model_budget_runs']) {
+  for (const table of ['sessions', 'runtime_trace', 'context_history', 'context_commits', 'context_archives', 'context_frontiers', 'context_recalls', 'context_publications', 'context_outcomes', 'context_outcome_attempts', 'runtime_mcp_operations', 'runtime_mcp_inputs', 'runtime_waits', 'runtime_wait_deadlines', 'runtime_wait_signals', 'runtime_child_tasks', 'runtime_child_reads', 'runtime_child_reviews', 'runtime_child_late_results', 'runtime_child_takeover_actions', 'runtime_child_action_leases', 'context_artifact_sources', 'runtime_auxiliary_calls', 'runtime_auxiliary_events', 'runtime_model_budget_runs']) {
     if (!tables.has(table)) continue
     const column = table === 'sessions' ? 'id' : 'session_id'
     const ids = database.prepare(`SELECT DISTINCT ${column} AS id FROM ${table}`).all() as Array<{ id: string }>
@@ -52,7 +52,7 @@ export function clearSessionContexts(database: DatabaseSync): void {
       }
     }
   }
-  for (const table of ['context_commits', 'context_archives', 'context_archive_spans', 'context_frontiers', 'context_recalls', 'context_publications', 'context_outcomes', 'context_outcome_attempts', 'runtime_mcp_operations', 'runtime_mcp_inputs', 'runtime_waits', 'runtime_wait_deadlines', 'runtime_wait_signals', 'runtime_child_tasks', 'runtime_child_reads', 'runtime_child_reviews', 'runtime_child_late_results', 'runtime_child_takeover_actions', 'runtime_auxiliary_calls', 'runtime_auxiliary_events', 'runtime_model_budget_attempts', 'runtime_model_budget_runs']) {
+  for (const table of ['context_commits', 'context_archives', 'context_archive_spans', 'context_frontiers', 'context_recalls', 'context_publications', 'context_outcomes', 'context_outcome_attempts', 'runtime_mcp_operations', 'runtime_mcp_inputs', 'runtime_waits', 'runtime_wait_deadlines', 'runtime_wait_signals', 'runtime_child_tasks', 'runtime_child_reads', 'runtime_child_reviews', 'runtime_child_late_results', 'runtime_child_takeover_actions', 'runtime_child_action_leases', 'runtime_auxiliary_calls', 'runtime_auxiliary_events', 'runtime_model_budget_attempts', 'runtime_model_budget_runs']) {
     if (tables.has(table)) database.exec(`DELETE FROM ${table}`)
   }
   if (tables.has('context_documents')) database.exec("DELETE FROM context_documents WHERE scope_id<>'project'")

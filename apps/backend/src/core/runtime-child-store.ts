@@ -4,11 +4,12 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { capabilityHash, runtimeExecutionState } from '#core/runtime-capability-projection'
 import type { RuntimeLoopState } from '#core/runtime-loop-state'
-import type { JsonValue, RuntimeCapabilityBinding, RuntimeChildAssignment, RuntimeChildSession, RuntimeChildStatus, RuntimeChildTakeover, RuntimeRequestBinding, RuntimeTaskControl } from '#protocol/runtime-protocol'
+import type { JsonValue, RuntimeCapabilityBinding, RuntimeChildActionOutcome, RuntimeChildActionReceipt, RuntimeChildAssignment, RuntimeChildSession, RuntimeChildStatus, RuntimeChildTakeover, RuntimeRequestBinding, RuntimeTaskControl } from '#protocol/runtime-protocol'
 
 export type ChildBinding = Pick<RuntimeRequestBinding, 'sessionId' | 'taskId' | 'runId'>
 export interface ChildSpec {
   goal: string; prompt: string; mode: 'async' | 'sync'; timeoutMs: number
+  executionMode?: 'readonly' | 'action'; attemptId?: string
   capabilityIds: string[]; maxModelRounds: number; maxToolRounds: number; maxTotalTokens: number
   parentContext: string; runner: 'local' | 'host'
   assignment?: {
@@ -27,6 +28,7 @@ export interface ChildRecord extends RuntimeChildSession {
   modelRounds: number; chargedTokens: number; output?: JsonValue; evidence?: JsonValue
   resultHash?: string; packet?: JsonValue; abortRequestedAt?: string
   readCount?: number
+  actionReceipts?: RuntimeChildActionReceipt[]
   question?: string; inputRequestId?: string
   takeoverPlan?: RuntimeTaskControl
 }
@@ -50,15 +52,26 @@ export interface ParentTakeoverAction {
 }
 
 type TakeoverInput = Pick<RuntimeChildTakeover, 'childId' | 'planTaskId' | 'reviewReceiptId' | 'callId' | 'requestId' | 'reason'>
+export interface ChildActionRequest {
+  callId: string
+  toolName: string
+  capabilityId: string
+  argumentHash: string
+}
+export interface ChildActionResult extends ChildActionRequest {
+  outcome: RuntimeChildActionOutcome
+  resultArtifactId?: string
+  resultHash?: string
+}
 type Row = { state_json: string }
 export const terminalChild = (status: RuntimeChildStatus) => ['succeeded', 'failed', 'cancelled', 'timed_out'].includes(status)
 export function childAssignment(record: ChildRecord): RuntimeChildAssignment | undefined {
   if (!record.spec.assignment) return undefined
-  if (record.takeover) return { planTaskId: record.takeover.planTaskId, childId: record.id, state: 'parent', takeoverId: record.takeover.id }
+  if (record.takeover) return { planTaskId: record.takeover.planTaskId, childId: record.id, state: 'parent', takeoverId: record.takeover.id, status: record.status }
   const decision = record.consumption?.decision
   const state = decision === 'accept' && record.status === 'succeeded' ? 'accepted'
     : terminalChild(record.status) && (decision === 'reject' || decision === 'conflict') ? 'retryable' : 'delegated'
-  return { planTaskId: record.spec.assignment.planTaskId, childId: record.id, state }
+  return { planTaskId: record.spec.assignment.planTaskId, childId: record.id, state, status: record.status }
 }
 const matches = (record: ChildRecord, binding: ChildBinding) => record.parentSessionId === binding.sessionId && record.parentTaskId === binding.taskId && record.parentRunId === binding.runId
 const sameOwner = (record: ChildRecord, owner: string) => record.owner?.id === owner
@@ -77,6 +90,7 @@ export class RuntimeChildStore {
       CREATE TABLE IF NOT EXISTS runtime_child_reviews(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,child_id TEXT NOT NULL,request_id TEXT NOT NULL,state_json TEXT NOT NULL,UNIQUE(child_id,request_id));
       CREATE TABLE IF NOT EXISTS runtime_child_late_results(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,child_id TEXT NOT NULL,state_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS runtime_child_takeover_actions(session_id TEXT NOT NULL, run_id TEXT NOT NULL, child_id TEXT NOT NULL, step_id TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(session_id,child_id,step_id));
+      CREATE TABLE IF NOT EXISTS runtime_child_action_leases(attempt_id TEXT PRIMARY KEY,session_id TEXT NOT NULL,child_id TEXT NOT NULL,lease_id TEXT NOT NULL,state_json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS runtime_children_parent ON runtime_child_tasks(session_id,run_id);
     `)
   }
@@ -103,9 +117,11 @@ export class RuntimeChildStore {
     return (this.db.prepare('SELECT state_json FROM runtime_child_tasks WHERE session_id=? AND run_id=? ORDER BY rowid').all(binding.sessionId, binding.runId) as Row[]).map(row => JSON.parse(row.state_json) as ChildRecord).filter(record => matches(record, binding))
   }
   reserve(binding: ChildBinding, callId: string, spec: ChildSpec, parentStepId?: string): { record: ChildRecord; created: boolean } {
-    if ([binding.sessionId, binding.taskId, binding.runId, callId].some(value => !value || value.length > 512)
+    const executionMode = spec.executionMode ?? 'readonly'
+    const attemptId = spec.attemptId ?? binding.runId
+    if ([binding.sessionId, binding.taskId, binding.runId, callId, attemptId].some(value => !value || value.length > 512)
       || !spec.goal.trim() || spec.goal.length > 200 || !spec.prompt.trim() || spec.prompt.length > 10000 || spec.parentContext.length > 8000
-      || !['async', 'sync'].includes(spec.mode) || !['local', 'host'].includes(spec.runner)
+      || !['async', 'sync'].includes(spec.mode) || !['readonly', 'action'].includes(executionMode) || !['local', 'host'].includes(spec.runner)
       || spec.capabilityIds.length > 64 || new Set(spec.capabilityIds).size !== spec.capabilityIds.length || spec.capabilityIds.some(id => !id || id.length > 512)
       || [[spec.timeoutMs, 100, 300000], [spec.maxModelRounds, 1, 32], [spec.maxToolRounds, 1, 32], [spec.maxTotalTokens, 1000, 256000]].some(([value, min, max]) => !Number.isSafeInteger(value) || value! < min! || value! > max!)) throw new Error('CHILD_SPEC_INVALID')
     const assigned = spec.assignment
@@ -123,9 +139,11 @@ export class RuntimeChildStore {
       if (previous && childAssignment(previous)?.state !== 'retryable') throw new Error('CHILD_PLAN_TASK_ALREADY_ASSIGNED')
       if (jobs.filter(record => !terminalChild(record.status)).length >= 8) throw new Error('CHILD_CONCURRENCY_LIMIT')
       const id = `child:${randomUUID()}`, timestamp = Date.now()
+      const normalizedSpec = { ...spec, executionMode, attemptId }
       const record: ChildRecord = { id, parentSessionId: binding.sessionId, parentTaskId: binding.taskId, parentRunId: binding.runId,
         ...(parentStepId ? { parentStepId } : {}),
-        childSessionId: `${binding.sessionId}:${id}`, waitRef: `child-signal:${randomUUID()}`, callId, sourceInstructionId: callId, goal: spec.goal, spec: structuredClone(spec), status: 'queued',
+        childSessionId: `${binding.sessionId}:${id}`, waitRef: `child-signal:${randomUUID()}`, callId, sourceInstructionId: callId, goal: spec.goal, spec: structuredClone(normalizedSpec), status: 'queued',
+        delegationMode: executionMode, attemptId,
         startedAt: new Date(timestamp).toISOString(), deadlineAt: new Date(timestamp + spec.timeoutMs).toISOString(), revision: 1, modelRounds: 0, chargedTokens: 0 }
       this.db.prepare('INSERT INTO runtime_child_tasks(id,session_id,run_id,call_id,semantic_hash,state_json) VALUES(?,?,?,?,?,?)').run(id, binding.sessionId, binding.runId, callId, digest, JSON.stringify(record))
       return { record, created: true }
@@ -176,6 +194,40 @@ export class RuntimeChildStore {
       const record = this.assertOwner(binding, id, owner)
       if (record.modelRounds >= record.spec.maxModelRounds || record.chargedTokens + tokens > record.spec.maxTotalTokens) throw new Error('CHILD_MODEL_BUDGET_EXHAUSTED')
       record.modelRounds++; record.chargedTokens += tokens; this.write(record)
+    })
+  }
+  acquireActionLease(binding: ChildBinding, id: string, owner: string, request: ChildActionRequest): RuntimeChildActionReceipt {
+    return this.tx(binding.sessionId, () => {
+      const record = this.assertOwner(binding, id, owner)
+      if ((record.spec.executionMode ?? 'readonly') !== 'action') throw new Error('CHILD_ACTION_MODE_REQUIRED')
+      if (!request.callId || !request.toolName || !request.capabilityId || !/^[a-f0-9]{64}$/.test(request.argumentHash)) throw new Error('CHILD_ACTION_LEASE_INVALID')
+      const attemptId = record.spec.attemptId ?? binding.runId
+      const row = this.db.prepare('SELECT state_json FROM runtime_child_action_leases WHERE attempt_id=?').get(attemptId) as Row | undefined
+      if (row) {
+        const prior = JSON.parse(row.state_json) as RuntimeChildActionReceipt
+        if (prior.childId !== id || prior.callId !== request.callId || prior.argumentHash !== request.argumentHash || prior.toolName !== request.toolName) throw new Error('CHILD_ACTION_LEASE_CONFLICT')
+        if (prior.outcome === 'unknown') throw new Error('CHILD_ACTION_RESULT_UNKNOWN')
+        return prior
+      }
+      const lease: RuntimeChildActionReceipt = { leaseId: `action-lease-${randomUUID()}`, attemptId, childId: id, ...request, outcome: 'unknown', acquiredAt: new Date().toISOString() }
+      this.db.prepare('INSERT INTO runtime_child_action_leases(attempt_id,session_id,child_id,lease_id,state_json) VALUES(?,?,?,?,?)').run(attemptId, binding.sessionId, id, lease.leaseId, JSON.stringify(lease))
+      return lease
+    })
+  }
+  recordActionResult(binding: ChildBinding, id: string, owner: string, result: ChildActionResult): RuntimeChildActionReceipt {
+    return this.tx(binding.sessionId, () => {
+      const record = this.assertOwner(binding, id, owner)
+      const attemptId = record.spec.attemptId ?? binding.runId
+      const row = this.db.prepare('SELECT state_json FROM runtime_child_action_leases WHERE attempt_id=? AND child_id=?').get(attemptId, id) as Row | undefined
+      if (!row) throw new Error('CHILD_ACTION_LEASE_REQUIRED')
+      const prior = JSON.parse(row.state_json) as RuntimeChildActionReceipt
+      if (prior.callId !== result.callId || prior.argumentHash !== result.argumentHash || prior.toolName !== result.toolName) throw new Error('CHILD_ACTION_RESULT_CONFLICT')
+      if (prior.outcome !== 'unknown' && (prior.outcome !== result.outcome || prior.resultHash !== result.resultHash)) throw new Error('CHILD_ACTION_RESULT_IMMUTABLE')
+      const completed: RuntimeChildActionReceipt = { ...prior, outcome: result.outcome, ...(result.resultArtifactId ? { resultArtifactId: result.resultArtifactId } : {}), ...(result.resultHash ? { resultHash: result.resultHash } : {}), completedAt: prior.completedAt ?? new Date().toISOString() }
+      this.db.prepare('UPDATE runtime_child_action_leases SET state_json=? WHERE attempt_id=?').run(JSON.stringify(completed), attemptId)
+      record.actionReceipts = [...(record.actionReceipts ?? []).filter(item => item.leaseId !== completed.leaseId), completed]
+      this.write(record)
+      return completed
     })
   }
   settle(binding: ChildBinding, id: string, owner: string, result: { ok: boolean; output?: JsonValue; evidence?: JsonValue; error?: string }): { record: ChildRecord; late: boolean } {
@@ -305,12 +357,13 @@ export class RuntimeChildStore {
       ...(record.spec.assignment ? { planTaskId: record.spec.assignment.planTaskId, dispatchRequestId: record.spec.assignment.requestId,
         projectionId: record.spec.assignment.projectionId, planRevision: record.spec.assignment.planRevision } : {}) },
       childSessionId: record.childSessionId, ...(record.childRunId ? { childRunId: record.childRunId } : {}), status, startedAt: record.startedAt!, completedAt: record.completedAt,
+      ...(record.actionReceipts?.length ? { actionReceipts: record.actionReceipts } : {}),
       output: result?.output ?? null, evidence: result?.evidence ?? null, error: record.error ?? null }
     if (Buffer.byteLength(JSON.stringify(packet)) > 5 * 1024 * 1024) {
       record.status = 'failed'; record.output = undefined; record.evidence = undefined
       record.error = { code: 'CHILD_RESULT_LIMIT', message: 'Child result exceeded 5 MiB' }
-      record.packet = { ...packet, status: 'failed', output: null, evidence: null, error: record.error }
-    } else record.packet = packet
+      record.packet = { ...packet, status: 'failed', output: null, evidence: null, error: record.error } as unknown as JsonValue
+    } else record.packet = packet as unknown as JsonValue
     record.resultHash = capabilityHash(record.packet)
     return this.write(record)
   }
