@@ -185,7 +185,7 @@ const INITIAL_SYSTEM_VARIABLES = {
       type: 'text',
       label: 'Runtime workflow execution',
       description: 'Description injected into the temporary workflow tool.',
-      value: 'Generate and execute one temporary workflow when multiple loaded Tool operations can be chained without another model decision.',
+      value: 'Generate and execute one temporary workflow when two or more actions are already predictable, when tool results need parsing, alignment, validation, filtering, transformation, joining, batching, or assertions, or when repeated tool calls can be combined. After load_resources, prefer this tool before a predictable chain of individual calls. Use only currently projected tools. Keep interpretation-dependent, human-confirmed, and irreversible actions as regular tool calls. The compact form uses version, goal, intent.calls with args, and intent.operations with op. RuntimeLoop expands it into canonical steps before validating references, capabilities, and deterministic node limits. For AppWorld, appworld_execute may be a workflow tool or foreach node. Use deterministic nodes for parse, align, validate_schema, join, filter, transform, foreach, and assert. The top-level version field must be the number 1, not the string "1". Keep raw tool output in its artifact.',
       required: true,
       readonly: true,
     },

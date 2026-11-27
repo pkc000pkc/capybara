@@ -1075,6 +1075,18 @@ test('a follow-up without new tool evidence reuses organized context below budge
     } } } })
   try {
     for (const [index, query] of ['核对订单两方资料', '补充两方依据'].entries()) {
+      if (index === 1) {
+        // Simulate a resumed/stale working view. The durable coverage says
+        // that the first native read group is already represented by the
+        // organized document, while an append-only working list may still
+        // contain the original transcript.
+        const working = (loop as any).llmMessages as Array<{ role: string; content: string }>
+        const system = working.find(message => message.role === 'system')
+        ;(loop as any).llmMessages = [
+          ...(system ? [system] : []),
+          ...loop.exportState().contextHistory!.messages.map(item => item.message),
+        ]
+      }
       const finished = done(loop)
       const send = command('chat.message.send', { clientMessageId: `follow-up-${index}`, content: [{ type: 'text', text: query }], autoStart: true })
       loop.validate(send); loop.execute(send, index + 1)

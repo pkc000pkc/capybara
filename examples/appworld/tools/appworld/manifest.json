@@ -80,6 +80,74 @@
           "code": "print(apis.api_docs.show_app_descriptions())"
         }
       ]
+    },
+    {
+      "name": "appworld_readonly_execute",
+      "description": "Execute approved read-only Python code in the active AppWorld task environment without changing task state.",
+      "permissions": [
+        "network:appworld"
+      ],
+      "sideEffects": "none",
+      "replay": "safe",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 50000
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          },
+          "completed": {
+            "type": "boolean"
+          },
+          "responseEnvelope": {
+            "type": "string"
+          },
+          "nextResponse": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "running"
+                ]
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "content"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "taskId",
+          "output",
+          "completed",
+          "responseEnvelope",
+          "nextResponse"
+        ],
+        "additionalProperties": false
+      }
     }
   ]
 }

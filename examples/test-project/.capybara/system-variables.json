@@ -68,7 +68,7 @@
       "key": "workflow_execution_tool_description",
       "label": "Runtime workflow execution",
       "description": "Description injected into the temporary workflow tool.",
-      "value": "Generate and execute one temporary workflow when multiple loaded Tool operations can be chained without another model decision.",
+      "value": "Generate and execute one temporary workflow when multiple loaded Tool operations can be chained without another model decision. Use deterministic nodes for parse (json, json_lines, lines), align (explicit mappings or auto=true with targetSchema), validate_schema, join, filter, transform, foreach, and assert. Tool output stays raw in its artifact. Use parse before consuming text stdout, align before passing heterogeneous records across tools, validate_schema before relying on a contract, and join to preserve both sides and conflicts without deciding which source is true.",
       "required": true,
       "readonly": true,
       "type": "text"

@@ -394,7 +394,7 @@ interface ControlEnvelopeV2 {
 
 ## 7. 提示词版本与验收
 
-当前 Runtime 为 `runtime-draft-1.18`。补证据、人工回复、文档编辑与接管均按节点绑定。Skill 按节点激活，超长原件可分页。MCP 按原操作 ID 核查写入并等待终态。人工表单与 URL 协助通过专用回复和单次续传继续原 MCP 请求。Workflow 凭原节点的结算或人工输入结果回执继续。
+当前 Runtime 为 `runtime-draft-1.21`。补证据、人工回复、文档编辑与接管均按节点绑定。Skill 按节点激活，超长原件可分页。MCP 按原操作 ID 核查写入并等待终态。人工表单与 URL 协助通过专用回复和单次续传继续原 MCP 请求。Workflow 凭原节点的结算或人工输入结果回执继续，并禁止重复包装已有成功回执覆盖的链路。
 
 其余正文版本为 `constitution-draft-0.2`、`organizer-draft-0.13`、`reflection-draft-0.2`、`dream-draft-0.2` 和 `child-draft-0.5`。
 

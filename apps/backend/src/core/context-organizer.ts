@@ -108,7 +108,7 @@ export interface OrganizationResult {
   history: ContextHistoryState
   receipts: ApplyReceipt[]
   archives: ContextArchiveRecord[]
-  requests: Array<{ input: LlmChatRequest; output: OrganizationOutput; modelProposal?: OrganizationModelProposal; usage?: LlmUsage;
+  requests: Array<{ input: LlmChatRequest; output: OrganizationOutput; modelProposal?: OrganizationModelProposal; usage?: LlmUsage; normalizationWarnings?: string[];
     supervisionEligible?: false; operationEvidence: Map<string, { sourceId: string; evidenceRefs: string[]; classification?: ContextClassification }> }>
   promptBindings: ReturnType<typeof v2PromptManifest>
   coverageAdvanced: boolean
@@ -146,6 +146,26 @@ function parseOrganizerJson(text: string): unknown {
   const trimmed = text.trim()
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
   return JSON.parse(fenced?.[1] ?? trimmed)
+}
+
+function normalizeOrganizationSourceRefs(value: unknown): { value: unknown; warnings: string[] } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { value, warnings: [] }
+  const output = { ...(value as Record<string, unknown>) }
+  const warnings: string[] = []
+  for (const collectionName of ['observations', 'archiveProposals', 'uncertainties']) {
+    const collection = output[collectionName]
+    if (!Array.isArray(collection)) continue
+    output[collectionName] = collection.map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return item
+      const sourceRefs = (item as Record<string, unknown>).sourceRefs
+      if (!Array.isArray(sourceRefs) || !sourceRefs.every((ref) => typeof ref === 'string')) return item
+      const deduplicated = [...new Set(sourceRefs)]
+      if (deduplicated.length === sourceRefs.length) return item
+      warnings.push(`${collectionName}.sourceRefs`)
+      return { ...(item as Record<string, unknown>), sourceRefs: deduplicated }
+    })
+  }
+  return { value: output, warnings: [...new Set(warnings)] }
 }
 
 function restore(state: ContextDocumentEngineState): ContextDocumentEngine {
@@ -441,11 +461,12 @@ export async function organizeContext(options: OrganizerOptions): Promise<Organi
     const response = await options.chat(request, referenced?.binding, documentView)
     if (response.toolCalls?.length) throw new Error('CONTEXT_ORGANIZATION_TOOL_INTENT_FORBIDDEN')
     if (response.finishReason === 'length' || response.finishReason === 'incomplete') throw new Error('CONTEXT_ORGANIZATION_OUTPUT_TRUNCATED')
-    const value: unknown = parseOrganizerJson(response.text)
+    const normalized = normalizeOrganizationSourceRefs(parseOrganizerJson(response.text))
+    const value: unknown = normalized.value
     const archiveChecks: OrganizationResult['requests'] = []
     const pendingWindows: PendingWindow[] = []
     const pendingWholeReads: PartialWholeRead[] = []
-    let overwrittenDisposition = false
+    let overwrittenDisposition = normalized.warnings.length > 0
     let expanded: { output: OrganizationOutput; proposal: OrganizationModelProposal } | undefined
     if (referenced && packVersion === 4) {
       const initial = parseFileDispositions(value, referenced.binding, sourceView.length)
@@ -630,6 +651,7 @@ export async function organizeContext(options: OrganizerOptions): Promise<Organi
     }
     if (packVersion >= 3) result.uncertainties.forEach(item => item.sourceRefs.forEach(ref => deferredUnits.add(ref)))
     requests.push({ input: request, output: result, operationEvidence, ...(expanded ? { modelProposal: expanded.proposal } : {}),
+      ...(normalized.warnings.length ? { normalizationWarnings: normalized.warnings } : {}),
       ...(overwrittenDisposition ? { supervisionEligible: false as const } : {}), ...(response.usage ? { usage: response.usage } : {}) }, ...archiveChecks)
     pendingWindows.forEach(window => splitReviews.push({ ...window, initialOutput: result }))
     pendingWholeReads.forEach(read => partialWholeReads.push({ ...read, initialOutput: result }))

@@ -2358,6 +2358,57 @@ test('generated workflow executes transform and assert nodes without another mod
   }, { llm })
 })
 
+test('generated workflow aligns a tool collection and validates the canonical schema', async () => {
+  const requests: LlmChatRequest[] = []
+  const llm = fakeLlm(async (request) => {
+    requests.push(structuredClone({ ...request, signal: undefined }))
+    if (requests.length === 1) return {
+      provider: 'custom', model: 'test-model', text: '',
+      toolCalls: [{ id: 'load-schema-glue-tools', name: 'load_resources', arguments: { ids: ['project-files:list_files'] } }],
+      finishReason: 'tool_calls', raw: {},
+    }
+    if (requests.length === 2) return {
+      provider: 'custom', model: 'test-model', text: '',
+      toolCalls: [{ id: 'execute-schema-glue-workflow', name: 'execute_workflow', arguments: {
+        version: 1,
+        goal: 'List documents, align the tool collection to the canonical file schema, and validate it.',
+        steps: [
+          { id: 'list_documents', type: 'tool', tool: 'project-files:list_files', arguments: { path: 'test-docs', recursive: false, max_entries: 100 } },
+          { id: 'align_files', type: 'align', input: { $ref: 'steps.list_documents.output.entries' }, mappings: [
+            { from: 'path', to: 'file_path', required: true },
+            { from: 'type', to: 'kind', required: true },
+          ], sourceSchema: 'project-files.list_files.v1', targetSchema: 'canonical.file.v1' },
+          { id: 'join_files', type: 'join', left: { $ref: 'steps.align_files.output.records' }, right: { $ref: 'steps.align_files.output.records' }, leftKey: 'file_path', rightKey: 'file_path', joinType: 'left' },
+          { id: 'validate_files', type: 'validate_schema', input: { $ref: 'steps.join_files.output.records' }, schema: {
+            type: 'array', items: { type: 'object', required: ['key', 'left', 'right', 'conflicts'], properties: {
+              key: { type: 'string' }, left: { type: 'object' }, right: { type: 'object' }, conflicts: { type: 'array' },
+            }, additionalProperties: false },
+          }, schemaId: 'canonical.file.join.v1' },
+        ],
+      } }],
+      finishReason: 'tool_calls', raw: {},
+    }
+    const workflowResult = request.messages.find(message => message.toolCallId === 'execute-schema-glue-workflow')
+    assert.match(workflowResult?.content ?? '', /align_files/)
+    assert.match(workflowResult?.content ?? '', /join_files/)
+    assert.match(workflowResult?.content ?? '', /validate_files/)
+    assert.match(workflowResult?.content ?? '', /file_path/)
+    return { provider: 'custom', model: 'test-model', text: JSON.stringify({ status: 'completed', content: 'The collection was aligned and validated.' }), finishReason: 'stop', raw: {} }
+  })
+  await withRuntime(async (client) => {
+    const start = client.events.length
+    client.send('chat.message.send', { clientMessageId: 'generated-schema-glue-message', content: [{ type: 'text', text: 'Normalize the document listing for downstream processing.' }], autoStart: true })
+    await client.waitFor('run.state.changed', event => event.payload.status === 'completed', start)
+    assert.equal(requests.length, 3)
+    const workflow = client.events.filter((event): event is EventOf<'runtime.workflows.updated'> => event.type === 'runtime.workflows.updated').at(-1)?.payload.items.at(-1)
+    assert.equal(workflow?.status, 'completed')
+    assert.equal(workflow?.compile?.deterministicNodeCount, 3)
+    assert.equal(workflow?.nodes.find(node => node.id === 'align_files')?.status, 'completed')
+    assert.equal(workflow?.nodes.find(node => node.id === 'join_files')?.status, 'completed')
+    assert.equal(workflow?.nodes.find(node => node.id === 'validate_files')?.status, 'completed')
+  }, { llm })
+})
+
 test('a failed generated workflow Tool is returned to the model for recovery', async () => {
   const requests: LlmChatRequest[] = []
   const llm = fakeLlm(async (request) => {

@@ -137,7 +137,17 @@ import {
   type GeneratedWorkflowDefinition,
   type GeneratedWorkflowStep,
   type WorkflowExecutionData,
+  type WorkflowAlignStep,
+  type WorkflowJoinStep,
+  type WorkflowParseStep,
+  type WorkflowValidateSchemaStep,
 } from '#core/workflows/generated-workflow'
+import {
+  alignWorkflowRecords,
+  joinWorkflowRecords,
+  parseWorkflowValue,
+  validateWorkflowSchema,
+} from '#core/workflows/schema-alignment'
 import {
   CommandError,
   type ChannelEvent,
@@ -218,6 +228,7 @@ import { ContextTrainingRecorder, type ContextOrganizationRequestEvidence, type 
 import { RuntimeActivityState } from '#core/runtime-activity-state'
 import { assetWriteAudit, assertAssetWriteAllowed } from '#core/asset-write-policy'
 import { ContextHistory, isSuccessfulControlReceipt, type ContextHistoryMessage, type ContextHistoryState } from '#core/context-history'
+import { extractRuntimeEntitySnapshots } from '#core/runtime-entity-snapshot'
 import { ARTIFACT_SOURCE_REFERENCE_DIAGNOSTIC, coveredFileArtifacts, createFileEvidenceResolver, isPagingInputDiagnostic,
   isVerifiedActiveRecallCopy, isVerifiedFileArtifactPage, projectFileHistory, publishedFileArtifactId, publishedFileReadLine,
   readVerifiedFileArtifact, verifiedFilePageOrigin, visibleFileBatch } from '#core/context-file-projection'
@@ -414,7 +425,36 @@ const CONTROL_CARRIER: LlmToolDefinition = {
 const CACHE_SUMMARY_PREFIX = 'Earlier runtime cache summary:\n'
 const PRINTED_TOOL_CALLS = /^<[|｜]{2}DSML[|｜]{2}\s+calls>/u
 const SYSTEM_CONTEXT_COMPRESSION_HOOK_ID = 'context-compression'
-const DEFAULT_CONTEXT_ORGANIZATION_CHUNK_CHARACTERS = 6000
+const DEFAULT_CONTEXT_ORGANIZATION_CHUNK_CHARACTERS = 4000
+// Organizer output is a compact, schema-bound proposal. Reserving the main
+// actor's full output budget here needlessly blocks later model calls.
+const DEFAULT_CONTEXT_ORGANIZATION_OUTPUT_TOKENS = 2048
+// A project may expose a large provider output ceiling (AppWorld uses 64K),
+// while most runtime phases only need a bounded control or tool decision. The
+// reservation is charged before the provider call, so keeping the ceiling for
+// every phase can exhaust the run budget before the final verification turn.
+const STAGE_OUTPUT_BUDGETS: Readonly<Record<RuntimeExecutionState['phase'], number>> = {
+  direct: 12_288,
+  planning: 8_192,
+  human_input: 4_096,
+  investigation: 12_288,
+  execution: 12_288,
+  verification: 6_144,
+  delegation: 8_192,
+  delegation_wait: 4_096,
+  delegation_review: 4_096,
+  evidence: 4_096,
+  blocked: 4_096,
+}
+
+function compactToolSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(compactToolSchema)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => key !== 'description')
+    .map(([key, item]) => [key, compactToolSchema(item)]))
+}
+
 const PARENT_CHILD_LIFECYCLE_TOOLS = new Set(['get_child_task', 'read_child_result', 'consume_child_result', 'cancel_child_task', 'respond_child_task', 'take_over_child_task'])
 const CHILD_READABLE_RESOURCE_TOOLS = new Set([
   'create_wait_deadline', 'read_wait_signal', 'request_planning', 'browser_read',
@@ -781,7 +821,8 @@ export class RuntimeLoop extends Loop {
       permissions: config.tool_permissions,
     })
     this.skillScriptRunner = new SkillScriptRunner(this.workspaceDir, config.tool_timeout_ms)
-    this.contextOrganization = { enabled: true, minGroups: 8, chunkCharacters: DEFAULT_CONTEXT_ORGANIZATION_CHUNK_CHARACTERS, ...options.contextOrganization }
+    this.contextOrganization = { enabled: true, minGroups: 8, chunkCharacters: DEFAULT_CONTEXT_ORGANIZATION_CHUNK_CHARACTERS,
+      maxOutputTokens: DEFAULT_CONTEXT_ORGANIZATION_OUTPUT_TOKENS, ...options.contextOrganization }
     this.projectLlmEnabled = options.llm === undefined
     this.llm = options.llm ?? createProjectLlmService(config.llm)
     if (this.projectLlmEnabled) {
@@ -3880,6 +3921,10 @@ export class RuntimeLoop extends Loop {
       await this.executeWorkflowAssert(step, correlationId)
       return
     }
+    if (nodeType === 'parse' || nodeType === 'align' || nodeType === 'validate_schema' || nodeType === 'join') {
+      await this.executeWorkflowSchemaNode(step, correlationId)
+      return
+    }
     if (nodeType === 'foreach') {
       await this.executeWorkflowForeach(step, correlationId)
       return
@@ -3902,15 +3947,10 @@ export class RuntimeLoop extends Loop {
     const request = this.pendingWorkflowCalls.get(step.id)
     if (!request) throw new Error(`generated workflow request is missing for ${step.id}`)
     this.validatePendingCapabilities(request)
-    const definitionArtifact = this.createArtifact(
-      'workflow-definition',
-      'Generated workflow definition',
-      request.arguments,
-      correlationId,
-    )
     const planId = `workflow-${this.run.runId}-${this.workflows.items.length + 1}`
     let definition: GeneratedWorkflowDefinition
     let compile: ReturnType<typeof compileGeneratedWorkflow>['summary']
+    let definitionArtifact: RuntimeArtifactMeta
     try {
       const compiled = compileGeneratedWorkflow(
         request.arguments,
@@ -3921,7 +3961,19 @@ export class RuntimeLoop extends Loop {
       )
       definition = compiled.definition
       compile = compiled.summary
+      definitionArtifact = this.createArtifact(
+        'workflow-definition',
+        'Generated workflow definition',
+        definition,
+        correlationId,
+      )
     } catch (error) {
+      definitionArtifact = this.createArtifact(
+        'workflow-definition',
+        'Generated workflow intent rejected',
+        request.arguments,
+        correlationId,
+      )
       const failed: RuntimeWorkflowPlan = {
         id: planId,
         runId: this.run.runId as string,
@@ -4315,6 +4367,67 @@ export class RuntimeLoop extends Loop {
     } catch (error) {
       this.failGeneratedWorkflow(planId, sourceStepId, error, correlationId)
       throw new RuntimeStageError('workflow_execution', 'WORKFLOW_ASSERT_FAILED', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  private async executeWorkflowSchemaNode(step: TimelineStep, correlationId: string): Promise<void> {
+    const planId = String(step.detail?.workflowPlanId ?? '')
+    const sourceStepId = String(step.detail?.workflowSourceStepId ?? '')
+    const definition = this.workflowDefinitions.get(planId)?.steps.find(item => item.id === sourceStepId)
+    const data = this.workflowData.get(planId)
+    if (!definition || !['parse', 'align', 'validate_schema', 'join'].includes(definition.type) || !data) {
+      throw new RuntimeStageError('workflow_execution', 'WORKFLOW_STATE_MISSING', 'workflow schema node state is missing')
+    }
+    const started = Date.now()
+    const startedAt = now()
+    data.steps[sourceStepId] = { status: 'running' }
+    this.updateWorkflowNode(planId, sourceStepId, { status: 'running', timelineStepId: step.id, startedAt }, correlationId)
+    try {
+      if (!(await workflowCondition(definition.when, data))) {
+        data.steps[sourceStepId] = { status: 'skipped', output: null }
+        step.detail = { ...(step.detail ?? {}), workflowSkipped: true, reason: 'when evaluated to false' }
+        this.updateWorkflowNode(planId, sourceStepId, { status: 'skipped', completedAt: now(), durationMs: Date.now() - started }, correlationId)
+        return
+      }
+      let output: unknown
+      let detail: JsonObject = {}
+      if (definition.type === 'parse') {
+        const parseDefinition = definition as WorkflowParseStep
+        const input = await resolveWorkflowValue(parseDefinition.input, data)
+        const parsed = parseWorkflowValue(input, parseDefinition.operator)
+        output = parsed
+        detail = { operator: parsed.operator, status: parsed.status, ...(parsed.lineCount !== undefined ? { lineCount: parsed.lineCount } : {}), raw: toJsonValue(parsed.raw) }
+      } else if (definition.type === 'align') {
+        const alignDefinition = definition as WorkflowAlignStep
+        const input = await resolveWorkflowValue(alignDefinition.input, data)
+        const aligned = alignWorkflowRecords(input, alignDefinition.mappings, {
+          sourceSchema: alignDefinition.sourceSchema,
+          targetSchema: alignDefinition.targetSchema,
+          auto: alignDefinition.auto,
+        })
+        output = aligned
+        detail = { recordCount: aligned.records.length, unmappedRecordCount: aligned.unmappedFields.length, alignmentMode: aligned.alignment.mode, mappingHash: aligned.alignment.mappingHash }
+      } else if (definition.type === 'validate_schema') {
+        const validateDefinition = definition as WorkflowValidateSchemaStep
+        const input = await resolveWorkflowValue(validateDefinition.input, data)
+        const validated = validateWorkflowSchema(input, validateDefinition.schema, validateDefinition.schemaId)
+        output = validated
+        detail = { valid: true, ...(validated.schemaId ? { schemaId: validated.schemaId } : {}) }
+      } else {
+        const joinDefinition = definition as WorkflowJoinStep
+        const left = await resolveWorkflowValue(joinDefinition.left, data)
+        const right = await resolveWorkflowValue(joinDefinition.right, data)
+        const joined = joinWorkflowRecords(left, right, joinDefinition)
+        output = joined
+        detail = { recordCount: joined.records.length, conflictCount: joined.conflicts.length, join: toJsonValue(joined.join) }
+      }
+      const artifact = this.createArtifact('workflow-result', `Workflow ${definition.type} result · ${sourceStepId}`, output, correlationId)
+      data.steps[sourceStepId] = { status: 'completed', output }
+      step.detail = { ...(step.detail ?? {}), ...detail, resultArtifactId: artifact.id, resultPreview: artifact.preview }
+      this.updateWorkflowNode(planId, sourceStepId, { status: 'completed', outputArtifactId: artifact.id, completedAt: now(), durationMs: Date.now() - started }, correlationId)
+    } catch (error) {
+      this.failGeneratedWorkflow(planId, sourceStepId, error, correlationId)
+      throw new RuntimeStageError('workflow_execution', 'WORKFLOW_SCHEMA_NODE_FAILED', error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -4733,6 +4846,13 @@ export class RuntimeLoop extends Loop {
       || (hasRecalls && documents && isVerifiedActiveRecallCopy(item.message, documents, original))
     )).map(item => item.id) : [])
     const hasNewUser = history.messages.some(item => item.origin === 'user' && item.sequence > this.lastOrganizationAttemptSequence)
+    // A failed organizer request must not be retried after every individual
+    // tool result. Let a full batch of new groups accumulate, while still
+    // allowing an explicit user turn to trigger immediate organization.
+    const pendingSinceLastAttempt = this.lastOrganizationAttemptSequence < 0
+      ? pending.length
+      : pending.filter(group => group.firstSequence > this.lastOrganizationAttemptSequence).length
+    if (this.lastOrganizationAttemptSequence >= 0 && !hasNewUser && pendingSinceLastAttempt < minGroups) return
     // Copies and paging feedback stay in the tool history. They do not restart Organizer.
     const requireNewEvidence = fileProfile && (!pressure || (retainedObservationIds.size > 0 && !hasNewUser))
     if (firstPending === undefined || !history.messages.some(item => item.sequence >= firstPending
@@ -4904,7 +5024,7 @@ export class RuntimeLoop extends Loop {
     // request guard after the complete request envelope is serialized.
     const maxTokens = Math.max(
       0,
-      Math.min(this.availableInputTokens(), this.runtimeStatus.context.maxTokens) - 256,
+      Math.min(this.availableInputTokens(), this.runtimeStatus.context.maxTokens) - 128,
     )
     if (this.contextOrganization.enabled) {
       const complete = [system, ...groups.flat()]
@@ -5180,6 +5300,13 @@ export class RuntimeLoop extends Loop {
       revision: execution.planRevision, phase: execution.phase, activeTaskIds: execution.activeTaskIds })
   }
 
+  private outputBudgetForPhase(phase: RuntimeExecutionState['phase'], controlOnly: boolean): number {
+    const configured = this.reservedOutputTokens
+    if (configured <= 8_192) return configured
+    const phaseBudget = STAGE_OUTPUT_BUDGETS[phase]
+    return Math.min(configured, controlOnly ? STAGE_OUTPUT_BUDGETS.human_input : phaseBudget)
+  }
+
   private reasoningContinuationRejection(index: number, authority: string, next: string): string | undefined {
     let consecutive = 0
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
@@ -5262,8 +5389,16 @@ export class RuntimeLoop extends Loop {
     const requiredEntries = coverage.requiredEntries ?? []
     const coveredExcerptArtifacts = coveredFileArtifacts(coverage, { project: projectDocument, session: sessionDocument })
     const missingExcerptArtifacts = new Set((coverage.excerptSources ?? []).map(source => source.artifactId).filter(id => !coveredExcerptArtifacts.has(id)))
-    const retainedHistory: LlmMessage[] = missingExcerptArtifacts.size ? this.contextHistory.project(missingExcerptArtifacts)
-      : this.llmMessages[0]?.role === 'system' ? this.llmMessages.slice(1) : this.llmMessages
+    // The durable coverage boundary is authoritative whenever context
+    // organization is enabled. `llmMessages` is an append-only working view
+    // and may still contain groups that were covered by a previous commit if
+    // an organizer attempt failed or a run was resumed from a stale view.
+    // Project from ContextHistory so a failed follow-up organization cannot
+    // re-expand the request with already-covered native tool transcripts.
+    const retainedHistory: LlmMessage[] = this.contextOrganization.enabled
+      ? this.contextHistory.project(missingExcerptArtifacts.size ? missingExcerptArtifacts : undefined)
+      : missingExcerptArtifacts.size ? this.contextHistory.project(missingExcerptArtifacts)
+        : this.llmMessages[0]?.role === 'system' ? this.llmMessages.slice(1) : this.llmMessages
     const rawHistory = retainedHistory.filter(message => message.name !== OUTPUT_REPAIR_MESSAGE_NAME)
     if (previousModel?.detail?.outputRepair === true) {
       for (let index = retainedHistory.length - 1; index >= 0; index -= 1) {
@@ -5314,6 +5449,7 @@ export class RuntimeLoop extends Loop {
     if (editReceiptReview.length) step.detail = { ...step.detail, editReceiptReview }
     const planReview = !controlOnlyRepair && currentExecution.allowedDecisions.includes('resume_plan')
     const controlOnlyRequest = controlOnlyRepair || !!catalogCheckpoint || !!fileEvidenceCheckpoint || editReceiptReview.length > 0 || planReview
+    const outputBudget = this.outputBudgetForPhase(currentExecution.phase, controlOnlyRequest)
     const documentControl = !controlOnlyRequest && documentExecution && currentExecution.allowedDecisions.includes('propose_diff')
     const controlCarrier = llmConfig.provider === 'deepseek' && llmConfig.protocol === 'chat-completions'
       && Boolean(documentControl || catalogCheckpoint || fileEvidenceCheckpoint || editReceiptReview.length || planReview
@@ -5324,7 +5460,7 @@ export class RuntimeLoop extends Loop {
     const capabilityProjection = projectRuntimeCapabilities(this.taskControl, requestBinding, capabilityPool)
     const projectedNames = new Set(capabilityProjection.bindings.map(binding => binding.name))
     const modelTools = capabilityPool.filter(capability => projectedNames.has(capability.name)).map(capability => capability.definition)
-    const requestTools = controlCarrier ? [...modelTools, CONTROL_CARRIER] : modelTools
+    let requestTools = controlCarrier ? [...modelTools, CONTROL_CARRIER] : modelTools
     const stageSkills = controlOnlyRequest || toolRoundsExhausted ? [] : this.phaseSkills(capabilityProjection.execution)
     const controlNotices: LlmMessage[] = []
     if (fileEvidenceCheckpoint) controlNotices.push({ role: 'user',
@@ -5433,6 +5569,22 @@ export class RuntimeLoop extends Loop {
         ? fitDocuments([], false) : assembled
     }
     let assembled = fit()
+    // Keep the capability names, argument schemas and authorization bindings
+    // exact. Only long prose descriptions are shortened when the complete
+    // request is over the input budget. This lets a parent review a long
+    // child result without dropping the actual tool contract.
+    if (assembled.overrun > 0 && requestTools.length > 0) {
+      const compacted = requestTools.map(tool => ({
+        ...tool,
+        description: tool.description.length <= 160 ? tool.description : `${tool.description.slice(0, 144)}…`,
+        parameters: compactToolSchema(tool.parameters) as typeof tool.parameters,
+      }))
+      if (compacted.some((tool, index) => tool.description !== requestTools[index]!.description
+        || JSON.stringify(tool.parameters) !== JSON.stringify(requestTools[index]!.parameters))) {
+        requestTools = compacted
+        assembled = fit()
+      }
+    }
     if (fileHistory?.hasPartialViews && (assembled.missingRequired || assembled.overrun > 0)) {
       fileHistory = projectFileHistory(rawHistory, sessionDocument, readOriginal)
       prefix = this.v2SystemPrompt('', requestBinding, capabilityProjection, fileHistory, editOutcomes, showNativeFileQuotes)
@@ -5445,7 +5597,7 @@ export class RuntimeLoop extends Loop {
       messages: modelMessages,
       tools: requestTools,
       responseFormat: requestTools.length || controlPlainResponse ? 'text' : 'json',
-      maxTokens: this.reservedOutputTokens,
+      maxTokens: outputBudget,
       ...(this.sessionId
         ? {
             clientMetadata: {
@@ -5570,6 +5722,7 @@ export class RuntimeLoop extends Loop {
       effectiveContextRevisionId: effectiveContext.id,
       contextRevisionId: this.activeContextRevisionId ?? null,
       protocol: llmConfig.protocol,
+      outputBudget,
     }
     this.updateTimeline({ ...step }, correlationId)
     const outputStream = new ModelOutputStream((delta) => {
@@ -7260,32 +7413,45 @@ export class RuntimeLoop extends Loop {
     observation: RuntimeObservation,
     correlationId: string,
   ): void {
-    const index = this.observations.findIndex((item) => item.id === observation.id)
-    if (index >= 0) this.observations[index] = observation
-    else this.observations.push(observation)
-    if (observation.status !== 'running') {
-      const artifact = observation.resultArtifactId ? this.artifacts.get(observation.resultArtifactId) : undefined
+    const artifact = observation.resultArtifactId ? this.artifacts.get(observation.resultArtifactId) : undefined
+    const enrichedObservation = observation.status === 'completed'
+      && artifact
+      && observation.entitySnapshots === undefined
+      ? {
+          ...observation,
+          entitySnapshots: extractRuntimeEntitySnapshots(
+            artifact.value,
+            artifact.meta.id,
+            observation.completedAt ?? observation.startedAt,
+            observation.toolName,
+          ),
+        }
+      : observation
+    const index = this.observations.findIndex((item) => item.id === enrichedObservation.id)
+    if (index >= 0) this.observations[index] = enrichedObservation
+    else this.observations.push(enrichedObservation)
+    if (enrichedObservation.status !== 'running') {
       const before = this.contextDocumentEngine.exportState()
       this.contextDocumentEngine.observe({
         candidate: {
           source: {
             actor: 'tool',
-            sourceId: observation.id,
-            toolName: observation.toolName,
-            runId: observation.runId,
-            stepId: observation.stepId,
-            capturedAt: observation.completedAt ?? observation.startedAt,
+            sourceId: enrichedObservation.id,
+            toolName: enrichedObservation.toolName,
+            runId: enrichedObservation.runId,
+            stepId: enrichedObservation.stepId,
+            capturedAt: enrichedObservation.completedAt ?? enrichedObservation.startedAt,
           },
-          rawArtifactId: observation.resultArtifactId ?? `observation:${observation.id}`,
-          normalizedContent: observation.resultPreview ?? (observation.error ? JSON.stringify(observation.error) : ''),
+          rawArtifactId: enrichedObservation.resultArtifactId ?? `observation:${enrichedObservation.id}`,
+          normalizedContent: enrichedObservation.resultPreview ?? (enrichedObservation.error ? JSON.stringify(enrichedObservation.error) : ''),
         },
         evidence: {
           kind: artifact ? 'artifact' : 'observation',
-          referenceId: artifact?.meta.id ?? observation.id,
+          referenceId: artifact?.meta.id ?? enrichedObservation.id,
           ...(this.sessionId ? { sessionId: this.sessionId } : {}),
           ...(artifact ? { sourceHash: artifact.meta.hash } : {}),
-          observedAt: observation.completedAt ?? observation.startedAt,
-          confidence: observation.status === 'completed' ? 'medium' : 'low',
+          observedAt: enrichedObservation.completedAt ?? enrichedObservation.startedAt,
+          confidence: enrichedObservation.status === 'completed' ? 'medium' : 'low',
         },
       })
       if (this.contextDocumentEngine.snapshot().revision !== before.document.revision) this.persistSessionContext(before)
@@ -7294,7 +7460,7 @@ export class RuntimeLoop extends Loop {
     this.snapshotRevision += 1
     this.emit('runtime.observation.upserted', {
       revision: this.observationRevision,
-      observation: clone(observation),
+      observation: clone(enrichedObservation),
     }, correlationId)
   }
 
@@ -8682,6 +8848,25 @@ export class RuntimeLoop extends Loop {
     this.contextDocumentEngine.setSectionContent('tools', JSON.stringify(this.tools.catalog), { governance: 'runtime' })
   }
 
+  /**
+   * AppWorld discovery is stateful. Once two incomplete direct executions have
+   * returned, keep the next model turn on the workflow path so a predictable
+   * chain is represented as one auditable graph instead of another ad hoc call.
+   */
+  private workflowRequiresAppworldBatch(projection?: RuntimeCapabilityProjection): boolean {
+    if (!projection?.bindings.some(binding => binding.name === 'execute_workflow')
+      || !projection.bindings.some(binding => binding.name === 'appworld_execute')) return false
+    if (this.observations.some(observation => observation.toolName === 'execute_workflow')) return false
+    const directCalls = this.observations.filter(observation => observation.toolName === 'appworld_execute' && observation.status === 'completed')
+    if (directCalls.length < 2) return false
+    const latest = directCalls.at(-1)
+    if (!latest?.resultArtifactId) return true
+    const artifact = this.artifacts.get(latest.resultArtifactId)
+    const value = artifact?.value
+    const output = isObject(value) && isObject(value.result) ? value.result : value
+    return isObject(output) && output.completed !== true
+  }
+
   private v2SystemPrompt(renderedSystemPrompt: string, binding: { sessionId?: string; runId?: string; requestId?: string },
     capabilityProjection?: RuntimeCapabilityProjection, fileProjection?: Pick<ReturnType<typeof projectFileHistory>, 'hasReferences' | 'hasPartialViews'>,
     editOutcomes?: readonly ContextOutcomeAttempt[], showNativeFileQuotes = false): string {
@@ -8712,6 +8897,7 @@ export class RuntimeLoop extends Loop {
     })
     const execution = capabilityProjection?.execution ?? runtimeExecutionState(this.taskControl)
     const allowedDecisions = execution.allowedDecisions.filter(decision => decision !== 'tool_call')
+    const workflowRequired = this.workflowRequiresAppworldBatch(capabilityProjection)
     const contextActions = requestBinding ? this.contextPlanActionRefs() : new Map<string, string>()
     const branchReplies = requestBinding ? this.branchHumanReplyReceipts() : []
     const completedActions = requestBinding ? this.completedRuntimeActionKeys(contextActions, branchReplies) : new Set<string>()
@@ -8785,6 +8971,18 @@ export class RuntimeLoop extends Loop {
       showNativeFileQuotes,
       showContextEditReceipts: recentContextEdits.length > 0,
       showPlannedDiffs: execution.phase === 'execution' && execution.activeTaskIds.length > 0,
+      workflowGuidance: (() => {
+        const projectedTools = capabilityProjection?.bindings.map(tool => tool.name) ?? []
+        const available = projectedTools.includes('execute_workflow')
+        return available ? {
+          available: true,
+          required: workflowRequired,
+          projectedTools: projectedTools.slice(0, 32),
+          trigger: '当两个或更多动作已经可预测，或需要解析、对齐、校验、筛选、转换、批量执行、连接或断言工具输出时，优先提交一次 execute_workflow。',
+          ...(workflowRequired ? { requirement: '已有两次未完成的 appworld_execute 结果。下一次业务调用必须先提交 execute_workflow，把可预测的 appworld_execute 调用放入 steps；宿主会拒绝继续直接调用 appworld_execute。' } : {}),
+          directCallAllowedWhen: ['下一步依赖模型解释结果', '需要人工确认', '具有不可逆副作用', '工具参数尚未确定'],
+        } : { available: false, projectedTools: projectedTools.slice(0, 32) }
+      })(),
       capabilityCatalog: runtimeExecutionState(this.taskControl).phase === 'planning'
         ? (() => {
             const rank = (capability: RuntimeCapability) => capability.available ? 0 : capability.unavailableReason === 'not_loaded' ? 1 : 2
@@ -10428,6 +10626,10 @@ export class RuntimeLoop extends Loop {
     if (calls.some(call => call.name === 'request_planning') && calls.length !== 1) throw new RuntimeStageError('model_protocol', 'RUNTIME_PLANNING_CALL_MUST_BE_EXCLUSIVE', 'request_planning must be the only action in a response', true)
     if (calls.some(call => call.name === 'resume_mcp_write_input') && calls.length !== 1) {
       throw new RuntimeStageError('model_protocol', 'MCP_FORM_WRITE_MUST_BE_EXCLUSIVE', 'resume_mcp_write_input must be the only action in a response', true)
+    }
+    if (this.workflowRequiresAppworldBatch(projection) && calls.some(call => call.name === 'appworld_execute')) {
+      throw new RuntimeStageError('model_protocol', 'APPWORLD_WORKFLOW_REQUIRED',
+        'Two incomplete appworld_execute results are already available. Call execute_workflow first and place the predictable appworld_execute chain in workflow steps.', true)
     }
     if (calls.some(call => call.name === 'delegate_task') && calls.some(call => call.name !== 'delegate_task')) {
       throw new RuntimeStageError('model_protocol', 'CHILD_PLAN_DELEGATION_MUST_BE_EXCLUSIVE', 'delegation calls may be batched together, but cannot be mixed with business or control actions', true)

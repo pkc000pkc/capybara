@@ -17,7 +17,8 @@
         "user_message"
       ],
       "requiredTools": [
-        "appworld_execute"
+        "appworld_execute",
+        "appworld_readonly_execute"
       ],
       "examples": [
         {

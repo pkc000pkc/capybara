@@ -43,6 +43,33 @@ test('archived information remains out of active projection and is recallable', 
   assert.deepEqual(recalled.map((match) => match.entry.id), [entryId])
 })
 
+test('archive and recall reduce the active document while preserving the original evidence', () => {
+  const engine = ContextDocumentEngine.create({ sessionId: 's-archive-metric', projectId: 'p-archive-metric', constitutionRevision: 'v2' })
+  const relevantEvidence = engine.addEvidence({ id: 'evidence-relevant', kind: 'message', referenceId: 'message-relevant' })
+  const noiseEvidence = engine.addEvidence({ id: 'evidence-noise', kind: 'message', referenceId: 'message-noise' })
+  const relevant = engine.addCandidate({ id: 'candidate-relevant', source: { actor: 'memory', sourceId: 'memory-relevant', capturedAt: '2026-11-11T00:00:00.000Z' }, rawArtifactId: 'artifact-relevant', normalizedContent: '当前任务需要保留的关键约束', evidenceRefs: [relevantEvidence.id] })
+  const noise = engine.addCandidate({ id: 'candidate-noise', source: { actor: 'memory', sourceId: 'memory-noise', capturedAt: '2026-11-11T00:00:00.000Z' }, rawArtifactId: 'artifact-noise', normalizedContent: '与当前任务无关的旧会议备注', evidenceRefs: [noiseEvidence.id] })
+  const initialProjection = engine.project({ id: 'archive-metric-add', maxCharacters: 4096 })
+  const addedRelevant = engine.apply(engine.propose({ projection: initialProjection, candidateId: relevant.id, target: { section: 'information', headingPath: ['当前任务'] }, operation: 'add_entry', payload: { body: relevant.normalizedContent, evidenceRefs: [relevantEvidence.id] }, actor: 'model', idempotencyKey: 'archive-metric-add-relevant' }))
+  const relevantEntryId = addedRelevant.changedEntryIds[0] as string
+  const afterRelevantProjection = engine.project({ id: 'archive-metric-add-noise', maxCharacters: 4096 })
+  const addedNoise = engine.apply(engine.propose({ projection: afterRelevantProjection, candidateId: noise.id, target: { section: 'information', headingPath: ['历史备注'] }, operation: 'add_entry', payload: { body: noise.normalizedContent, evidenceRefs: [noiseEvidence.id] }, actor: 'model', idempotencyKey: 'archive-metric-add-noise' }))
+  const noiseEntryId = addedNoise.changedEntryIds[0] as string
+  const beforeArchive = engine.project({ id: 'archive-metric-before', maxCharacters: 4096 })
+  const archiveProjection = engine.project({ id: 'archive-metric-mark', maxCharacters: 4096, includeStatuses: ['accepted'] })
+  const archived = engine.apply(engine.propose({ projection: archiveProjection, candidateId: noise.id, target: { section: 'information', entryId: noiseEntryId }, operation: 'mark_status', payload: { status: 'archived' }, actor: 'memory', idempotencyKey: 'archive-metric-mark' }))
+  assert.equal(archived.result, 'applied')
+  const afterArchive = engine.project({ id: 'archive-metric-after', maxCharacters: 4096 })
+  assert.ok(afterArchive.markdown.length < beforeArchive.markdown.length)
+  assert.match(afterArchive.markdown, /当前任务需要保留的关键约束/u)
+  assert.doesNotMatch(afterArchive.markdown, /与当前任务无关的旧会议备注/u)
+  assert.equal(engine.snapshot().information.find(entry => entry.id === relevantEntryId)?.status, 'active')
+  const recalled = engine.recallArchivedInformation({ query: '旧会议备注' })
+  assert.equal(recalled.length, 1)
+  assert.equal(recalled[0]?.entry.id, noiseEntryId)
+  assert.deepEqual(recalled[0]?.entry.evidenceRefs, [noiseEvidence.id])
+})
+
 test('complete samples cover archive, recall, rejection, and preserved conflict and convert directly to a training example', () => {
   const recorder = new ContextTrainingRecorder()
   recorder.begin({ sampleId: 'closure-1', scope: 'session', projectId: 'p-1', sessionId: 's-1', input: input() })

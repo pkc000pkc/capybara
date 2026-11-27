@@ -15,10 +15,14 @@ description: Solve stateful AppWorld benchmark tasks through API discovery, auth
 4. Inspect only the relevant API descriptions and exact API documents. Combine related read-only
    documentation calls into one execution when practical.
 5. Obtain account credentials through the Supervisor API when authentication is required.
-6. Call the minimum application APIs needed to satisfy the instruction.
-7. Read the affected state back and confirm the requested values.
-8. Call `apis.supervisor.complete_task()` for action tasks or `apis.supervisor.complete_task(answer=value)` for information tasks.
-9. Finish only after `appworld_execute` returns `completed: true`.
+6. When `execute_workflow` is projected, combine a predictable chain of two or more
+   `appworld_execute` calls into one temporary workflow. Use direct `appworld_execute` for
+   discovery or when the next arguments depend on interpreting a result. Read-only child agents
+   may use `appworld_readonly_execute` for approved read APIs and cannot complete the task.
+7. Call the minimum application APIs needed to satisfy the instruction.
+8. Read the affected state back and confirm the requested values.
+9. Call `apis.supervisor.complete_task()` for action tasks or `apis.supervisor.complete_task(answer=value)` for information tasks.
+10. Finish only after `appworld_execute` returns `completed: true`.
 
 ## Reconstructing collection changes
 

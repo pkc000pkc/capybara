@@ -530,6 +530,23 @@ test('organizer creates evidence-bound document diffs and preserves both conflic
   assert.equal(result.history.messages[2]?.rawContent, history.snapshot().messages[2]?.rawContent)
 })
 
+test('organizer deterministically deduplicates repeated source references and records the repair', async () => {
+  const { history, project, session } = fixture()
+  const result = await organizeContext({ history: history.snapshot(), project: project.exportState(), session: session.exportState(), runtimeState: {},
+    originalSystemPrompt: '客服解题助手', chat: async request => {
+      const response = organizeResponse(request)
+      const output = JSON.parse(response.text)
+      const observation = output.observations[0]
+      observation.sourceRefs = [observation.sourceRefs[0], observation.sourceRefs[0]]
+      return { ...response, text: JSON.stringify(output) }
+    }, projectGate: () => undefined })
+  assert.ok(result)
+  assert.deepEqual(result.requests[0]?.output.observations[0]?.sourceRefs.length, 1)
+  assert.deepEqual(result.requests[0]?.normalizationWarnings, ['observations.sourceRefs'])
+  assert.equal(result.requests[0]?.supervisionEligible, false)
+  assert.ok(result.receipts.some(receipt => receipt.result === 'applied'))
+})
+
 test('organizer uses the caller-provided output budget and a non-truncating default', async () => {
   const run = async (maxOutputTokens?: number) => {
     const { history, project, session } = fixture()

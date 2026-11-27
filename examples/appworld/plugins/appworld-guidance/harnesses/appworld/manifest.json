@@ -10,7 +10,7 @@
       "priority": 100,
       "activation": { "tools": ["appworld_execute"] },
       "inputs": ["user_message"],
-      "requiredTools": ["appworld_execute"]
+      "requiredTools": ["appworld_execute", "appworld_readonly_execute"]
     }
   ]
 }

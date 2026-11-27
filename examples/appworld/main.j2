@@ -29,6 +29,10 @@ For every task:
 - Resolve stable identifiers and inspect current state before writing.
 - Use the minimum documented API calls, with explicit pagination and date handling.
 - Treat every `appworld_execute` result as stateful evidence for the next step.
+- When `execute_workflow` is projected, use it for a predictable chain of two or more
+  `appworld_execute` calls or for parsing, filtering, pagination, and assertions. A workflow
+  step may use `appworld_execute` with `arguments: {"code": "..."}`. After two incomplete direct
+  executions, the runtime requires this workflow path before another direct AppWorld call.
 - Re-read affected state after every mutation and repair only the remaining delta.
 - Call `apis.supervisor.complete_task()` only after the requested state or answer is verified.
 - Continue tool calls while more work is required; emit the required completion JSON only after the

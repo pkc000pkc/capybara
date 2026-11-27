@@ -1273,6 +1273,15 @@ export interface RuntimeEffectiveContextsState {
   items: RuntimeEffectiveContextRevision[]
 }
 
+export interface RuntimeEntitySnapshot {
+  entityType: string
+  entityId: string
+  fields: JsonObject
+  sourceArtifactId: string
+  capturedAt: string
+  hash: string
+}
+
 export interface RuntimeObservation {
   id: string
   runId: string
@@ -1283,6 +1292,7 @@ export interface RuntimeObservation {
   arguments: JsonValue
   resultArtifactId?: string
   resultPreview?: string
+  entitySnapshots?: RuntimeEntitySnapshot[]
   error?: JsonValue
   consumedByRequestArtifactId?: string
   consumedByStepId?: string
@@ -1367,7 +1377,7 @@ export interface RuntimeWorkflowNode {
   sourceStepId: string
   parentId?: string
   timelineStepId?: string
-  type: 'tool' | 'filter' | 'foreach' | 'transform' | 'assert'
+  type: 'tool' | 'filter' | 'foreach' | 'transform' | 'assert' | 'parse' | 'align' | 'validate_schema' | 'join'
   toolName?: string
   iteration?: number
   status: RuntimeWorkflowNodeStatus

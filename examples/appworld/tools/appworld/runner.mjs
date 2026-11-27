@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { assertReadonlyCode } from './readonly-policy.mjs'
 
 const workspaceDir = path.resolve(process.env.CAPYBARA_PROJECT_DIR ?? '')
 const stateFile = path.join(workspaceDir, '.capybara', 'appworld-case-state.json')
@@ -42,9 +43,10 @@ function errorProtocol() {
 
 try {
   const request = await readInput()
-  if (request.tool !== 'appworld_execute') throw new Error(`unsupported tool: ${request.tool}`)
+  if (!['appworld_execute', 'appworld_readonly_execute'].includes(request.tool)) throw new Error(`unsupported tool: ${request.tool}`)
   const code = request.arguments?.code
   if (typeof code !== 'string' || !code.trim()) throw new Error('code is required')
+  if (request.tool === 'appworld_readonly_execute') assertReadonlyCode(code)
   const state = JSON.parse(await fs.readFile(stateFile, 'utf8'))
   if (state.closedAt) throw new Error('the AppWorld case is already closed')
   const output = await post(state.endpoint, '/execute', { task_id: state.taskId, code })

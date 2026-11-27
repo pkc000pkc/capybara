@@ -351,7 +351,8 @@ test('packaged prompt assets match the reviewed sources and are bound by content
 
 test('runtime loads its own role and safely serializes data without a second template pass', () => {
   const state = { documentRevision: 1, projectionProfile: 'test', pendingCandidateCount: 0, binding: envelope().binding,
-    allowedDecisions: ['continue', 'tool_call', 'wait'] as const, runtimeState: { injected: '{{ output_schema }}' }, showDelegation: true }
+    allowedDecisions: ['continue', 'tool_call', 'wait'] as const, runtimeState: { injected: '{{ output_schema }}' },
+    workflowGuidance: { available: true, projectedTools: ['load_resources', 'execute_workflow'], trigger: 'workflow trigger test' }, showDelegation: true }
   const prompt = buildV2RuntimePrompt(state)
   assert.ok(prompt.includes('"injected":"{{ output_schema }}"'))
   assert.ok(prompt.includes('"envelopeVersion":{"const":2}'))
@@ -361,6 +362,11 @@ test('runtime loads its own role and safely serializes data without a second tem
   assert.ok(!prompt.includes('# Capybara Dream Prompt'))
   assert.ok(!prompt.includes('# Capybara Reflection Prompt'))
   assert.match(prompt, /runtime:search_resources/)
+  assert.match(prompt, /workflow trigger test/)
+  const requiredWorkflowPrompt = buildV2RuntimePrompt({ ...state,
+    workflowGuidance: { available: true, required: true, projectedTools: ['appworld_execute', 'execute_workflow'], trigger: 'workflow trigger test', requirement: 'workflow required test' },
+  })
+  assert.match(requiredWorkflowPrompt, /workflow required test/)
   assert.doesNotMatch(prompt, /local_evidence/)
   assert.match(buildV2RuntimePrompt({ ...state, showChildReview: true }), /local_evidence/)
   assert.throws(() => renderV2Prompt('runtime', {}), /INPUT_MISSING/)

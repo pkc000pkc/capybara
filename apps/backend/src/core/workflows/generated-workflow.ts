@@ -50,17 +50,108 @@ export interface WorkflowAssertStep {
   when?: string
 }
 
+export interface WorkflowParseStep {
+  id: string
+  type: 'parse'
+  operator: 'json' | 'json_lines' | 'lines'
+  input: unknown
+  when?: string
+}
+
+export interface WorkflowAlignStep {
+  id: string
+  type: 'align'
+  input: unknown
+  sourceSchema?: unknown
+  targetSchema?: unknown
+  mappings?: Array<{
+    from: string
+    to: string
+    transform?: 'identity' | 'trim' | 'string' | 'number' | 'boolean'
+    required?: boolean
+  }>
+  auto?: boolean
+  when?: string
+}
+
+export interface WorkflowValidateSchemaStep {
+  id: string
+  type: 'validate_schema'
+  input: unknown
+  schema: unknown
+  schemaId?: string
+  when?: string
+}
+
+export interface WorkflowJoinStep {
+  id: string
+  type: 'join'
+  left: unknown
+  right: unknown
+  leftKey: string
+  rightKey: string
+  cardinality?: 'one_to_one' | 'many_to_one' | 'one_to_many' | 'many_to_many'
+  joinType?: 'inner' | 'left'
+  onAmbiguous?: 'error' | 'preserve'
+  when?: string
+}
+
 export type GeneratedWorkflowStep =
   | WorkflowToolStep
   | WorkflowFilterStep
   | WorkflowForeachStep
   | WorkflowTransformStep
   | WorkflowAssertStep
+  | WorkflowParseStep
+  | WorkflowAlignStep
+  | WorkflowValidateSchemaStep
+  | WorkflowJoinStep
 
 export interface GeneratedWorkflowDefinition {
   version: 1
   goal: string
   steps: GeneratedWorkflowStep[]
+}
+
+export interface CompactWorkflowCall {
+  id: string
+  tool: string
+  args: Record<string, unknown>
+  when?: string
+}
+
+export interface CompactWorkflowOperation {
+  id: string
+  op: 'filter' | 'transform' | 'assert' | 'parse' | 'align' | 'validate_schema' | 'join' | 'foreach'
+  input?: unknown
+  expression?: string
+  operator?: string
+  fields?: string[]
+  initial?: unknown
+  pageSize?: number
+  schema?: Record<string, unknown>
+  schemaId?: string
+  sourceSchema?: unknown
+  targetSchema?: unknown
+  mappings?: Array<{ from: string; to: string; transform?: string; required?: boolean }>
+  auto?: true
+  left?: unknown
+  right?: unknown
+  leftKey?: string
+  rightKey?: string
+  cardinality?: string
+  joinType?: string
+  onAmbiguous?: string
+  tool?: string
+  args?: Record<string, unknown>
+  as?: string
+  maxItems?: number
+  when?: string
+}
+
+export interface CompactWorkflowIntent {
+  calls?: CompactWorkflowCall[]
+  operations?: CompactWorkflowOperation[]
 }
 
 export interface WorkflowCompileSummary {
@@ -97,13 +188,15 @@ export function needsWorkflowOutput(step: GeneratedWorkflowStep, sourceId: strin
   }
   if (expandedIteration) return 'arguments' in step && reads(step.arguments)
   if (step.when || step.type === 'filter') return true
+  if (step.type === 'join') return reads(step.left) || reads(step.right)
   return reads('arguments' in step ? step.arguments : 'input' in step ? step.input : undefined)
 }
 
 export const GENERATED_WORKFLOW_PARAMETERS = {
   type: 'object',
-  required: ['version', 'goal', 'steps'],
+  required: ['version', 'goal'],
   additionalProperties: false,
+  anyOf: [{ required: ['steps'] }, { required: ['intent'] }],
   properties: {
     version: { const: 1 },
     goal: { type: 'string', minLength: 1, maxLength: 500 },
@@ -180,8 +273,84 @@ export const GENERATED_WORKFLOW_PARAMETERS = {
               when: { type: 'string', minLength: 1, maxLength: 2000 },
             },
           },
+          {
+            type: 'object',
+            required: ['id', 'type', 'operator', 'input'],
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string', pattern: '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$' },
+              type: { const: 'parse' },
+              operator: { enum: ['json', 'json_lines', 'lines'] },
+              input: {},
+              when: { type: 'string', minLength: 1, maxLength: 2000 },
+            },
+          },
+          {
+            type: 'object',
+            required: ['id', 'type', 'input'],
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string', pattern: '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$' },
+              type: { const: 'align' },
+              input: {},
+              sourceSchema: {},
+              targetSchema: {},
+              mappings: {
+                type: 'array',
+                maxItems: 100,
+                items: {
+                  type: 'object',
+                  required: ['from', 'to'],
+                  additionalProperties: false,
+                  properties: {
+                    from: { type: 'string', minLength: 1, maxLength: 1000 },
+                    to: { type: 'string', minLength: 1, maxLength: 1000 },
+                    transform: { enum: ['identity', 'trim', 'string', 'number', 'boolean'] },
+                    required: { type: 'boolean' },
+                  },
+                },
+              },
+              auto: { const: true },
+              when: { type: 'string', minLength: 1, maxLength: 2000 },
+            },
+            anyOf: [{ required: ['mappings'] }, { required: ['auto', 'targetSchema'] }],
+          },
+          {
+            type: 'object',
+            required: ['id', 'type', 'input', 'schema'],
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string', pattern: '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$' },
+              type: { const: 'validate_schema' },
+              input: {},
+              schema: { type: 'object' },
+              schemaId: { type: 'string', minLength: 1, maxLength: 200 },
+              when: { type: 'string', minLength: 1, maxLength: 2000 },
+            },
+          },
+          {
+            type: 'object',
+            required: ['id', 'type', 'left', 'right', 'leftKey', 'rightKey'],
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string', pattern: '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$' },
+              type: { const: 'join' },
+              left: {},
+              right: {},
+              leftKey: { type: 'string', minLength: 1, maxLength: 1000 },
+              rightKey: { type: 'string', minLength: 1, maxLength: 1000 },
+              cardinality: { enum: ['one_to_one', 'many_to_one', 'one_to_many', 'many_to_many'] },
+              joinType: { enum: ['inner', 'left'] },
+              onAmbiguous: { enum: ['error', 'preserve'] },
+              when: { type: 'string', minLength: 1, maxLength: 2000 },
+            },
+          },
         ],
       },
+    },
+    intent: {
+      type: 'object',
+      additionalProperties: true,
     },
   },
 } as const
@@ -197,6 +366,54 @@ function validationMessage(validate: ValidateFunction): string {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+const COMPACT_WORKFLOW_OPS = new Set(['filter', 'transform', 'assert', 'parse', 'align', 'validate_schema', 'join', 'foreach'])
+
+function validateCompactWorkflowIntent(intent: unknown): asserts intent is CompactWorkflowIntent {
+  if (!isObject(intent)) throw new Error('generated workflow intent must be an object')
+  const keys = Object.keys(intent)
+  if (keys.some((key) => !['calls', 'operations'].includes(key))) throw new Error('generated workflow intent contains an unknown field')
+  const calls = intent.calls
+  const operations = intent.operations
+  if (!Array.isArray(calls) && !Array.isArray(operations)) throw new Error('generated workflow intent requires calls or operations')
+  if (Array.isArray(calls)) {
+    if (calls.length < 1 || calls.length > 50) throw new Error('generated workflow intent calls must contain 1 to 50 items')
+    for (const call of calls) {
+      if (!isObject(call) || typeof call.id !== 'string' || typeof call.tool !== 'string' || !isObject(call.args)) {
+        throw new Error('generated workflow intent call requires id, tool and args')
+      }
+    }
+  }
+  if (Array.isArray(operations)) {
+    if (operations.length < 1 || operations.length > 50) throw new Error('generated workflow intent operations must contain 1 to 50 items')
+    for (const operation of operations) {
+      if (!isObject(operation) || typeof operation.id !== 'string' || typeof operation.op !== 'string' || !COMPACT_WORKFLOW_OPS.has(operation.op)) {
+        throw new Error('invalid generated workflow intent operation: requires a supported id and op')
+      }
+    }
+  }
+}
+
+function expandCompactWorkflowIntent(value: unknown): unknown {
+  if (!isObject(value)) return value
+  if (!('intent' in value)) return value.version === '1' ? { ...value, version: 1 } : value
+  if ('steps' in value) throw new Error('generated workflow cannot contain both steps and intent')
+  const intent = value.intent
+  validateCompactWorkflowIntent(intent)
+  const calls = Array.isArray(intent.calls) ? intent.calls.map((call) => {
+    if (!isObject(call)) throw new Error('generated workflow intent call must be an object')
+    const { args, ...rest } = call
+    return { ...rest, type: 'tool', arguments: args }
+  }) : []
+  const operations = Array.isArray(intent.operations) ? intent.operations.map((operation) => {
+    if (!isObject(operation) || typeof operation.op !== 'string') throw new Error('generated workflow intent operation must contain op')
+    const { op, args, ...rest } = operation
+    const expanded = { ...rest, type: op, ...(op === 'foreach' ? { arguments: args ?? {} } : {}) }
+    return expanded
+  }) : []
+  const { intent: _intent, ...withoutIntent } = value
+  return { ...withoutIntent, ...(value.version === '1' ? { version: 1 } : {}), steps: [...calls, ...operations] }
 }
 
 function pathTokens(reference: string): string[] {
@@ -231,10 +448,19 @@ export function parseGeneratedWorkflow(
   value: unknown,
   availableTools: ReadonlyMap<string, string>,
 ): GeneratedWorkflowDefinition {
-  if (!validateDefinition(value)) {
+  // Some provider-native tool decoders preserve the literal `"1"` even
+  // though the schema advertises a numeric constant. This is the only
+  // coercion accepted at the workflow boundary. All other fields remain
+  // strictly schema-validated.
+  const versionNormalized = isObject(value) && value.version === '1' ? { ...value, version: 1 } : value
+  if (!validateDefinition(versionNormalized)) {
     throw new Error(`generated workflow is invalid: ${validationMessage(validateDefinition)}`)
   }
-  const definition = structuredClone(value) as GeneratedWorkflowDefinition
+  const normalized = expandCompactWorkflowIntent(versionNormalized)
+  if (!validateDefinition(normalized)) {
+    throw new Error(`expanded generated workflow is invalid: ${validationMessage(validateDefinition)}`)
+  }
+  const definition = structuredClone(normalized) as GeneratedWorkflowDefinition
   const ids = new Set<string>()
   for (const step of definition.steps) {
     if (ids.has(step.id)) throw new Error(`generated workflow has duplicate step id: ${step.id}`)
@@ -275,6 +501,12 @@ export function parseGeneratedWorkflow(
     if (step.type === 'transform' && step.operator === 'paginate' && !step.pageSize && !step.expression) {
       throw new Error(`generated workflow transform ${step.id} requires pageSize or expression`)
     }
+    if (step.type === 'align' && (!step.mappings || step.mappings.length === 0) && !step.auto) {
+      throw new Error(`generated workflow align ${step.id} requires mappings or auto=true`)
+    }
+    if (step.type === 'align' && step.auto && !isObject(step.targetSchema)) {
+      throw new Error(`generated workflow align ${step.id} automatic mode requires targetSchema`)
+    }
   }
   return definition
 }
@@ -289,7 +521,7 @@ export function compileGeneratedWorkflow(
     graphHash: createHash('sha256').update(serialized).digest('hex'),
     nodeCount: definition.steps.length,
     toolNodeCount: definition.steps.filter(step => step.type === 'tool' || step.type === 'foreach').length,
-    deterministicNodeCount: definition.steps.filter(step => step.type === 'filter' || step.type === 'transform' || step.type === 'assert').length,
+    deterministicNodeCount: definition.steps.filter(step => ['filter', 'transform', 'assert', 'parse', 'align', 'validate_schema', 'join'].includes(step.type)).length,
     foreachNodeCount: definition.steps.filter(step => step.type === 'foreach').length,
     maxForeachItems: definition.steps.reduce((max, step) => step.type === 'foreach' ? Math.max(max, step.maxItems ?? 20) : max, 0),
     semanticNodeCount: 0,

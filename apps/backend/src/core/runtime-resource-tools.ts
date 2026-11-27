@@ -402,6 +402,7 @@ export const INTERNAL_RESOURCE_TOOLS: InternalResourceToolDefinition[] = [
     name: 'execute_workflow',
     sideEffects: 'workspace-write', replay: 'confirm',
     descriptionVariable: 'workflow_execution_tool_description',
+    defaultDescription: 'Generate and execute one temporary workflow when two or more actions are already predictable, when tool results need parsing, alignment, validation, filtering, transformation, joining, batching, or assertions, or when repeated tool calls can be combined. After load_resources, prefer this tool before a predictable chain of individual calls. Use only currently projected tools. Keep interpretation-dependent, human-confirmed, and irreversible actions as regular tool calls. For compact output, send version, goal, and intent with calls using args and operations using op. RuntimeLoop expands intent into the canonical steps graph before validation and execution. For AppWorld, appworld_execute may be a workflow tool or foreach node. The top-level version field must be the number 1, not the string "1".',
     parameters: GENERATED_WORKFLOW_PARAMETERS,
   },
   {

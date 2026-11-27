@@ -108,6 +108,7 @@ export interface RuntimePromptState {
   taskControl?: RuntimeTaskControl
   runtimeState?: unknown
   capabilityCatalog?: unknown
+  workflowGuidance?: unknown
   child?: boolean
   showMcpForm?: boolean
   showMcpRecovery?: boolean
@@ -138,6 +139,7 @@ export function buildV2RuntimePrompt(state: RuntimePromptState): string {
     action_transport: 'provider-native',
     runtime_state: state.runtimeState ?? state.taskControl,
     capability_catalog: state.capabilityCatalog ?? [],
+    workflow_guidance: state.workflowGuidance ?? { available: false },
     project_context_projection: '本请求的 project_context 数据区，包含投影绑定。',
     session_context_projection: '本请求的 session_context 数据区，包含投影绑定。',
     recent_messages_and_observations: '本请求独立消息通道中的近期消息与真实工具结果。',
