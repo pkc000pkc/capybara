@@ -143,7 +143,7 @@ npx tsx --conditions=development --test apps/backend/test/runtime-entity-snapsho
 | 工具结果逐实体状态快照 | `runtime-entity-snapshot.test.ts` 3/3，通过 TypeScript 编译和与 A2A 联跑 | 已具备最小版本 |
 | Benchmark 隔离模式 | `experiment-manager.test.ts` 在 `CAPYBARA_TEST_PROJECT_DIR=examples/test-project` 下 10/10，通过只读资源、样本选择、取消、预算和项目上下文只读路径 | 已具备 |
 
-P2 的本地三组策略对照已建立并通过。它验证相同只读任务在直接工具、DAG 和 A2A 路径上都能完成，并能区分模型轮次、工具轮次、确定性节点和子代理消费状态。该对照使用确定性模型模拟器，只证明 RuntimeLoop 链路和指标采集，不替代 AppWorld 官方 pass@1。已有真实整理器留出报告的独立审计也已通过 2/2，归档与召回的本地可逆性和投影缩减指标已补齐。Streamable HTTP MCP 和宿主子代理的本地协议验收已通过，长任务收益统计以及真实远端服务和外部进程宿主验收仍待正式评估。
+P2 的本地三组策略对照已建立并通过。它验证相同只读任务在直接工具、DAG 和 A2A 路径上都能完成，并能区分模型轮次、工具轮次、确定性节点和子代理消费状态。该对照使用确定性模型模拟器，只证明 RuntimeLoop 链路和指标采集，不替代 AppWorld 官方 pass@1。已有真实整理器留出报告的独立审计也已通过 2/2，归档与召回的本地可逆性和投影缩减指标已补齐。Streamable HTTP MCP、独立进程子代理宿主和远端 MCP 发现均已通过定向验收，长任务收益统计仍需在更多任务上积累。
 
 ## 9. P2 本地三组策略对照
 
@@ -180,6 +180,8 @@ node apps/backend/demo/context-quality-report-audit.mjs tmp/context-quality-acce
 ## 11. P2 MCP 和子代理宿主协议验收
 
 - `mcp-client-manager.test.ts` 的真实 Streamable HTTP 场景 1/1 通过。测试覆盖环境变量引用的认证头、工具发现、调用结果、超大响应拒绝和外部 URL 输入边界，持久化快照和结果中不包含密钥。
-- `runtime-child.test.ts` 的宿主子代理定向场景 2/2 通过。测试覆盖宿主绑定、只读能力投影和宿主变更后的 runner 保持。当前证据是 RuntimeLoop 的宿主回调契约，不等于独立进程或公网宿主验收。
+- `runtime-child.test.ts` 的宿主子代理定向场景 2/2 通过。测试覆盖宿主绑定、只读能力投影和宿主变更后的 runner 保持。
+- `runtime-child-host.test.ts` 3/3 通过。测试启动独立 Node HTTP 进程，使用 `capybara.a2a.child.v1` 传输合同，父 RuntimeLoop 完成委派、读取、消费和完成门禁。身份不匹配、动作模式和超大响应均被拒绝。
+- 远端 MCP 使用 `apps/backend/demo/mcp-remote-smoke.ts` 通过真实 Streamable HTTP 发现。命令设置 `CAPYBARA_MCP_PROXY=http://127.0.0.1:2080` 后连接 `https://mcp.deepwiki.com/mcp`，协商协议 `2026-07-28`，发现 3 个工具，状态为 `ready`。远端只做工具发现，没有执行业务调用。
 
 当前 P1 的实际剩余项是用真实 AppWorld 单题验证紧凑 Workflow 意图和 `appworld_readonly_execute` 的集成表现。整理器重复 `sourceRefs` 已完成本地闭环，但仍应在真实长轨迹中观察是否有其他格式变体。

@@ -354,11 +354,15 @@ export interface RuntimeLoopOptions {
     callId: string
     childId: string
     childSessionId: string
+    parentContext: string
     signal: AbortSignal
     allowedCapabilityIds: string[]
     allowedCapabilities?: RuntimeCapabilityBinding[]
     executionMode?: 'readonly' | 'action'
     attemptId?: string
+    maxModelRounds: number
+    maxToolRounds: number
+    maxTotalTokens: number
     authorizeAction?: (request: ChildActionRequest) => import('#protocol/runtime-protocol').RuntimeChildActionReceipt
     recordActionResult?: (result: ChildActionResult) => import('#protocol/runtime-protocol').RuntimeChildActionReceipt
     llm: RuntimeLlm
@@ -12453,8 +12457,10 @@ export class RuntimeLoop extends Loop {
       return this.childAgentHost({ goal: job.spec.goal, prompt: job.spec.prompt, projectPath: this.projectDir,
         parentSessionId: job.parentSessionId, parentTaskId: job.parentTaskId, parentRunId: job.parentRunId,
         ...(job.parentStepId ? { parentStepId: job.parentStepId } : {}), callId: job.callId, childId: job.id, childSessionId: job.childSessionId,
+        parentContext: job.spec.parentContext,
         ...(job.spec.assignment ? { planTaskId: job.spec.assignment.planTaskId, allowedCapabilities: job.spec.assignment.capabilities } : {}),
         executionMode: job.spec.executionMode ?? 'readonly', attemptId: job.spec.attemptId,
+        maxModelRounds: job.spec.maxModelRounds, maxToolRounds: job.spec.maxToolRounds, maxTotalTokens: job.spec.maxTotalTokens,
         authorizeAction: worker.authorizeAction,
         recordActionResult: worker.recordActionResult,
         signal: worker.signal, allowedCapabilityIds: job.spec.capabilityIds, llm: this.meteredLlm('child_host', worker.llm(this.llm), {

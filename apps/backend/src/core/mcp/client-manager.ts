@@ -1,6 +1,8 @@
 import { randomUUID, createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import http from 'node:http'
+import https from 'node:https'
 import { Client, StreamableHTTPClientTransport, type Tool, type Transport } from '@modelcontextprotocol/client'
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/client/stdio'
 import { Ajv, type ValidateFunction } from 'ajv'
@@ -11,6 +13,7 @@ import { readMcpInputs, type McpInputContinuation, type McpInputData } from '#co
 import { capabilityHash, type RuntimeCapability } from '#core/runtime-capability-projection'
 import type { ToolDefinition, JsonObject, RuntimeMcpState } from '#protocol/runtime-protocol'
 import type { ToolCallRequest, ToolCallResult, ToolCallErrorCode } from '#core/tools/types'
+import { isLoopbackModelHost, modelProxyAgent } from '#util/llm/proxy'
 
 type Provenance = NonNullable<ToolCallResult['source']>
 type InputHandler = { continuation?: McpInputContinuation; register: (authority: string, source: Provenance, data: McpInputData) => string;
@@ -42,7 +45,12 @@ export function mcpToolName(serverId: string, toolName: string): string {
 
 /** Bound bytes before the SDK buffers/parses a remote HTTP body. */
 async function boundedMcpFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
-  const response = await fetch(input, init), maximum = 5 * 1024 * 1024
+  const target = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url)
+  // The model proxy is a Node HTTP Agent rather than an Undici dispatcher.
+  // Keep loopback fixtures on native fetch and use the same Agent-based path
+  // as model transport for remote MCP endpoints.
+  const response = isLoopbackModelHost(target.hostname) ? await fetch(input, init) : await fetchMcpThroughNode(target, init)
+  const maximum = 5 * 1024 * 1024
   if (!response.body) return response
   if (Number(response.headers.get('content-length')) > maximum) { await response.body.cancel(); throw new Error('MCP_OUTPUT_LIMIT') }
   const reader = response.body.getReader(); let received = 0
@@ -58,6 +66,43 @@ async function boundedMcpFetch(input: string | URL | Request, init?: RequestInit
     },
     cancel: reason => reader.cancel(reason),
   }), { status: response.status, statusText: response.statusText, headers: response.headers })
+}
+
+function fetchMcpThroughNode(target: URL, init?: RequestInit): Promise<Response> {
+  const headers = Object.fromEntries(new Headers(init?.headers).entries())
+  const method = init?.method ?? 'GET'
+  const body = init?.body
+  const bodyBytes = body === undefined || body === null ? undefined
+    : typeof body === 'string' ? Buffer.from(body)
+      : body instanceof Uint8Array ? Buffer.from(body)
+        : body instanceof ArrayBuffer ? Buffer.from(body) : undefined
+  if (body !== undefined && body !== null && !bodyBytes) return Promise.reject(new Error('MCP_REQUEST_BODY_UNSUPPORTED'))
+  return new Promise((resolve, reject) => {
+    const transport = target.protocol === 'https:' ? https : http
+    const request = transport.request(target, { method, headers, agent: modelProxyAgent }, response => {
+      if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400) {
+        response.resume(); reject(new Error('MCP_REDIRECT_FORBIDDEN')); return
+      }
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          response.on('data', chunk => controller.enqueue(new Uint8Array(chunk)))
+          response.on('end', () => controller.close())
+          response.on('error', error => controller.error(error))
+        },
+        cancel(reason) { response.destroy(reason instanceof Error ? reason : undefined) },
+      })
+      const responseHeaders: Record<string, string> = {}
+      for (const [key, value] of Object.entries(response.headers)) if (value !== undefined) responseHeaders[key] = Array.isArray(value) ? value.join(', ') : value
+      resolve(new Response(stream, { status: response.statusCode ?? 500, statusText: response.statusMessage, headers: responseHeaders }))
+    })
+    const signal = init?.signal
+    const abort = () => request.destroy(new Error('MCP_ABORTED'))
+    if (signal?.aborted) { abort(); reject(new Error('MCP_ABORTED')); return }
+    signal?.addEventListener('abort', abort, { once: true })
+    request.once('error', error => reject(error))
+    request.once('close', () => signal?.removeEventListener('abort', abort))
+    if (bodyBytes) request.end(bodyBytes); else request.end()
+  })
 }
 
 /** Real MCP connections. Discovery may reconnect; business calls never do. */

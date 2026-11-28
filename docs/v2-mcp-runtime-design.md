@@ -82,6 +82,8 @@ CapabilityProjection 保留 MCP 来源及具体绑定。入队、准备事件后
 
 stdio 接收缓冲与 HTTP 响应读取均有限额；HTTP 在 SDK 完整缓冲/解析前限制字节数，完整返回另作结果大小检查。目录、schema 和结果都按外部材料处理。
 
+远端 Streamable HTTP 在桌面代理开启时沿用模型请求的代理偏好。回环地址保持直连，非回环地址使用 Node HTTP Agent 建立连接，避免把 Node Agent 错误地当成 Undici dispatcher。`apps/backend/demo/mcp-remote-smoke.ts` 可对公开或项目配置的只读端点执行发现验收。
+
 ## 4. 副作用登记与持久化
 
 写调用在发出业务 RPC 前，向真实 SQLite `runtime_mcp_operations` 表登记 operationId、参数摘要与来源。登记失败不分发；同 session 的相同未结算动作不能再次登记。RPC ID 在传输边界关联，真实结果返回后再结算。

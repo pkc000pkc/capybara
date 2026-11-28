@@ -128,6 +128,8 @@ accept/reject/conflict 表示父层已经决定如何处理该来源；needs_mor
 - 消费审核支持 `accept`、`reject`、`conflict` 和 `needs_more_evidence`。
 - 被拒绝或产生冲突的子结果可以进入父代理接管流程。
 - 迟到结果作为独立记录保留，不覆盖已经结算的子任务状态。
+- `createHttpChildAgentHost` 已提供 `capybara.a2a.child.v1` 的只读 HTTP 适配器，外部响应必须回显请求身份并通过大小、超时和 JSON 结构校验。
+- 独立进程宿主、父层读取/消费和完成门禁已有 3/3 定向测试，动作模式仍由本地租约路径承载。
 
 ### 7.2 当前执行边界
 
@@ -421,6 +423,42 @@ AppWorld 的 `appworld_execute` 具有外部副作用，并且声明 `replay: ne
 9. 两个只读子任务在同一委派批次并行执行，父代理在批次结算前不能调用业务工具。
 10. 一个外部写入子任务持有动作租约，另一个外部写入子任务必须等待租约结算。
 11. 所有子任务结果、动作回执和消费回执可以在父运行中重放和审计。
+
+### 9.8 第八阶段，外部子代理宿主传输合同
+
+`childAgentHost` 的进程内回调不能作为外部宿主验收证据。外部宿主使用独立 HTTP 请求承载一个只读子任务，运行时发送版本化、可重放和有界的请求包，宿主返回带身份回显的结果包。模型对象、回调函数和密钥不进入请求包。
+
+请求包固定为 `capybara.a2a.child.v1`：
+
+```json
+{
+  "protocol": "capybara.a2a.child.v1",
+  "requestId": "parent-call-id",
+  "parent": {"sessionId": "...", "taskId": "...", "runId": "...", "stepId": "..."},
+  "child": {"childId": "...", "sessionId": "..."},
+  "attemptId": "...",
+  "mode": "readonly",
+  "goal": "局部目标",
+  "prompt": "受限任务说明",
+  "parentContext": "有界上下文胶囊",
+  "projectPath": "宿主工作目录",
+  "capabilityIds": ["runtime:search_resources"],
+  "capabilities": [],
+  "budget": {"maxModelRounds": 4, "maxToolRounds": 8, "maxTotalTokens": 40000}
+}
+```
+
+响应包必须回显 `protocol`、`requestId`、`childId` 和 `childSessionId`，并只携带 `ok`、`output`、`evidence`、`actionReceipts`、`error`、`startedAt`、`completedAt` 和 `durationMs`。运行时拒绝协议版本、请求身份、JSON 结构、响应大小或超时不符合合同的结果。HTTP 宿主不接收 `llm`、`AbortSignal`、授权回调或结果回写回调，避免把父进程闭包伪装成远程能力。
+
+第一阶段外部宿主只接受 `readonly`。`action` 任务必须继续走本地宿主，或者在另行定义动作桥接协议并绑定真实动作租约后才允许外置。外部宿主失败、超时、身份回显不一致或返回未知副作用时，子任务按真实失败/未知状态结算，不能自动重试。
+
+外部宿主验收方案如下：
+
+1. 启动独立进程 HTTP 宿主，不共享父 RuntimeLoop 的函数或内存状态。
+2. 父 RuntimeLoop 通过 HTTP 适配器提交只读子任务，宿主校验请求包并回传身份匹配的结果。
+3. 父层读取并消费结果，结果包进入原有 artifact、evidence 和完成门禁。
+4. 通过身份篡改、协议版本错误、超大响应、超时和非只读模式拒绝用例。
+5. 检查父子身份、attempt、能力投影、预算字段和结果 hash 在 trace 中可回放。
 
 ## 10. 第一版独立执行边界
 
