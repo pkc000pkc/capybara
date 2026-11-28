@@ -16,6 +16,16 @@ coverage/
 **/coverage/
 *.tsbuildinfo
 
+# Generated benchmark and acceptance scratch
+**/__pycache__/
+docs/.capybara/
+docs/acceptance-assets/
+examples/appworld/tmp/
+examples/qingjian-generated/
+examples/stock-analysis/
+experiments/
+tmp/
+
 # Local environment and logs
 .env
 .env.*
