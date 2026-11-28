@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Context Intelligence Operators</title>
+<style>
+:root{--bg:#0b1020;--panel:#151e35;--panel2:#1c2947;--line:#40527d;--text:#eef4ff;--muted:#aebddc;--blue:#6d8df0;--teal:#44c6bd;--gold:#e7ad5c;--red:#ef7777;--green:#77d69b}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#0b1020,#17223c);color:var(--text);font:14px/1.55 Segoe UI,Arial,sans-serif}main{max-width:1480px;margin:auto;padding:34px 42px 70px}h1{margin:0 0 6px;font-size:30px}h2{font-size:20px;margin:36px 0 14px}.lead{color:var(--muted);max-width:1000px}.legend{display:flex;gap:10px;flex-wrap:wrap;margin:24px 0}.pill{padding:5px 10px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:#111a2e}.flow{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;align-items:stretch;margin:24px 0}.flow .node{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px}.flow .node:not(:last-child):after{content:'→';position:absolute;right:-17px;top:34px;color:var(--gold);font-size:23px;z-index:2}.node b{display:block;color:#fff;margin-bottom:5px}.node span{font-size:12px;color:var(--muted)}.operator-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}.op{background:rgba(21,30,53,.96);border:1px solid var(--line);border-left:5px solid var(--blue);border-radius:13px;padding:18px;box-shadow:0 8px 24px #0003}.op.teal{border-left-color:var(--teal)}.op.gold{border-left-color:var(--gold)}.op.red{border-left-color:var(--red)}.op.green{border-left-color:var(--green)}.op h3{margin:0 0 4px;font-size:17px}.tag{font:12px Consolas,monospace;color:#b8caff}.op p{margin:10px 0;color:var(--muted)}.spec{display:grid;grid-template-columns:92px 1fr;gap:5px 10px;margin-top:12px}.spec dt{color:#8ea4d4}.spec dd{margin:0;color:#e0e9fc;word-break:break-word}code,pre{font-family:Consolas,monospace}pre{background:#0a1224;border:1px solid #2b3b62;border-radius:8px;padding:12px;overflow:auto;color:#dfe9ff;font-size:12px}.contract{display:grid;grid-template-columns:1fr 1fr;gap:16px}.box{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}.box h3{margin-top:0}.risk{color:#ffd18a}.small{font-size:12px;color:var(--muted)}@media(max-width:1000px){.flow{grid-template-columns:1fr}.flow .node:not(:last-child):after{content:'↓';right:50%;top:auto;bottom:-27px}.operator-grid,.contract{grid-template-columns:1fr}}
+</style>
+</head>
+<body><main>
+<h1>Context Intelligence Model · 算子级设计</h1>
+<p class="lead">单模型多任务上下文编译器。每个算子只做一类可验证的转换；模型提出结构化结果，Runtime 负责版本、证据、权限和状态提交。</p>
+<div class="legend"><span class="pill">蓝：编码与语义理解</span><span class="pill">青：缓存与记忆</span><span class="pill">金：结构化解码与计划</span><span class="pill">绿：确定性校验</span><span class="pill">红：冲突与人工复核</span></div>
+
+<h2>总数据流</h2>
+<div class="flow"><div class="node"><b>InputNormalize</b><span>消息、工具结果、Markdown、缓存</span></div><div class="node"><b>SemanticEncode</b><span>语义单元、实体、证据表示</span></div><div class="node"><b>TaskRoute</b><span>单模型多任务调用</span></div><div class="node"><b>ConstrainedDecode</b><span>Typed Proposal / Diff</span></div><div class="node"><b>RuntimeApply</b><span>校验、提交、receipt</span></div></div>
+
+<h2>编码与理解算子</h2><div class="operator-grid">
+<article class="op"><h3>1. InputNormalize</h3><div class="tag">raw → NormalizedBlock[]</div><p>把不同来源转换为统一输入块，保留来源和原始内容的可追溯关系。</p><dl class="spec"><dt>输入</dt><dd>ChatMessage、ToolResult、Markdown、MemoryRecord</dd><dt>处理</dt><dd>识别来源、时间、媒体类型、原始 hash；切分 section / entry / evidence 边界</dd><dt>输出</dt><dd>带 <code>blockId/sourceId/type/capturedAt/contentHash</code> 的标准块</dd><dt>副作用</dt><dd>无；只产生候选输入</dd><dt>失败</dt><dd>来源缺失、编码错误、内容无法解析 → 标记 malformed</dd></dl></article>
+<article class="op"><h3>2. SemanticEncode</h3><div class="tag">NormalizedBlock[] → SemanticUnit[]</div><p>从非结构化块中抽取事实、事件、状态、约束、未知和后续事项。</p><dl class="spec"><dt>输入</dt><dd>标准块 + 当前任务 + 相关活动条目</dd><dt>处理</dt><dd>共享 Transformer 编码 token；entry/evidence 边界通过特殊标记编码</dd><dt>输出</dt><dd><code>entity/event/fact/state/constraint/open_question/plan</code></dd><dt>副作用</dt><dd>无；语义单元进入候选区</dd><dt>失败</dt><dd>低置信度或字段不足 → <code>needs_more_evidence</code></dd></dl></article>
+<article class="op"><h3>3. EntityAlign</h3><div class="tag">SemanticUnit + EntryIndex → EntityLink[]</div><p>判断新信息对应已有实体、事件或状态，避免相似文本被错误合并。</p><dl class="spec"><dt>输入</dt><dd>新语义单元 + 实体索引 + 时间和来源信息</dd><dt>处理</dt><dd>结合名称、类型、ID、时间、关系和向量相似度进行对齐</dd><dt>输出</dt><dd><code>same / possible_same / different / unresolved</code></dd><dt>副作用</dt><dd>更新实体候选索引，不改变事实状态</dd><dt>失败</dt><dd><code>possible_same</code> 或 unresolved → 禁止自动合并</dd></dl></article>
+<article class="op"><h3>4. RelationClassify</h3><div class="tag">OldUnit + NewUnit → RelationDecision</div><p>判断新旧信息是重复、补充、覆盖、冲突、过期还是无关。</p><dl class="spec"><dt>输入</dt><dd>已对齐的新旧语义单元及其 evidence</dd><dt>处理</dt><dd>比较实体、属性、时间、来源可信度和状态语义</dd><dt>输出</dt><dd><code>duplicate / refinement / supersedes / contradiction / new / expired</code></dd><dt>副作用</dt><dd>无</dd><dt>失败</dt><dd>证据不足时保留为 conflict 或 candidate</dd></dl></article>
+</div>
+
+<h2>文档与记忆算子</h2><div class="operator-grid">
+<article class="op teal"><h3>5. DocumentPlan</h3><div class="tag">SemanticUnit[] + RelationDecision[] → DocumentPlan</div><p>规划文档如何重组，避免每轮重新生成整篇 Markdown。</p><dl class="spec"><dt>输入</dt><dd>当前信息条目 + 新语义单元 + 关系判断</dd><dt>处理</dt><dd>稳定章节排序；只操作受影响条目；保留 evidence 引用</dd><dt>输出</dt><dd><code>keep / merge / replace / conflict / new / archive</code> 计划</dd><dt>副作用</dt><dd>无；计划等待 diff 生成</dd><dt>失败</dt><dd>出现跨实体合并或证据断链 → request_review</dd></dl></article>
+<article class="op teal"><h3>6. ArchiveScore</h3><div class="tag">Entry + Task + MemoryValue → ArchiveProposal</div><p>判断当前条目是否可以从活动投影归档，同时保留长期记忆。</p><dl class="spec"><dt>输入</dt><dd>条目、当前任务、重复度、时效、召回价值</dd><dt>处理</dt><dd>计算低相关性、被覆盖程度、token 成本、关键约束风险</dd><dt>输出</dt><dd>归档目标、理由、风险、recallKeys、protectedItems</dd><dt>副作用</dt><dd>无；不得直接移动条目</dd><dt>失败</dt><dd>关键约束或唯一证据风险高 → 保留 active</dd></dl></article>
+<article class="op teal"><h3>7. MemoryRecall</h3><div class="tag">Task + Query → MemoryCandidate[]</div><p>从长期归档中召回与当前任务相关的信息。</p><dl class="spec"><dt>输入</dt><dd>任务目标、实体、时间、未完成事项、检索结果</dd><dt>处理</dt><dd>实体、关键词、时间、向量和任务相关性多路排序</dd><dt>输出</dt><dd>带原始来源、证据、版本和召回理由的 candidate</dd><dt>副作用</dt><dd>只进入候选区，不直接恢复为事实</dd><dt>失败</dt><dd>时效冲突或证据过期 → stale / conflict</dd></dl></article>
+<article class="op teal"><h3>8. ProjectionSelect</h3><div class="tag">Document + Candidates + Budget → ProjectionPlan</div><p>在 token 预算内选择当前大模型真正需要看到的内容。</p><dl class="spec"><dt>输入</dt><dd>active entries、pending candidates、任务约束、字符预算</dd><dt>处理</dt><dd>保护目标/约束/未完成事项；按相关性和风险排序；生成反事实投影</dd><dt>输出</dt><dd>source IDs、selectionReasons、truncatedSections、contentHash</dd><dt>副作用</dt><dd>生成投影，不改变源文档</dd><dt>失败</dt><dd>预算不足以容纳保护项 → request_review</dd></dl></article>
+</div>
+
+<h2>解码与提交算子</h2><div class="operator-grid">
+<article class="op gold"><h3>9. PlanToDiff</h3><div class="tag">DocumentPlan → DiffProposal</div><p>将自然语言计划转换为有限操作集合，禁止模型直接重写 Markdown。</p><dl class="spec"><dt>输入</dt><dd>DocumentPlan、目标条目、证据和文档 revision</dd><dt>处理</dt><dd>生成 add/replace/append/archive/recall/mark_conflict 操作</dd><dt>输出</dt><dd>Typed Diff：targetId、expectedHash、evidenceRefs、idempotencyKey</dd><dt>副作用</dt><dd>无；只提交 proposal</dd><dt>失败</dt><dd>目标不存在或 evidence 缺失 → rejected proposal</dd></dl></article>
+<article class="op gold"><h3>10. ConstrainedDecode</h3><div class="tag">ModelLogits → SchemaValidOutput</div><p>在 token 级别限制输出，使模型只能生成合法的结构化协议。</p><dl class="spec"><dt>输入</dt><dd>任务 schema、合法 ID 集合、模型 logits</dd><dt>处理</dt><dd>JSON Schema / grammar / token mask；枚举值和 ID 复制约束</dd><dt>输出</dt><dd>可解析的 Extract、Archive、Recall 或 Diff envelope</dd><dt>副作用</dt><dd>无</dd><dt>失败</dt><dd>schema 无法完成 → 有限修复；仍失败 → no-op / request_review</dd></dl></article>
+<article class="op green"><h3>11. EvidenceGate</h3><div class="tag">Proposal + EvidenceStore → GateDecision</div><p>检查每个事实变化是否由真实、存在且相关的证据支撑。</p><dl class="spec"><dt>输入</dt><dd>proposal、evidenceRefs、source hash、观察时间</dd><dt>处理</dt><dd>检查引用存在、来源匹配、时效和候选状态</dd><dt>输出</dt><dd><code>accept / reject / needs_more_evidence</code></dd><dt>副作用</dt><dd>生成审计 receipt</dd><dt>失败</dt><dd>伪造、缺失或不匹配 → reject</dd></dl></article>
+<article class="op green"><h3>12. RevisionApply</h3><div class="tag">ValidatedDiff + Document → NewDocument</div><p>以确定性方式提交变更，处理并发、重复和冲突。</p><dl class="spec"><dt>输入</dt><dd>通过门禁的 diff、当前 document revision</dd><dt>处理</dt><dd>校验 baseRevision、expectedHash、权限和 idempotencyKey</dd><dt>输出</dt><dd>新版本 ContextDocument + ApplyReceipt</dd><dt>副作用</dt><dd>更新 active/archive/candidate 状态</dd><dt>失败</dt><dd>stale revision → conflict；重复 key → 返回原 receipt</dd></dl></article>
+</div>
+
+<h2>模型内部缓存与输出契约</h2><div class="contract"><div class="box"><h3>缓存分层</h3><pre>L0 任务前缀：目标、约束、最近消息
+L1 活动条目：当前投影候选
+L2 语义摘要：章节、实体、事件状态
+L3 归档记忆：原文、摘要、证据、embedding
+
+KV Cache：只缓存当前请求的稳定前缀
+Semantic Cache：长期保存，可版本化、可召回</pre></div><div class="box"><h3>稳定输出契约</h3><pre>模型输出 → grammar constrained decoding
+           → JSON parse
+           → Typed Envelope 校验
+           → evidence / revision / hash gate
+           → ApplyReceipt
+
+字段必须包括：
+operation, documentId, baseRevision,
+targetId, expectedHash, evidenceRefs,
+reasonCode, confidence, risk, idempotencyKey</pre></div></div>
+
+<h2>安全状态流</h2><div class="box"><pre>raw input
+  → candidate
+  → evidence reviewed
+  → proposal
+  → accepted / conflict / rejected
+  → active 或 archived
+
+archived
+  → recalled_candidate
+  → evidence reviewed
+  → accepted
+  → active
+
+任何一步都不能跳过 Runtime 校验。</pre><p class="small risk">原则：模型负责提出语义操作，Runtime 负责决定操作是否可以改变系统状态。</p></div>
+<h2>状态变化与流转</h2>
+<div class="box"><div class="flow" style="grid-template-columns:repeat(4,1fr)">
+  <div class="node"><b>raw</b><span>原始消息、工具结果、网页内容</span></div>
+  <div class="node"><b>candidate</b><span>已抽取但尚未确认的语义单元</span></div>
+  <div class="node"><b>active</b><span>已确认，可进入当前投影</span></div>
+  <div class="node"><b>archived</b><span>长期记忆，可按需召回</span></div>
+</div>
+<div class="flow" style="grid-template-columns:repeat(4,1fr)">
+  <div class="node" style="border-color:var(--gold)"><b>conflict</b><span>新旧证据矛盾，保留双方</span></div>
+  <div class="node" style="border-color:var(--red)"><b>stale</b><span>来源过期或被新状态覆盖</span></div>
+  <div class="node" style="border-color:var(--teal)"><b>recalled_candidate</b><span>从归档召回，等待重新审核</span></div>
+  <div class="node" style="border-color:var(--green)"><b>rejected</b><span>证据不足或协议校验失败</span></div>
+</div>
+<pre>raw
+  └─ InputNormalize → candidate
+       ├─ EvidenceGate 通过 → active
+       ├─ EvidenceGate 拒绝 → rejected
+       ├─ 新旧信息不一致 → conflict
+       ├─ 新版本覆盖旧版本 → 旧条目 stale
+       └─ ArchiveScore 通过 → archived
+                              └─ MemoryRecall → recalled_candidate
+                                   ├─ 重新验证通过 → active
+                                   ├─ 发现冲突 → conflict
+                                   └─ 证据过期 → stale
+
+active → ProjectionSelect → 当前模型投影
+archived 不直接进入投影，必须经过 recalled_candidate。</pre>
+<p class="small risk">状态变化原则：归档是可逆的投影变化；召回是重新进入候选审核，不会绕过证据门禁。</p></div>
+
+<h2>训练正向传播与反向传播</h2>
+<div class="box"><div class="flow" style="grid-template-columns:repeat(6,1fr)">
+  <div class="node"><b>样本</b><span>Context blocks + target schema</span></div>
+  <div class="node"><b>Tokenize</b><span>token / task / entry markers</span></div>
+  <div class="node"><b>Backbone</b><span>Transformer hidden states</span></div>
+  <div class="node"><b>Task Head</b><span>extract / archive / diff</span></div>
+  <div class="node"><b>Constrained logits</b><span>合法 schema 空间</span></div>
+  <div class="node"><b>Loss</b><span>token + field + relation</span></div>
+</div>
+<pre>正向传播（Forward）
+
+输入样本 x
+  → Tokenizer(x)
+  → Embedding + Position / Section 标记
+  → Transformer Backbone
+  → 共享隐藏状态 H
+  → 任务路由 token 选择任务表示 H_task
+  → Task-specific schema projection
+  → logits
+  → grammar mask / valid-ID mask
+  → 结构化预测 ŷ
+  → 与标注 y 比较生成 Loss
+
+Loss = λ₁·L_token
+     + λ₂·L_schema
+     + λ₃·L_relation
+     + λ₄·L_evidence
+     + λ₅·L_diff
+     + λ₆·L_archive
+
+反向传播（Backward）
+
+Loss
+  → ∂Loss/∂logits
+  → 通过 schema projection 反传
+  → 通过 task route 反传到共享隐藏状态 H
+  → 通过 Transformer layers 反传
+  → 只更新 LoRA / adapter 参数
+  → gradient clipping
+  → optimizer step
+  → 更新模型参数 θ
+
+冻结项：base model weights、Runtime 规则、evidence store、文档状态。</pre></div>
+
+<h2>多任务训练批次结构</h2>
+<div class="contract"><div class="box"><h3>共享部分</h3><pre>同一 Backbone θ_shared
+同一 tokenizer
+同一 entry / evidence 标记
+同一基础上下文格式
+
+任务标记：
+&lt;task=extract&gt;
+&lt;task=align&gt;
+&lt;task=relation&gt;
+&lt;task=documentize&gt;
+&lt;task=archive&gt;
+&lt;task=recall&gt;
+&lt;task=diff&gt;</pre></div><div class="box"><h3>任务损失与采样</h3><pre>一个 batch 可混合多种任务，
+但每条样本只有一个主任务。
+
+建议初始采样：
+extract      25%
+align        15%
+relation     15%
+documentize  15%
+archive      10%
+recall       10%
+diff         10%
+
+训练过程中按验证集表现调整 λ。</pre></div></div>
+
+<h2>训练数据到系统状态的闭环</h2>
+<div class="box"><pre>人工确认 / Runtime receipt / 任务结果
+        ↓
+构造训练样本：旧文档 + 新观察 + evidence + 目标操作
+        ↓
+模型正向传播：生成候选抽取、关系和 diff
+        ↓
+Loss 与人工目标 / 规则目标比较
+        ↓
+反向传播：更新 LoRA adapter
+        ↓
+离线评估：结构化成功率、事实准确率、归档风险、任务保持率
+        ↓
+通过门槛后才进入 Runtime shadow mode
+        ↓
+线上 receipt 继续产生新训练样本</pre></div>
+</main></body></html>
+
