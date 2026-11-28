@@ -69,6 +69,28 @@ npx tsx --conditions=development tmp/rerun-76f2c72-1-fixed2.ts *> tmp/appworld-r
 
 本次任务通过 AppWorld 的 2/2 状态断言。与此前 727,392 总 Token 的运行相比，本轮总 Token 降至 574,452，模型请求数从 24 降至 16。下降主要来自持久化覆盖边界对旧工具历史的投影收敛，以及阶段输出上限和工具描述压缩共同生效。
 
+## 4.1 后续定向重跑
+
+在额度恢复后，对同一训练集样本 `76f2c72_1` 再执行一轮单题、单次运行。运行日志为 `tmp/appworld-rerun-76f2c72_1-20261127k.log`，运行 ID 为 `21232688-f8fe-4f0c-b5aa-a7e7989154c3`。
+
+| 指标 | 结果 |
+| --- | ---: |
+| 运行状态 | completed |
+| AppWorld 状态 | 2/2 requirement，passed |
+| 模型请求数 | 19 |
+| 实际工具调用数 | 18 |
+| `execute_workflow` 实际观察 | 6 |
+| `workflow-definition` | 6 |
+| `workflow-result` | 6 |
+| 非法工具参数 | 0 |
+| 运行错误 | 0 |
+| 输入 Token | 480,613 |
+| 输出 Token | 18,629 |
+| 总 Token | 499,242 |
+| `RUNTIME_MODEL_BUDGET_EXHAUSTED` | 未出现 |
+
+本轮的工具序列包含资源发现、直接 `appworld_execute`、多次 `execute_workflow` 和 Workflow 内部的 AppWorld 调用。Workflow 已进入工具投影并实际执行，真实 definition、result Artifact 均已生成。与上一轮 574,452 总 Token 相比，本轮减少 75,210 Token。该结果支持上下文投影边界和阶段预算调整有效，但单题仍不能代表全量题目的平均成本。
+
 ## 5. 仍需处理的运行时问题
 
 历史记录中曾出现一个上下文整理失败 Artifact：`CONTEXT_ORGANIZATION_SCHEMA: /observations/2/sourceRefs must NOT have duplicate items`。该错误当时被 schema 门禁拒绝，原始历史、Workflow Artifact 和 AppWorld 最终状态均未受影响。现已增加确定性去重、`normalizationWarnings` 和监督样本排除逻辑，重复引用由首次出现顺序归一化，其他 schema 错误仍保持拒绝。
@@ -79,7 +101,7 @@ npx tsx --conditions=development tmp/rerun-76f2c72-1-fixed2.ts *> tmp/appworld-r
 
 整理器还增加了重复 `sourceRefs` 的确定性去重。去重只保留首次出现的来源 ID，并在请求记录中写入 `normalizationWarnings`，同时将该请求标记为不可用于监督训练，避免把模型格式错误静默当成高质量样本。
 
-本轮没有再次消耗 AppWorld 额度。此前 `76f2c72_1` 的 2/2 通过结果仍是 Workflow 触发基线，专用只读包装需要后续用一条定向 AppWorld 子代理样本做集成验收。
+本轮已在额度恢复后完成一次单题重跑，结果仍为 2/2 通过。专用只读包装仍需要后续用一条定向 AppWorld 子代理样本做集成验收。
 
 ## 6. 验证命令
 
