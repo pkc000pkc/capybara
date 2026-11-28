@@ -185,3 +185,15 @@ node apps/backend/demo/context-quality-report-audit.mjs tmp/context-quality-acce
 - 远端 MCP 使用 `apps/backend/demo/mcp-remote-smoke.ts` 通过真实 Streamable HTTP 发现。命令设置 `CAPYBARA_MCP_PROXY=http://127.0.0.1:2080` 后连接 `https://mcp.deepwiki.com/mcp`，协商协议 `2026-07-28`，发现 3 个工具，状态为 `ready`。远端只做工具发现，没有执行业务调用。
 
 当前 P1 的实际剩余项是用真实 AppWorld 单题验证紧凑 Workflow 意图和 `appworld_readonly_execute` 的集成表现。整理器重复 `sourceRefs` 已完成本地闭环，但仍应在真实长轨迹中观察是否有其他格式变体。
+
+## 12. P2 工作树整理
+
+本轮将工作树按用途分开提交：
+
+- 生产代码和协议实现保留在功能提交中。
+- V2 设计、验收和训练记录单独提交为 `ae301f00`。
+- UI 回归与基准报告单独提交为 `6bca3bed`。
+- 基准辅助脚本单独提交为 `cf025b4a`。
+- 生成的运行时状态、缓存、临时日志、实验目录和批量生成样例写入 `.gitignore`，避免进入正式提交。
+
+`.gitignore` 的整理提交为 `989dd335`。当前工作树无未提交或未跟踪文件。
